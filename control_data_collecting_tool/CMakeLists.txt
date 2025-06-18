@@ -53,6 +53,10 @@ install(
 
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 
+install(
+  PROGRAMS ${CMAKE_CURRENT_SOURCE_DIR}/launch/control_data_collecting_tool.launch.py
+  DESTINATION share/${PROJECT_NAME}/launch)
+
 # Build configuration for the package
 ament_auto_package(
   INSTALL_TO_SHARE

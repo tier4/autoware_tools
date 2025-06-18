@@ -8,3 +8,9 @@ ament_auto_package(
   INSTALL_TO_SHARE
     scripts
 )
+
+install(
+  PROGRAMS ${CMAKE_CURRENT_SOURCE_DIR}/scripts/consistency_checker.py
+  PROGRAMS ${CMAKE_CURRENT_SOURCE_DIR}/scripts/lateral_deviation_monitor.py
+  DESTINATION share/${PROJECT_NAME}/scripts)
+
