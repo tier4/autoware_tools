@@ -38,6 +38,7 @@ from rosbag2_py import StorageFilter
 from rosidl_runtime_py.utilities import get_message
 from sensor_msgs.msg import PointCloud2
 from utils import get_starting_time
+from utils import get_suffix
 from utils import open_reader
 
 
@@ -95,7 +96,7 @@ class PerceptionReplayerCommon(Node):
             bags = [
                 os.path.join(args.bag, base_name)
                 for base_name in os.listdir(args.bag)
-                if base_name.endswith(args.rosbag_format)
+                if base_name.endswith(get_suffix(args.rosbag_format))
             ]
             for bag_file in sorted(bags, key=lambda b: get_starting_time(b, args.rosbag_format)):
                 self.load_rosbag(bag_file, args.rosbag_format)
@@ -129,7 +130,6 @@ class PerceptionReplayerCommon(Node):
         traffic_signals_topic = "/perception/traffic_light_recognition/traffic_signals"
         topic_filter = StorageFilter(topics=[objects_topic, ego_odom_topic, traffic_signals_topic])
         reader.set_filter(topic_filter)
-
         while reader.has_next():
             (topic, data, stamp) = reader.read_next()
             msg_type = get_message(type_map[topic])

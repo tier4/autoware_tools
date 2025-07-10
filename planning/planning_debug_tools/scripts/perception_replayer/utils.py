@@ -39,12 +39,15 @@ from sensor_msgs.msg import PointField
 from std_msgs.msg import Header
 from tf_transformations import euler_from_quaternion
 from tf_transformations import quaternion_from_euler
-from tier4_localization_msgs.srv import InitializeLocalization
+from autoware_localization_msgs.srv import InitializeLocalization
 
 
 def get_starting_time(uri: str, storage_id: str):
     info = rosbag2_py.Info().read_metadata(uri, storage_id)
     return info.starting_time
+
+def get_suffix(storage_format: str):
+    return {"sqlite3": "db3", "mcap": "mcap"}[storage_format]
 
 
 def get_rosbag_options(path: str, storage_id: str, serialization_format="cdr"):
