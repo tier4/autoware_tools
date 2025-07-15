@@ -24,6 +24,7 @@
 #include <unique_identifier_msgs/msg/uuid.hpp>
 
 #include <algorithm>
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -97,6 +98,9 @@ std::string getModuleName(const uint8_t module_type)
     case Module::INTERSECTION_OCCLUSION: {
       return "intersection_occlusion";
     }
+    case Module::SUPERVISED_PERCEPTION_FILTER: {
+      return "supervised_perception_filter";
+    }
   }
   return "NONE";
 }
@@ -118,7 +122,7 @@ bool isPathChangeModule(const uint8_t module_type)
 RTCManagerPanel::RTCManagerPanel(QWidget * parent) : rviz_common::Panel(parent)
 {
   // TODO(tanaka): replace this magic number to Module::SIZE
-  const size_t module_size = 19;
+  const size_t module_size = 20;
   auto_modes_.reserve(module_size);
   auto * v_layout = new QVBoxLayout;
   auto vertical_header = new QHeaderView(Qt::Vertical);
