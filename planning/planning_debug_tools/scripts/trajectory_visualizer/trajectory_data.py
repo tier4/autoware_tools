@@ -88,8 +88,10 @@ def get_arc_lengths(msg, zero_pose=None):
         return arc_lengths
 
     if zero_pose is not None and len(points) > 1:
-        ls = LineString([(p.pose.position.x, p.pose.position.y) for p in points])
-        p = Point(zero_pose.pose.pose.position.x, zero_pose.pose.pose.position.y)
+        coordinates = np.array([(p.pose.position.x, p.pose.position.y) for p in points])
+        ls = LineString(coordinates)
+        p_coords = np.array([zero_pose.pose.pose.position.x, zero_pose.pose.pose.position.y])
+        p = Point(p_coords)
         arc_lengths = [-ls.project(p)]
 
     for i in range(0, len(points) - 1):
