@@ -77,8 +77,11 @@ std::string getModuleName(const uint8_t module_type)
     case Module::OCCLUSION_SPOT: {
       return "occlusion_spot";
     }
+    case Module::ROUNDABOUT: {
+      return "roundabout";
+    }
   }
-  return "NONE";
+    return "NONE";
 }
 
 std::string to_string(const unique_identifier_msgs::msg::UUID & uuid)
