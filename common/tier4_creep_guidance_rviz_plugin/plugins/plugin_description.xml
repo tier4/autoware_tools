@@ -1,0 +1,9 @@
+<library path="tier4_creep_guidance_rviz_plugin">
+
+  <class
+    type="rviz_plugins::CreepGuidancePanel"
+    base_class_type="rviz_common::Panel">
+    <description>CreepGuidancePanel</description>
+  </class>
+
+</library>
