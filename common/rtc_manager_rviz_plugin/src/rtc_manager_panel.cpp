@@ -97,22 +97,33 @@ std::string getModuleName(const uint8_t module_type)
     case Module::INTERSECTION_OCCLUSION: {
       return "intersection_occlusion";
     }
+    case Module::SUPERVISED_PERCEPTION_FILTER: {
+      return "supervised_perception_filter";
+    }
+    case Module::CROSSWALK_CREEP: {
+      return "crosswalk_creep";
+    }
+    case Module::INTERSECTION_CREEP: {
+      return "intersection_creep";
+    }
   }
   return "NONE";
 }
 
 bool isPathChangeModule(const uint8_t module_type)
 {
-  if (
-    module_type == Module::LANE_CHANGE_LEFT || module_type == Module::LANE_CHANGE_RIGHT ||
-    module_type == Module::EXT_REQUEST_LANE_CHANGE_LEFT ||
-    module_type == Module::EXT_REQUEST_LANE_CHANGE_RIGHT ||
-    module_type == Module::AVOIDANCE_BY_LC_LEFT || module_type == Module::AVOIDANCE_BY_LC_RIGHT ||
-    module_type == Module::AVOIDANCE_LEFT || module_type == Module::AVOIDANCE_RIGHT ||
-    module_type == Module::GOAL_PLANNER || module_type == Module::START_PLANNER) {
-    return true;
-  }
-  return false;
+  return module_type == Module::LANE_CHANGE_LEFT || module_type == Module::LANE_CHANGE_RIGHT ||
+         module_type == Module::EXT_REQUEST_LANE_CHANGE_LEFT ||
+         module_type == Module::EXT_REQUEST_LANE_CHANGE_RIGHT ||
+         module_type == Module::AVOIDANCE_BY_LC_LEFT ||
+         module_type == Module::AVOIDANCE_BY_LC_RIGHT || module_type == Module::AVOIDANCE_LEFT ||
+         module_type == Module::AVOIDANCE_RIGHT || module_type == Module::GOAL_PLANNER ||
+         module_type == Module::START_PLANNER;
+}
+
+bool isCreepModule(const uint8_t module_type)
+{
+  return module_type == Module::CROSSWALK_CREEP || module_type == Module::INTERSECTION_CREEP;
 }
 
 RTCManagerPanel::RTCManagerPanel(QWidget * parent) : rviz_common::Panel(parent)
@@ -221,6 +232,26 @@ RTCManagerPanel::RTCManagerPanel(QWidget * parent) : rviz_common::Panel(parent)
     exe_vel_change_layout->addWidget(wait_vel_change_button_ptr_);
   }
   v_layout->addLayout(exe_vel_change_layout);
+
+  // creep execution
+  auto * exe_creep_all_layout = new QHBoxLayout;
+  {
+    exec_creep_all_button_ptr_ = new QPushButton("Execute Creep All");
+    exec_creep_all_button_ptr_->setCheckable(false);
+    exec_creep_all_button_ptr_->setStyleSheet(BG_ORANGE);
+    connect(
+      exec_creep_all_button_ptr_, &QPushButton::clicked, this,
+      &RTCManagerPanel::onClickExecuteCreepAll);
+    exe_creep_all_layout->addWidget(exec_creep_all_button_ptr_);
+    deactivate_creep_button_ptr_ = new QPushButton("Deactivate Creep");
+    deactivate_creep_button_ptr_->setCheckable(false);
+    deactivate_creep_button_ptr_->setStyleSheet(BG_ORANGE);
+    connect(
+      deactivate_creep_button_ptr_, &QPushButton::clicked, this,
+      &RTCManagerPanel::onClickDeactivateCreep);
+    exe_creep_all_layout->addWidget(deactivate_creep_button_ptr_);
+  }
+  v_layout->addLayout(exe_creep_all_layout);
 
   // execution
   auto * rtc_exe_layout = new QHBoxLayout;
@@ -356,6 +387,36 @@ void RTCManagerPanel::onClickWaitPathChange()
 {
   onClickChangeRequest(true, Command::DEACTIVATE);
 }
+void RTCManagerPanel::onClickExecuteCreepAll()
+{
+  if (!cooperate_statuses_ptr_) return;
+  if (cooperate_statuses_ptr_->statuses.empty()) return;
+  auto executable_cooperate_commands_request = std::make_shared<CooperateCommands::Request>();
+  executable_cooperate_commands_request->stamp = cooperate_statuses_ptr_->stamp;
+  // send coop request
+  for (auto status : cooperate_statuses_ptr_->statuses) {
+    if (!isCreepModule(status.module.type)) continue;
+    CooperateCommand cooperate_command = setRTCCommandFromStatus(status);
+    cooperate_command.command.type = Command::ACTIVATE;
+    executable_cooperate_commands_request->commands.emplace_back(cooperate_command);
+  }
+  client_rtc_commands_->async_send_request(executable_cooperate_commands_request);
+}
+void RTCManagerPanel::onClickDeactivateCreep()
+{
+  if (!cooperate_statuses_ptr_) return;
+  if (cooperate_statuses_ptr_->statuses.empty()) return;
+  auto executable_cooperate_commands_request = std::make_shared<CooperateCommands::Request>();
+  executable_cooperate_commands_request->stamp = cooperate_statuses_ptr_->stamp;
+  // send coop request
+  for (auto status : cooperate_statuses_ptr_->statuses) {
+    if (!isCreepModule(status.module.type)) continue;
+    CooperateCommand cooperate_command = setRTCCommandFromStatus(status);
+    cooperate_command.command.type = Command::DEACTIVATE;
+    executable_cooperate_commands_request->commands.emplace_back(cooperate_command);
+  }
+  client_rtc_commands_->async_send_request(executable_cooperate_commands_request);
+}
 void RTCManagerPanel::onClickExecution()
 {
   onClickCommandRequest(Command::ACTIVATE);
@@ -375,12 +436,8 @@ void RTCManagerPanel::onRTCStatus(const CooperateStatusArray::ConstSharedPtr msg
     rtc_table_->update();
     return;
   }
-  // this is to stable rtc display not to occupy too much
-  size_t min_display_size{5};
-  size_t max_display_size{10};
   // rtc messages are already sorted by distance
-  rtc_table_->setRowCount(
-    std::max(min_display_size, std::min(msg->statuses.size(), max_display_size)));
+  rtc_table_->setRowCount(msg->statuses.size());
   int cnt = 0;
 
   auto sorted_statuses = msg->statuses;
@@ -389,10 +446,6 @@ void RTCManagerPanel::onRTCStatus(const CooperateStatusArray::ConstSharedPtr msg
   });
 
   for (auto status : sorted_statuses) {
-    if (static_cast<size_t>(cnt) >= max_display_size) {
-      rtc_table_->update();
-      return;
-    }
     // uuid
     {
       std::stringstream uuid;

@@ -93,6 +93,8 @@ public Q_SLOTS:
   void onClickWaitPathChange();
   void onClickExecuteVelChange();
   void onClickWaitVelChange();
+  void onClickExecuteCreepAll();
+  void onClickDeactivateCreep();
 
 public:
   explicit RTCManagerPanel(QWidget * parent = nullptr);
@@ -121,6 +123,8 @@ private:
   QPushButton * wait_path_change_button_ptr_ = {nullptr};
   QPushButton * exec_vel_change_button_ptr_ = {nullptr};
   QPushButton * wait_vel_change_button_ptr_ = {nullptr};
+  QPushButton * exec_creep_all_button_ptr_ = {nullptr};
+  QPushButton * deactivate_creep_button_ptr_ = {nullptr};
   QPushButton * exec_button_ptr_ = {nullptr};
   QPushButton * wait_button_ptr_ = {nullptr};
   QLabel * num_rtc_status_ptr_ = {nullptr};
