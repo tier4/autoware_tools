@@ -44,6 +44,7 @@ class RTCManagerPanel : public rviz_common::Panel
 
 public Q_SLOTS:
   void on_click_activate_front();
+  void on_click_creep();
   void on_toggle_auto_mode_panel(bool checked);
 
 public:  // NOLINT
@@ -56,14 +57,18 @@ private:
   void on_rtc_status(const CooperateStatusArray::ConstSharedPtr msg);
   void on_auto_mode_status(const AutoModeStatusArray::ConstSharedPtr msg);
   void send_command_to(const CooperateStatus & status, uint8_t command);
+  void send_creep_command_to(const CooperateStatus & status, bool creep_enable);
   void update_front_module_button();
+  void update_creep_button();
   const CooperateStatus * find_activatable_module() const;
+  const CooperateStatus * find_creepable_module() const;
 
   // ROS
   rclcpp::Node::SharedPtr raw_node_;
   rclcpp::Subscription<CooperateStatusArray>::SharedPtr sub_rtc_status_;
   rclcpp::Subscription<AutoModeStatusArray>::SharedPtr sub_auto_mode_status_;
   rclcpp::Client<CooperateCommands>::SharedPtr client_rtc_commands_;
+  rclcpp::Client<CreepCommands>::SharedPtr client_creep_commands_;
 
   // Data
   std::shared_ptr<CooperateStatusArray> cooperate_statuses_ptr_;
@@ -73,6 +78,7 @@ private:
   RTCAutoModeTable * auto_mode_table_ = {nullptr};
   RTCStatusTableWidget * status_table_ = {nullptr};
   RTCCommandButton * activate_button_ = {nullptr};
+  RTCCommandButton * creep_button_ = {nullptr};
 
   static constexpr char AUTO_MODE_SERVICE_NAMESPACE[] = "/planning/enable_auto_mode";  // NOLINT
 };

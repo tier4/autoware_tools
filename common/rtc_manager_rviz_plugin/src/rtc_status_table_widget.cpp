@@ -28,7 +28,16 @@ namespace rviz_plugins
 
 // Define header labels (order must match Column enum)
 const QStringList RTCStatusTableWidget::HEADER_LABELS = {
-  "ID", "Module", "Safe", "Command", "Auto\nMode", "State", "Start\nDistance", "Finish\nDistance"};
+  "ID",
+  "Module",
+  "Safe",
+  "Command",
+  "Auto\nMode",
+  "State",
+  "Creep\nSupported",
+  "Creep\nTriggered",
+  "Start\nDistance",
+  "Finish\nDistance"};
 
 RTCStatusTableWidget::RTCStatusTableWidget(QWidget * parent) : QWidget(parent)
 {
@@ -117,6 +126,12 @@ void RTCStatusTableWidget::populate_row(int row, const CooperateStatus & status)
 
   // State
   set_cell(Column::State, get_state_name(status.state.type));
+
+  // Creep supported
+  set_cell(Column::CreepSupported, status.creep_supported ? "True" : "False");
+
+  // Creep triggered
+  set_cell(Column::CreepTriggered, status.creep_triggered ? "True" : "False");
 
   // Start distance
   set_cell(Column::StartDistance, fmt::format("{:.2f}", status.start_distance));
