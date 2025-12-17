@@ -73,7 +73,7 @@ TimeManagerWidget::TimeManagerWidget(
   seek_resolution_(seek_resolution)
 {
   setObjectName("PerceptionReplayer");
-  resize(480, 120);
+  resize(480, 150);
   setWindowFlags(Qt::WindowStaysOnTopHint);
 
   central_widget_ = new QWidget(this);
@@ -106,12 +106,16 @@ TimeManagerWidget::TimeManagerWidget(
   pub_goal_pose_button = new QPushButton("publish last recorded ego pose as goal pose");
   grid_layout_->addWidget(pub_goal_pose_button, 3, 0, 1, -1);
 
+  // Publish route button (reset and publish route from rosbag)
+  publish_route_button = new QPushButton("publish route");
+  grid_layout_->addWidget(publish_route_button, 4, 0, 1, -1);
+
   // Slider
   slider = new QJumpSlider(Qt::Horizontal);
   slider->setMinimum(0);
   slider->setMaximum(seek_resolution_);
   slider->setValue(0);
-  grid_layout_->addWidget(slider, 4, 0, 1, -1);
+  grid_layout_->addWidget(slider, 5, 0, 1, -1);
 
   setCentralWidget(central_widget_);
 }

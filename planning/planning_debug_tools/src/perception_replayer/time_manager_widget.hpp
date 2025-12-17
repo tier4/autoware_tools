@@ -65,6 +65,7 @@ public:
   std::vector<QPushButton *> rate_buttons;
   QPushButton * pub_recorded_ego_pose_button;
   QPushButton * pub_goal_pose_button;
+  QPushButton * publish_route_button;
 
 Q_SIGNALS:
   void windowClosed();

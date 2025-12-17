@@ -109,6 +109,7 @@ int main(int argc, char * argv[])
     }
 
     perception_replayer_param.tracked_object = parser.isSet(tracked_object_option);
+    perception_replayer_param.use_rosbag_route = false; // not used for replayer
 
     rclcpp::NodeOptions node_options;
     auto node = std::make_shared<PerceptionReplayer>(perception_replayer_param, node_options);

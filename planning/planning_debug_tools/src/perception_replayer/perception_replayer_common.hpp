@@ -39,6 +39,7 @@ struct PerceptionReplayerCommonParam
   std::string rosbag_path;
   std::string rosbag_format;
   bool tracked_object;
+  bool use_rosbag_route;
 };
 
 class PerceptionReplayerCommon : public rclcpp::Node
@@ -91,6 +92,17 @@ public:
    */
   void publish_goal_pose();
 
+  /**
+   * @brief Check and publish route messages based on current ego odom timestamp
+   * @param current_ego_odom_timestamp Current ego odom timestamp from rosbag
+   */
+  void check_and_publish_route(const rclcpp::Time & current_ego_odom_timestamp);
+
+  /**
+   * @brief Reset route cache (used in replayer when button is clicked)
+   */
+  void reset_route_cache();
+
   std::optional<Odometry> get_latest_ego_odom() const
   {
     return ego_odom_ ? std::make_optional<Odometry>(*ego_odom_) : std::nullopt;
@@ -113,6 +125,8 @@ protected:
   std::vector<utils::DataStamped<TrackedObjects>> rosbag_tracked_objects_data_;
   std::vector<utils::DataStamped<TrafficLightGroupArray>> rosbag_traffic_signals_data_;
   std::vector<utils::DataStamped<OccupancyGrid>> rosbag_occupancy_grid_data_;
+  std::vector<utils::DataStamped<RouteState>> rosbag_route_state_data_;
+  std::vector<utils::DataStamped<LaneletRoute>> rosbag_route_data_;
 
   void load_rosbag(const std::string & rosbag_path, const std::string & rosbag_format);
   std::vector<std::string> find_rosbag_files(
@@ -137,6 +151,14 @@ protected:
   rclcpp::Publisher<PoseStamped>::SharedPtr goal_as_mission_planning_goal_pub_;
 
   rclcpp::Publisher<Odometry>::SharedPtr recorded_ego_pub_;
+
+  // route publishers
+  rclcpp::Publisher<RouteState>::SharedPtr route_state_pub_;
+  rclcpp::Publisher<LaneletRoute>::SharedPtr route_pub_;
+
+  // route cache indices (tracks which routes have been published)
+  size_t next_route_state_idx_ = 0;
+  size_t next_route_idx_ = 0;
 };
 
 }  // namespace autoware::planning_debug_tools

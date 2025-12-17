@@ -107,6 +107,8 @@ void PerceptionReplayerCommon::load_rosbag(
   const std::string ego_odom_topic = "/localization/kinematic_state";
   const std::string traffic_signals_topic = "/perception/traffic_light_recognition/traffic_signals";
   const std::string occupancy_grid_topic = "/perception/occupancy_grid_map/map";
+  const std::string route_state_topic = "/planning/mission_planning/state";
+  const std::string route_topic = "/planning/mission_planning/route";
 
   // create topic filter
   rosbag2_storage::StorageFilter storage_filter;
@@ -115,6 +117,8 @@ void PerceptionReplayerCommon::load_rosbag(
     ego_odom_topic,
     traffic_signals_topic,
     occupancy_grid_topic,
+    route_state_topic,
+    route_topic,
   };
   reader->set_filter(storage_filter);
 
@@ -162,6 +166,22 @@ void PerceptionReplayerCommon::load_rosbag(
             utils::deserialize_message<OccupancyGrid>(bag_message->serialized_data);
           const rclcpp::Time timestamp(bag_message->time_stamp);
           rosbag_occupancy_grid_data_.emplace_back(timestamp, *occupancy_grid_msg);
+        }
+
+        // deserialize route_state messages
+        if (bag_message->topic_name == route_state_topic) {
+          const auto route_state_msg =
+            utils::deserialize_message<RouteState>(bag_message->serialized_data);
+          const rclcpp::Time timestamp(bag_message->time_stamp);
+          rosbag_route_state_data_.emplace_back(timestamp, *route_state_msg);
+        }
+
+        // deserialize route messages
+        if (bag_message->topic_name == route_topic) {
+          const auto route_msg =
+            utils::deserialize_message<LaneletRoute>(bag_message->serialized_data);
+          const rclcpp::Time timestamp(bag_message->time_stamp);
+          rosbag_route_data_.emplace_back(timestamp, *route_msg);
         }
       } else {
         // count messages that couldn't be deserialized
@@ -236,6 +256,14 @@ PerceptionReplayerCommon::PerceptionReplayerCommon(
     this->create_publisher<PoseWithCovarianceStamped>("/initialpose", 1);
   goal_as_mission_planning_goal_pub_ =
     this->create_publisher<PoseStamped>("/planning/mission_planning/goal", 1);
+
+  // route publishers with transient_local QoS
+  rclcpp::QoS route_qos(1);
+  route_qos.transient_local();
+  route_state_pub_ = this->create_publisher<RouteState>(
+    "/planning/mission_planning/state", route_qos);
+  route_pub_ = this->create_publisher<LaneletRoute>(
+    "/planning/mission_planning/route", route_qos);
 
   // kill online perception nodes once at initialization
   kill_online_perception_node();
@@ -451,6 +479,44 @@ void PerceptionReplayerCommon::unload_component(
                                      container_name + " {} 2>/dev/null || true";
   const int unload_result = system(unload_command.c_str());
   (void)unload_result;
+}
+
+void PerceptionReplayerCommon::check_and_publish_route(
+  const rclcpp::Time & current_ego_odom_timestamp)
+{
+
+  // Publish route_state if timestamp is reached
+  while (next_route_state_idx_ < rosbag_route_state_data_.size()) {
+    const auto & route_state_data = rosbag_route_state_data_[next_route_state_idx_];
+    if (route_state_data.first <= current_ego_odom_timestamp) {
+      auto msg = route_state_data.second;
+      msg.stamp = this->get_clock()->now();
+      route_state_pub_->publish(msg);
+      ++next_route_state_idx_;
+      RCLCPP_INFO(get_logger(), "Published route_state with original timestamp: %f", route_state_data.first.seconds());
+    } else {
+      break;
+    }
+  }
+
+  // Publish route if timestamp is reached
+  while (next_route_idx_ < rosbag_route_data_.size()) {
+    const auto & route_data = rosbag_route_data_[next_route_idx_];
+    if (route_data.first <= current_ego_odom_timestamp) {
+      auto msg = route_data.second;
+      msg.header.stamp = this->get_clock()->now();
+      route_pub_->publish(msg);
+      ++next_route_idx_;
+    } else {
+      break;
+    }
+  }
+}
+
+void PerceptionReplayerCommon::reset_route_cache()
+{
+  next_route_state_idx_ = 0;
+  next_route_idx_ = 0;
 }
 
 }  // namespace autoware::planning_debug_tools

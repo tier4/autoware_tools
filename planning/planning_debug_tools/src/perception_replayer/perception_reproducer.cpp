@@ -84,7 +84,7 @@ void PerceptionReproducer::on_initialpose(
     const auto nearest_ego_odom_idx = find_nearest_ego_odom_index(msg->pose.pose);
     last_published_timestamp_ = rosbag_ego_odom_data_[nearest_ego_odom_idx].first;
   }
-
+  reset_route_cache();
   RCLCPP_INFO(get_logger(), "Cool down indices and last sequenced pose cleared by /initialpose");
 }
 
@@ -204,6 +204,9 @@ void PerceptionReproducer::on_timer()
   }();
 
   if (bag_timestamp.has_value()) {
+    if (param_.use_rosbag_route) {
+      check_and_publish_route(bag_timestamp.value());
+    }
     publish_topics_at_timestamp_with_coordinate_conversion(
       bag_timestamp.value(), current_timestamp);
   } else {

@@ -39,6 +39,11 @@ PerceptionReplayer::PerceptionReplayer(
   QObject::connect(
     widget->pub_goal_pose_button, &QPushButton::clicked, [this]() { publish_goal_pose(); });
 
+  QObject::connect(widget->publish_route_button, &QPushButton::clicked, [this]() {
+    reset_route_cache();
+    check_and_publish_route(widget->get_slider_timestamp());
+  });
+
   QObject::connect(widget, &TimeManagerWidget::windowClosed, []() { rclcpp::shutdown(); });
 
   // Start timer callback

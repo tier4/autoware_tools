@@ -93,6 +93,12 @@ int main(int argc, char ** argv)
       "end of the rosbag. By default, route are not published.");
     options << pub_route_option;
 
+    const QCommandLineOption use_rosbag_route_option(
+      QStringList() << "u"
+                    << "use-rosbag-route",
+      "use route data from rosbag and publish it based on timestamp. By default, rosbag route is not used.");
+    options << use_rosbag_route_option;
+
     const QCommandLineOption verbose_option(
       QStringList() << "v"
                     << "verbose",
@@ -124,6 +130,7 @@ int main(int argc, char ** argv)
     param.reproduce_cool_down = parser.value(cool_down_option).toDouble();
     param.verbose = parser.isSet(verbose_option);
     param.publish_route = parser.isSet(pub_route_option);
+    param.use_rosbag_route = parser.isSet(use_rosbag_route_option);
 
     if (param.rosbag_format != "sqlite3" && param.rosbag_format != "mcap") {
       std::cerr << "Error: invalid rosbag format: " << param.rosbag_format << std::endl;
