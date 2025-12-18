@@ -24,6 +24,7 @@
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
 #include <unique_identifier_msgs/msg/uuid.hpp>
 
 namespace autoware::planning_debug_tools
@@ -39,6 +40,7 @@ using geometry_msgs::msg::PoseStamped;
 using geometry_msgs::msg::PoseWithCovarianceStamped;
 using nav_msgs::msg::OccupancyGrid;
 using nav_msgs::msg::Odometry;
+using sensor_msgs::msg::PointCloud2;
 using unique_identifier_msgs::msg::UUID;
 
 }  // namespace autoware::planning_debug_tools

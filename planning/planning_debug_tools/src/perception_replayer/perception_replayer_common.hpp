@@ -125,6 +125,7 @@ protected:
   std::vector<utils::DataStamped<TrackedObjects>> rosbag_tracked_objects_data_;
   std::vector<utils::DataStamped<TrafficLightGroupArray>> rosbag_traffic_signals_data_;
   std::vector<utils::DataStamped<OccupancyGrid>> rosbag_occupancy_grid_data_;
+  std::vector<utils::DataStamped<PointCloud2>> rosbag_pointcloud_data_;
   std::vector<utils::DataStamped<RouteState>> rosbag_route_state_data_;
   std::vector<utils::DataStamped<LaneletRoute>> rosbag_route_data_;
 
@@ -146,6 +147,7 @@ protected:
   rclcpp::PublisherBase::SharedPtr objects_pub_;
   rclcpp::Publisher<TrafficLightGroupArray>::SharedPtr traffic_signals_pub_;
   rclcpp::Publisher<OccupancyGrid>::SharedPtr occupancy_grid_pub_;
+  rclcpp::Publisher<PointCloud2>::SharedPtr pointcloud_pub_;
 
   rclcpp::Publisher<PoseWithCovarianceStamped>::SharedPtr recorded_ego_as_initialpose_pub_;
   rclcpp::Publisher<PoseStamped>::SharedPtr goal_as_mission_planning_goal_pub_;

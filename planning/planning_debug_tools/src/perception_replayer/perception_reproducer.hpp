@@ -56,8 +56,6 @@ private:
   std::vector<size_t> find_nearby_ego_odom_indices(
     const std::vector<geometry_msgs::msg::Pose> & ego_poses, const double search_radius) const;
 
-  void publish_topics_at_timestamp_with_coordinate_conversion(
-    const rclcpp::Time & bag_timestamp, const rclcpp::Time & current_timestamp);
 
 private:
   // parameters

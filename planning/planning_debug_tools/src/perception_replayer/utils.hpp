@@ -15,20 +15,30 @@
 #ifndef PERCEPTION_REPLAYER__UTILS_HPP_
 #define PERCEPTION_REPLAYER__UTILS_HPP_
 
-#include <builtin_interfaces/msg/time.hpp>
-#include <rclcpp/rclcpp.hpp>
-#include <rosbag2_cpp/reader.hpp>
-
+#include <autoware/universe_utils/geometry/geometry.hpp>
+#include <autoware/universe_utils/ros/pcl_conversion.hpp>
+#include <geometry_msgs/msg/point.hpp>
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/quaternion.hpp>
-#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
-
+#include <geometry_msgs/msg/transform.hpp>
+#include <geometry_msgs/msg/twist.hpp>
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
+#include <pcl_conversions/pcl_conversions.h>
+#include <rclcpp/rclcpp.hpp>
+#include <rclcpp/serialization.hpp>
+#include <rclcpp/serialized_message.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/LinearMath/Quaternion.h>
+#include <tf2_eigen/tf2_eigen.hpp>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
+#include <builtin_interfaces/msg/time.hpp>
 #include <cmath>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -178,6 +188,26 @@ void translate_objects_coordinate(
     const double new_yaw = log_object_yaw + log_ego_yaw - ego_yaw;
     log_object_pose.orientation = get_quaternion_from_yaw(new_yaw);
   }
+}
+
+
+inline void translate_pointcloud_coordinate(
+  const geometry_msgs::msg::Pose & ego_pose, const geometry_msgs::msg::Pose & log_ego_pose,
+  sensor_msgs::msg::PointCloud2 & pointcloud_msg)
+{
+  tf2::Transform tf_log_to_map, tf_current_to_map;
+  tf2::fromMsg(autoware::universe_utils::pose2transform(log_ego_pose), tf_log_to_map);
+  tf2::fromMsg(autoware::universe_utils::pose2transform(ego_pose), tf_current_to_map);
+
+  const tf2::Transform tf_combined = tf_current_to_map.inverse() * tf_log_to_map;
+  const Eigen::Matrix4f transform_matrix =
+    tf2::transformToEigen(tf2::toMsg(tf_combined)).matrix().cast<float>();
+
+  pcl::PointCloud<pcl::PointXYZ> transformed_pcl_cloud;
+  autoware::universe_utils::transformPointCloudFromROSMsg(
+    pointcloud_msg, transformed_pcl_cloud, transform_matrix);
+
+  pcl::toROSMsg(transformed_pcl_cloud, pointcloud_msg);
 }
 
 }  // namespace autoware::planning_debug_tools::utils

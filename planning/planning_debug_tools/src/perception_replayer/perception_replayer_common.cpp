@@ -107,6 +107,7 @@ void PerceptionReplayerCommon::load_rosbag(
   const std::string ego_odom_topic = "/localization/kinematic_state";
   const std::string traffic_signals_topic = "/perception/traffic_light_recognition/traffic_signals";
   const std::string occupancy_grid_topic = "/perception/occupancy_grid_map/map";
+  const std::string pointcloud_topic = "/perception/obstacle_segmentation/pointcloud";
   const std::string route_state_topic = "/planning/mission_planning/state";
   const std::string route_topic = "/planning/mission_planning/route";
 
@@ -117,6 +118,7 @@ void PerceptionReplayerCommon::load_rosbag(
     ego_odom_topic,
     traffic_signals_topic,
     occupancy_grid_topic,
+    pointcloud_topic,
     route_state_topic,
     route_topic,
   };
@@ -166,6 +168,14 @@ void PerceptionReplayerCommon::load_rosbag(
             utils::deserialize_message<OccupancyGrid>(bag_message->serialized_data);
           const rclcpp::Time timestamp(bag_message->time_stamp);
           rosbag_occupancy_grid_data_.emplace_back(timestamp, *occupancy_grid_msg);
+        }
+
+        // deserialize pointcloud messages
+        if (bag_message->topic_name == pointcloud_topic) {
+          const auto pointcloud_msg =
+            utils::deserialize_message<PointCloud2>(bag_message->serialized_data);
+          const rclcpp::Time timestamp(bag_message->time_stamp);
+          rosbag_pointcloud_data_.emplace_back(timestamp, *pointcloud_msg);
         }
 
         // deserialize route_state messages
@@ -252,6 +262,11 @@ PerceptionReplayerCommon::PerceptionReplayerCommon(
   occupancy_grid_pub_ =
     this->create_publisher<OccupancyGrid>("/perception/occupancy_grid_map/map", occupancy_grid_qos);
 
+  rclcpp::QoS pointcloud_qos(1);
+  pointcloud_qos.best_effort();
+  pointcloud_pub_ = this->create_publisher<PointCloud2>(
+    "/perception/obstacle_segmentation/pointcloud", pointcloud_qos);
+
   recorded_ego_as_initialpose_pub_ =
     this->create_publisher<PoseWithCovarianceStamped>("/initialpose", 1);
   goal_as_mission_planning_goal_pub_ =
@@ -314,6 +329,21 @@ void PerceptionReplayerCommon::publish_topics_at_timestamp(
     auto & msg = rosbag_occupancy_grid_data_[idx].second;
     msg.header.stamp = current_timestamp;
     occupancy_grid_pub_->publish(msg);
+  }
+
+  // publish pointcloud with coordinate conversion
+  if (!rosbag_pointcloud_data_.empty()) {
+    const auto ego_odom = get_latest_ego_odom();
+    if (ego_odom.has_value()) {
+      const auto ego_pose = ego_odom->pose.pose;
+      const auto log_ego_pose = find_ego_odom_by_timestamp(bag_timestamp).pose.pose;
+
+      const size_t idx = utils::get_nearest_index(rosbag_pointcloud_data_, bag_timestamp);
+      auto msg = rosbag_pointcloud_data_[idx].second;
+      utils::translate_pointcloud_coordinate(ego_pose, log_ego_pose, msg);
+      msg.header.stamp = current_timestamp;
+      pointcloud_pub_->publish(std::move(msg));
+    }
   }
 }
 
@@ -423,9 +453,14 @@ void PerceptionReplayerCommon::kill_online_perception_node()
     kill_process("map_based_prediction");
   }
 
-  // unload the occupancy grid map node only if rosbag contains occupancy grid data
+  // unload the occupancy grid map node
   if (!rosbag_occupancy_grid_data_.empty()) {
     unload_component("/pointcloud_container", "occupancy_grid_map_node");
+  }
+
+  // kill dummy_perception_publisher
+  if (!rosbag_pointcloud_data_.empty()) {
+    kill_process("dummy_perception_publisher");
   }
 }
 
