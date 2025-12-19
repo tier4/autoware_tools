@@ -77,6 +77,21 @@ int main(int argc, char * argv[])
       "rosbag data format", "{sqlite3,mcap}", "sqlite3");
     options << rosbag_format_option;
 
+    QCommandLineOption enable_cache_option(
+      QStringList() << "cache",
+      "enable cache-based loading instead of loading all rosbag data at once");
+    options << enable_cache_option;
+
+    QCommandLineOption cache_window_before_option(
+      QStringList() << "cache-window-before",
+      "cache window size before current timestamp (seconds)", "seconds", "30.0");
+    options << cache_window_before_option;
+
+    QCommandLineOption cache_window_option(
+      QStringList() << "cache-window-after",
+      "cache window size after current timestamp (seconds)", "seconds", "60.0");
+    options << cache_window_option;
+
     for (const auto & option : options) {
       parser.addOption(option);
     }
@@ -89,30 +104,41 @@ int main(int argc, char * argv[])
       return 0;
     }
 
-    PerceptionReplayerCommonParam perception_replayer_param;
-    perception_replayer_param.rosbag_path = parser.value(bag_option).toStdString();
-
-    // If rosbag_path is empty, print error and exit
-    if (perception_replayer_param.rosbag_path.empty()) {
+    // Validate rosbag path
+    const std::string rosbag_path = parser.value(bag_option).toStdString();
+    if (rosbag_path.empty()) {
       std::cerr << "Error: bag path is required." << std::endl << std::endl;
       show_help(options, "ros2 run planning_debug_tools perception_replayer", app_desc);
       return 1;
     }
 
-    perception_replayer_param.rosbag_format = parser.value(rosbag_format_option).toStdString();
-    if (
-      perception_replayer_param.rosbag_format != "sqlite3" &&
-      perception_replayer_param.rosbag_format != "mcap") {
-      std::cerr << "Error: invalid rosbag format: " << perception_replayer_param.rosbag_format
-                << std::endl;
+    // Validate rosbag format
+    const std::string rosbag_format = parser.value(rosbag_format_option).toStdString();
+    if (rosbag_format != "sqlite3" && rosbag_format != "mcap") {
+      std::cerr << "Error: invalid rosbag format: " << rosbag_format << std::endl;
       return 1;
     }
 
-    perception_replayer_param.tracked_object = parser.isSet(tracked_object_option);
-    perception_replayer_param.use_rosbag_route = false; // not used for replayer
+    // Initialize parameters
+    PerceptionReplayerCommonParam perception_replayer_param{
+      .tracked_object = parser.isSet(tracked_object_option),
+      .use_rosbag_route = false  // not used for replayer
+    };
+
+    // Initialize rosbag manager
+    RosbagManagerParam rosbag_manager_param{
+      .rosbag_format = rosbag_format,
+      .enable_cache = parser.isSet(enable_cache_option),
+      .cache_window_before_sec = parser.value(cache_window_before_option).toDouble(),
+      .cache_window_after_sec = parser.value(cache_window_option).toDouble()
+    };
+    auto rosbag_manager = std::make_unique<autoware::planning_debug_tools::RosbagManager>(
+      rclcpp::get_logger("rosbag_manager"), perception_replayer_param.tracked_object, rosbag_manager_param);
+    rosbag_manager->initialize_from_path(rosbag_path);
 
     rclcpp::NodeOptions node_options;
-    auto node = std::make_shared<PerceptionReplayer>(perception_replayer_param, node_options);
+    auto node = std::make_shared<PerceptionReplayer>(
+      perception_replayer_param, std::move(rosbag_manager), node_options);
 
     while (rclcpp::ok()) {
       rclcpp::spin_some(node);

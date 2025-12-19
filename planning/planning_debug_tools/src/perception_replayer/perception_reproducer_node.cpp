@@ -14,6 +14,7 @@
 
 #include "help_utils.hpp"
 #include "perception_reproducer.hpp"
+#include "rosbag_manager.hpp"
 
 #include <QCommandLineParser>
 #include <QCoreApplication>
@@ -105,6 +106,21 @@ int main(int argc, char ** argv)
       "output debug data.");
     options << verbose_option;
 
+    const QCommandLineOption enable_cache_option(
+      QStringList() << "cache",
+      "enable cache-based loading instead of loading all rosbag data at once");
+    options << enable_cache_option;
+
+    const QCommandLineOption cache_window_before_option(
+      QStringList() << "cache-window-before",
+      "cache window size before current timestamp (seconds)", "seconds", "30.0");
+    options << cache_window_before_option;
+
+    const QCommandLineOption cache_window_option(
+      QStringList() << "cache-window-after",
+      "cache window size after current timestamp (seconds)", "seconds", "60.0");
+    options << cache_window_option;
+
     for (const auto & option : options) {
       parser.addOption(option);
     }
@@ -116,29 +132,43 @@ int main(int argc, char ** argv)
       return 0;
     }
 
+    // Validate rosbag path
     if (!parser.isSet(bag_option)) {
       std::cerr << "Error: bag path is required." << std::endl << std::endl;
       show_help(options, "ros2 run planning_debug_tools perception_reproducer", app_desc);
       return 1;
     }
 
-    autoware::planning_debug_tools::PerceptionReproducerParam param;
-    param.rosbag_path = parser.value(bag_option).toStdString();
-    param.rosbag_format = parser.value(rosbag_format_option).toStdString();
-    param.tracked_object = parser.isSet(tracked_object_option);
-    param.search_radius = parser.value(search_radius_option).toDouble();
-    param.reproduce_cool_down = parser.value(cool_down_option).toDouble();
-    param.verbose = parser.isSet(verbose_option);
-    param.publish_route = parser.isSet(pub_route_option);
-    param.use_rosbag_route = parser.isSet(use_rosbag_route_option);
-
-    if (param.rosbag_format != "sqlite3" && param.rosbag_format != "mcap") {
-      std::cerr << "Error: invalid rosbag format: " << param.rosbag_format << std::endl;
+    // Validate rosbag format
+    const std::string rosbag_format = parser.value(rosbag_format_option).toStdString();
+    if (rosbag_format != "sqlite3" && rosbag_format != "mcap") {
+      std::cerr << "Error: invalid rosbag format: " << rosbag_format << std::endl;
       return 1;
     }
 
+    // Initialize parameters
+    autoware::planning_debug_tools::PerceptionReproducerParam param{
+      .tracked_object = parser.isSet(tracked_object_option),
+      .use_rosbag_route = parser.isSet(use_rosbag_route_option),
+      .search_radius = parser.value(search_radius_option).toDouble(),
+      .reproduce_cool_down = parser.value(cool_down_option).toDouble(),
+      .verbose = parser.isSet(verbose_option),
+      .publish_route = parser.isSet(pub_route_option)
+    };
+
+    // Initialize rosbag manager
+    auto rosbag_manager = std::make_unique<autoware::planning_debug_tools::RosbagManager>(
+      rclcpp::get_logger("rosbag_manager"), param.tracked_object);
+    
+    // Initialize rosbag data manager
+    rosbag_manager->param_.rosbag_format = rosbag_format;
+    rosbag_manager->cache_config_.enabled = parser.isSet(enable_cache_option);
+    rosbag_manager->cache_config_.window_before_sec = parser.value(cache_window_before_option).toDouble();
+    rosbag_manager->cache_config_.window_after_sec = parser.value(cache_window_option).toDouble();
+    rosbag_manager->initialize_from_path(parser.value(bag_option).toStdString());
+
     auto node = std::make_shared<autoware::planning_debug_tools::PerceptionReproducer>(
-      param, rclcpp::NodeOptions());
+      param, std::move(rosbag_manager), rclcpp::NodeOptions());
 
     rclcpp::spin(node);
     rclcpp::shutdown();

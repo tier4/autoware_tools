@@ -16,12 +16,6 @@
 
 #include "utils.hpp"
 
-#include <rosbag2_cpp/reader.hpp>
-#include <rosbag2_cpp/readers/sequential_reader.hpp>
-#include <rosbag2_cpp/typesupport_helpers.hpp>
-#include <rosbag2_storage/storage_filter.hpp>
-#include <rosbag2_storage/storage_options.hpp>
-
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
@@ -35,211 +29,15 @@
 namespace autoware::planning_debug_tools
 {
 
-std::vector<std::string> PerceptionReplayerCommon::find_rosbag_files(
-  const std::string & directory_path, const std::string & rosbag_format) const
-{
-  const std::string extension = (rosbag_format == "mcap") ? ".mcap" : ".db3";
-  std::vector<std::string> rosbag_files;
-
-  for (const auto & entry : std::filesystem::directory_iterator(directory_path)) {
-    if (entry.is_regular_file() && entry.path().extension() == extension) {
-      rosbag_files.push_back(entry.path().string());
-    }
-  }
-
-  // sort by modification time (or filename if you prefer)
-  std::sort(rosbag_files.begin(), rosbag_files.end());
-
-  return rosbag_files;
-}
-
-void PerceptionReplayerCommon::load_rosbag(
-  const std::string & rosbag_path, const std::string & rosbag_format)
-{
-  std::cout << "Loading rosbag: " << rosbag_path << std::endl;
-
-  auto reader = std::make_unique<rosbag2_cpp::Reader>();
-
-  rosbag2_storage::StorageOptions storage_options;
-  storage_options.uri = rosbag_path;
-  storage_options.storage_id = rosbag_format;
-
-  reader->open(storage_options);
-
-  // get topic metadata
-  const auto topics = reader->get_all_topics_and_types();
-  std::cout << "Found " << topics.size() << " topics in bag" << std::endl;
-
-  // create type support map for deserialization
-  std::unordered_map<std::string, std::shared_ptr<const rosidl_message_type_support_t>>
-    type_support_map;
-  std::unordered_map<std::string, std::shared_ptr<rcpputils::SharedLibrary>> type_support_libs;
-
-  // try to load type support for each topic
-  for (const auto & topic_meta : topics) {
-    try {
-      auto library =
-        rosbag2_cpp::get_typesupport_library(topic_meta.type, "rosidl_typesupport_cpp");
-      type_support_libs[topic_meta.name] = library;
-
-      const rosidl_message_type_support_t * type_support =
-        rosbag2_cpp::get_typesupport_handle(topic_meta.type, "rosidl_typesupport_cpp", library);
-
-      if (type_support) {
-        type_support_map[topic_meta.name] = std::shared_ptr<const rosidl_message_type_support_t>(
-          type_support, [](const rosidl_message_type_support_t *) {});
-      }
-    } catch (const std::exception & e) {
-      // skip topics with unknown message types
-      std::cerr << "Warning: Could not load type support for topic " << topic_meta.name << " ("
-                << topic_meta.type << ")" << std::endl;
-    }
-  }
-
-  // topic_names
-  const auto objects_topic = [&]() -> std::string {
-    if (param_.tracked_object) {
-      return "/perception/object_recognition/tracking/objects";
-    } else {
-      return "/perception/object_recognition/objects";
-    }
-  }();
-  const std::string ego_odom_topic = "/localization/kinematic_state";
-  const std::string traffic_signals_topic = "/perception/traffic_light_recognition/traffic_signals";
-  const std::string occupancy_grid_topic = "/perception/occupancy_grid_map/map";
-  const std::string pointcloud_topic = "/perception/obstacle_segmentation/pointcloud";
-  const std::string route_state_topic = "/planning/mission_planning/state";
-  const std::string route_topic = "/planning/mission_planning/route";
-
-  // create topic filter
-  rosbag2_storage::StorageFilter storage_filter;
-  storage_filter.topics = {
-    objects_topic,
-    ego_odom_topic,
-    traffic_signals_topic,
-    occupancy_grid_topic,
-    pointcloud_topic,
-    route_state_topic,
-    route_topic,
-  };
-  reader->set_filter(storage_filter);
-
-  // read all messages
-  while (reader->has_next()) {
-    try {
-      auto bag_message = reader->read_next();
-
-      // deserialize the message if type support is available
-      auto it = type_support_map.find(bag_message->topic_name);
-      if (it != type_support_map.end() && it->second) {
-        // deserialize ego_odom messages
-        if (bag_message->topic_name == ego_odom_topic) {
-          const auto ego_odom_msg =
-            utils::deserialize_message<Odometry>(bag_message->serialized_data);
-          const rclcpp::Time timestamp(bag_message->time_stamp);
-          rosbag_ego_odom_data_.emplace_back(timestamp, *ego_odom_msg);
-        }
-
-        // deserialize objects messages
-        if (bag_message->topic_name == objects_topic) {
-          const rclcpp::Time timestamp(bag_message->time_stamp);
-          if (param_.tracked_object) {
-            const auto objects_msg =
-              utils::deserialize_message<TrackedObjects>(bag_message->serialized_data);
-            rosbag_tracked_objects_data_.emplace_back(timestamp, *objects_msg);
-          } else {
-            const auto objects_msg =
-              utils::deserialize_message<PredictedObjects>(bag_message->serialized_data);
-            rosbag_predicted_objects_data_.emplace_back(timestamp, *objects_msg);
-          }
-        }
-
-        // deserialize traffic_signals messages
-        if (bag_message->topic_name == traffic_signals_topic) {
-          const auto traffic_signals_msg =
-            utils::deserialize_message<TrafficLightGroupArray>(bag_message->serialized_data);
-          const rclcpp::Time timestamp(bag_message->time_stamp);
-          rosbag_traffic_signals_data_.emplace_back(timestamp, *traffic_signals_msg);
-        }
-
-        // deserialize occupancy_grid messages
-        if (bag_message->topic_name == occupancy_grid_topic) {
-          const auto occupancy_grid_msg =
-            utils::deserialize_message<OccupancyGrid>(bag_message->serialized_data);
-          const rclcpp::Time timestamp(bag_message->time_stamp);
-          rosbag_occupancy_grid_data_.emplace_back(timestamp, *occupancy_grid_msg);
-        }
-
-        // deserialize pointcloud messages
-        if (bag_message->topic_name == pointcloud_topic) {
-          const auto pointcloud_msg =
-            utils::deserialize_message<PointCloud2>(bag_message->serialized_data);
-          const rclcpp::Time timestamp(bag_message->time_stamp);
-          rosbag_pointcloud_data_.emplace_back(timestamp, *pointcloud_msg);
-        }
-
-        // deserialize route_state messages
-        if (bag_message->topic_name == route_state_topic) {
-          const auto route_state_msg =
-            utils::deserialize_message<RouteState>(bag_message->serialized_data);
-          const rclcpp::Time timestamp(bag_message->time_stamp);
-          rosbag_route_state_data_.emplace_back(timestamp, *route_state_msg);
-        }
-
-        // deserialize route messages
-        if (bag_message->topic_name == route_topic) {
-          const auto route_msg =
-            utils::deserialize_message<LaneletRoute>(bag_message->serialized_data);
-          const rclcpp::Time timestamp(bag_message->time_stamp);
-          rosbag_route_data_.emplace_back(timestamp, *route_msg);
-        }
-      } else {
-        // count messages that couldn't be deserialized
-      }
-    } catch (const std::exception & e) {
-      std::cerr << "\nError reading message: " << e.what() << std::endl;
-      continue;
-    }
-  }
-
-  std::cout << "Finished loading rosbag: " << rosbag_path << std::endl;
-}
-
 PerceptionReplayerCommon::PerceptionReplayerCommon(
-  const PerceptionReplayerCommonParam & param, const std::string & node_name,
-  const rclcpp::NodeOptions & node_options)
-: Node(node_name, node_options), param_(param)
+  const PerceptionReplayerCommonParam & param, std::unique_ptr<RosbagManager> rosbag_manager,
+  const std::string & node_name, const rclcpp::NodeOptions & node_options)
+: Node(node_name, node_options), param_(param), rosbag_manager_(std::move(rosbag_manager))
 {
-  // check if rosbag_path is a directory or file
-  if (std::filesystem::is_directory(param_.rosbag_path)) {
-    std::cout << "Processing rosbag directory: " << param_.rosbag_path << std::endl;
-    const auto rosbag_files = find_rosbag_files(param_.rosbag_path, param_.rosbag_format);
-    std::cout << "Found " << rosbag_files.size() << " bag files" << std::endl;
-
-    for (size_t i = 0; i < rosbag_files.size(); ++i) {
-      std::cout << "Loading bag file " << (i + 1) << "/" << rosbag_files.size() << ": "
-                << rosbag_files[i] << std::endl;
-      load_rosbag(rosbag_files[i], param_.rosbag_format);
-    }
-  } else {
-    std::cout << "Loading single bag file: " << param_.rosbag_path << std::endl;
-    load_rosbag(param_.rosbag_path, param_.rosbag_format);
-  }
-  std::cout << "Ended loading rosbag" << std::endl;
-
-  // define topic names
-  const std::string ego_odom_topic = "/localization/kinematic_state";
-  const auto objects_topic = [&]() -> std::string {
-    if (param_.tracked_object) {
-      return "/perception/object_recognition/tracking/objects";
-    } else {
-      return "/perception/object_recognition/objects";
-    }
-  }();
 
   // Subscriber
   ego_odom_sub_ = this->create_subscription<Odometry>(
-    ego_odom_topic, 1,
+    rosbag_manager_->get_ego_odom_topic(), 1,
     std::bind(&PerceptionReplayerCommon::on_ego_odom, this, std::placeholders::_1));
 
   // Publisher
@@ -284,22 +82,17 @@ PerceptionReplayerCommon::PerceptionReplayerCommon(
   kill_online_perception_node();
 }
 
-Odometry PerceptionReplayerCommon::find_ego_odom_by_timestamp(const rclcpp::Time & timestamp) const
-{
-  const size_t idx = utils::get_nearest_index(rosbag_ego_odom_data_, timestamp);
-  return rosbag_ego_odom_data_.at(idx).second;
-}
-
 void PerceptionReplayerCommon::publish_topics_at_timestamp(
   const rclcpp::Time & bag_timestamp, const rclcpp::Time & current_timestamp)
 {
   // for debugging
-  recorded_ego_pub_->publish(find_ego_odom_by_timestamp(bag_timestamp));
+  recorded_ego_pub_->publish(rosbag_manager_->find_ego_odom_by_timestamp(bag_timestamp));
 
   // publish objects
   if (param_.tracked_object) {
+    const auto & tracked_objects_data = rosbag_manager_->get_tracked_objects_data();
     const auto objects_msg =
-      utils::find_message_by_timestamp(rosbag_tracked_objects_data_, bag_timestamp);
+      utils::find_message_by_timestamp(tracked_objects_data, bag_timestamp);
     if (objects_msg.has_value()) {
       auto msg = objects_msg.value();
       msg.header.stamp = current_timestamp;
@@ -309,8 +102,9 @@ void PerceptionReplayerCommon::publish_topics_at_timestamp(
       }
     }
   } else {
+    const auto & predicted_objects_data = rosbag_manager_->get_predicted_objects_data();
     const auto objects_msg =
-      utils::find_message_by_timestamp(rosbag_predicted_objects_data_, bag_timestamp);
+      utils::find_message_by_timestamp(predicted_objects_data, bag_timestamp);
     if (objects_msg.has_value()) {
       auto msg = objects_msg.value();
       msg.header.stamp = current_timestamp;
@@ -324,22 +118,24 @@ void PerceptionReplayerCommon::publish_topics_at_timestamp(
   publish_traffic_lights_at_timestamp(bag_timestamp, current_timestamp);
 
   // publish occupancy grid
-  if (!rosbag_occupancy_grid_data_.empty()) {
-    const size_t idx = utils::get_nearest_index(rosbag_occupancy_grid_data_, bag_timestamp);
-    auto & msg = rosbag_occupancy_grid_data_[idx].second;
+  const auto & occupancy_grid_data = rosbag_manager_->get_occupancy_grid_data();
+  if (!occupancy_grid_data.empty()) {
+    const size_t idx = utils::get_nearest_index(occupancy_grid_data, bag_timestamp);
+    auto & msg = occupancy_grid_data[idx].second;
     msg.header.stamp = current_timestamp;
     occupancy_grid_pub_->publish(msg);
   }
 
   // publish pointcloud with coordinate conversion
-  if (!rosbag_pointcloud_data_.empty()) {
+  const auto & pointcloud_data = rosbag_manager_->get_pointcloud_data();
+  if (!pointcloud_data.empty()) {
     const auto ego_odom = get_latest_ego_odom();
     if (ego_odom.has_value()) {
       const auto ego_pose = ego_odom->pose.pose;
-      const auto log_ego_pose = find_ego_odom_by_timestamp(bag_timestamp).pose.pose;
+      const auto log_ego_pose = rosbag_manager_->find_ego_odom_by_timestamp(bag_timestamp).pose.pose;
 
-      const size_t idx = utils::get_nearest_index(rosbag_pointcloud_data_, bag_timestamp);
-      auto msg = rosbag_pointcloud_data_[idx].second;
+      const size_t idx = utils::get_nearest_index(pointcloud_data, bag_timestamp);
+      auto msg = pointcloud_data[idx].second;
       utils::translate_pointcloud_coordinate(ego_pose, log_ego_pose, msg);
       msg.header.stamp = current_timestamp;
       pointcloud_pub_->publish(std::move(msg));
@@ -350,8 +146,9 @@ void PerceptionReplayerCommon::publish_topics_at_timestamp(
 void PerceptionReplayerCommon::publish_traffic_lights_at_timestamp(
   const rclcpp::Time & bag_timestamp, const rclcpp::Time & current_timestamp)
 {
+  const auto & traffic_signals_data = rosbag_manager_->get_traffic_signals_data();
   const auto traffic_signals_msg =
-    utils::find_message_by_timestamp(rosbag_traffic_signals_data_, bag_timestamp);
+    utils::find_message_by_timestamp(traffic_signals_data, bag_timestamp);
   if (traffic_signals_msg.has_value()) {
     auto msg = traffic_signals_msg.value();
     const auto original_timestamp = msg.stamp;
@@ -373,7 +170,7 @@ void PerceptionReplayerCommon::publish_traffic_lights_at_timestamp(
 
 void PerceptionReplayerCommon::publish_recorded_ego_pose(rclcpp::Time bag_timestamp)
 {
-  const auto ego_odom = find_ego_odom_by_timestamp(bag_timestamp);
+  const auto ego_odom = rosbag_manager_->find_ego_odom_by_timestamp(bag_timestamp);
 
   PoseWithCovarianceStamped initialpose;
   initialpose.header.stamp = this->get_clock()->now();
@@ -428,7 +225,7 @@ void PerceptionReplayerCommon::publish_recorded_ego_pose(rclcpp::Time bag_timest
 
 void PerceptionReplayerCommon::publish_goal_pose()
 {
-  const auto ego_pose = find_ego_odom_by_timestamp(get_bag_end_timestamp());
+  const auto ego_pose = rosbag_manager_->find_ego_odom_by_timestamp(rosbag_manager_->get_bag_end_timestamp());
 
   PoseStamped goal_pose;
   goal_pose.header.stamp = this->get_clock()->now();
@@ -447,19 +244,19 @@ void PerceptionReplayerCommon::on_ego_odom(const Odometry::SharedPtr msg)
 void PerceptionReplayerCommon::kill_online_perception_node()
 {
   // kill the object recognition node
-  if (param_.tracked_object && !rosbag_tracked_objects_data_.empty()) {
+  if (param_.tracked_object && !rosbag_manager_->get_tracked_objects_data().empty()) {
     kill_process("multi_object_tracker");
-  } else if (!rosbag_predicted_objects_data_.empty()) {
+  } else if (!rosbag_manager_->get_predicted_objects_data().empty()) {
     kill_process("map_based_prediction");
   }
 
   // unload the occupancy grid map node
-  if (!rosbag_occupancy_grid_data_.empty()) {
+  if (!rosbag_manager_->get_occupancy_grid_data().empty()) {
     unload_component("/pointcloud_container", "occupancy_grid_map_node");
   }
 
   // kill dummy_perception_publisher
-  if (!rosbag_pointcloud_data_.empty()) {
+  if (!rosbag_manager_->get_pointcloud_data().empty()) {
     kill_process("dummy_perception_publisher");
   }
 }
@@ -519,26 +316,30 @@ void PerceptionReplayerCommon::unload_component(
 void PerceptionReplayerCommon::check_and_publish_route(
   const rclcpp::Time & current_ego_odom_timestamp)
 {
+  const auto & route_state_data = rosbag_manager_->get_route_state_data();
+  const auto & route_data = rosbag_manager_->get_route_data();
 
   // Publish route_state if timestamp is reached
-  while (next_route_state_idx_ < rosbag_route_state_data_.size()) {
-    const auto & route_state_data = rosbag_route_state_data_[next_route_state_idx_];
-    if (route_state_data.first <= current_ego_odom_timestamp) {
-      auto msg = route_state_data.second;
+  while (next_route_state_idx_ < route_state_data.size()) {
+    const auto & route_state = route_state_data[next_route_state_idx_];
+    if (route_state.first <= current_ego_odom_timestamp) {
+      auto msg = route_state.second;
       msg.stamp = this->get_clock()->now();
       route_state_pub_->publish(msg);
       ++next_route_state_idx_;
-      RCLCPP_INFO(get_logger(), "Published route_state with original timestamp: %f", route_state_data.first.seconds());
+      RCLCPP_INFO(
+        get_logger(), "Published route_state with original timestamp: %f",
+        route_state.first.seconds());
     } else {
       break;
     }
   }
 
   // Publish route if timestamp is reached
-  while (next_route_idx_ < rosbag_route_data_.size()) {
-    const auto & route_data = rosbag_route_data_[next_route_idx_];
-    if (route_data.first <= current_ego_odom_timestamp) {
-      auto msg = route_data.second;
+  while (next_route_idx_ < route_data.size()) {
+    const auto & route = route_data[next_route_idx_];
+    if (route.first <= current_ego_odom_timestamp) {
+      auto msg = route.second;
       msg.header.stamp = this->get_clock()->now();
       route_pub_->publish(msg);
       ++next_route_idx_;
@@ -552,6 +353,13 @@ void PerceptionReplayerCommon::reset_route_cache()
 {
   next_route_state_idx_ = 0;
   next_route_idx_ = 0;
+}
+
+void PerceptionReplayerCommon::load_cache_data(const rclcpp::Time & bag_timestamp)
+{
+  if (rosbag_manager_ && rosbag_manager_->is_cache_initialized() && rosbag_manager_->is_cache_enabled()) {
+    rosbag_manager_->load_cache_data(bag_timestamp);
+  }
 }
 
 }  // namespace autoware::planning_debug_tools

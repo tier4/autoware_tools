@@ -18,11 +18,12 @@ namespace autoware::planning_debug_tools
 {
 
 PerceptionReplayer::PerceptionReplayer(
-  const PerceptionReplayerCommonParam & param, const rclcpp::NodeOptions & node_options)
-: PerceptionReplayerCommon(param, "perception_replayer", node_options)
+  const PerceptionReplayerCommonParam & param, std::unique_ptr<RosbagManager> rosbag_manager,
+  const rclcpp::NodeOptions & node_options)
+: PerceptionReplayerCommon(param, std::move(rosbag_manager), "perception_replayer", node_options)
 {
   // Initialize widget with rosbag timestamps
-  widget = new TimeManagerWidget(get_bag_start_time(), get_bag_end_timestamp());
+  widget = new TimeManagerWidget(rosbag_manager_->get_bag_start_time(), rosbag_manager_->get_bag_end_timestamp());
   widget->show();
 
   // Connect signals
@@ -51,6 +52,7 @@ PerceptionReplayer::PerceptionReplayer(
     this, get_clock(), std::chrono::milliseconds(static_cast<int>(delta_time * 1000)),
     std::bind(&PerceptionReplayer::on_timer, this));
 
+
   RCLCPP_INFO(get_logger(), "Start timer callback");
 }
 
@@ -66,7 +68,7 @@ void PerceptionReplayer::on_timer()
     bag_timestamp += rclcpp::Duration::from_seconds(delta_time * rate);
 
     // Stop at the end instead of wrapping around
-    const auto bag_end_timestamp = get_bag_end_timestamp();
+    const auto bag_end_timestamp = rosbag_manager_->get_bag_end_timestamp();
     if (bag_timestamp >= bag_end_timestamp) {
       bag_timestamp = bag_end_timestamp;
     }
@@ -75,7 +77,13 @@ void PerceptionReplayer::on_timer()
     widget->set_slider_timestamp(bag_timestamp);
   }
 
+  // Publish all data
   publish_topics_at_timestamp(bag_timestamp, current_timestamp);
+  
+  // Update cache topic data
+  if (rosbag_manager_->is_cache_enabled()) {
+    load_cache_data(bag_timestamp);
+  }
 }
 
 void PerceptionReplayer::on_set_rate(const QString & rate_text)
@@ -86,5 +94,6 @@ void PerceptionReplayer::on_set_rate(const QString & rate_text)
     rate = new_rate;
   }
 }
+
 
 }  // namespace autoware::planning_debug_tools

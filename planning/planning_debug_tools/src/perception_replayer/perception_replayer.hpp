@@ -27,7 +27,8 @@ class PerceptionReplayer : public PerceptionReplayerCommon
 {
 public:
   explicit PerceptionReplayer(
-    const PerceptionReplayerCommonParam & param, const rclcpp::NodeOptions & node_options);
+    const PerceptionReplayerCommonParam & param, std::unique_ptr<RosbagManager> rosbag_manager,
+    const rclcpp::NodeOptions & node_options);
 
 private:
   void on_set_rate(const QString & rate_text);

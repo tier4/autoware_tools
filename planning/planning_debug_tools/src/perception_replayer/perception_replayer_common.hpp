@@ -15,6 +15,7 @@
 #ifndef PERCEPTION_REPLAYER__PERCEPTION_REPLAYER_COMMON_HPP_
 #define PERCEPTION_REPLAYER__PERCEPTION_REPLAYER_COMMON_HPP_
 
+#include "rosbag_manager.hpp"
 #include "type_alias.hpp"
 #include "utils.hpp"
 
@@ -26,8 +27,11 @@
 #include <nav_msgs/msg/odometry.hpp>
 
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -36,8 +40,6 @@ namespace autoware::planning_debug_tools
 
 struct PerceptionReplayerCommonParam
 {
-  std::string rosbag_path;
-  std::string rosbag_format;
   bool tracked_object;
   bool use_rosbag_route;
 };
@@ -46,32 +48,8 @@ class PerceptionReplayerCommon : public rclcpp::Node
 {
 public:
   explicit PerceptionReplayerCommon(
-    const PerceptionReplayerCommonParam & param, const std::string & node_name,
-    const rclcpp::NodeOptions & node_options = rclcpp::NodeOptions());
-
-  /**
-   * @brief Get the rosbag start time
-   * @return rclcpp::Time
-   */
-  rclcpp::Time get_bag_start_time() const
-  {
-    if (rosbag_ego_odom_data_.empty()) {
-      throw std::runtime_error("No ego odom data available");
-    }
-    return rosbag_ego_odom_data_.front().first;
-  }
-
-  /**
-   * @brief Get the rosbag end timestamp
-   * @return rclcpp::Time
-   */
-  rclcpp::Time get_bag_end_timestamp() const
-  {
-    if (rosbag_ego_odom_data_.empty()) {
-      throw std::runtime_error("No ego odom data available");
-    }
-    return rosbag_ego_odom_data_.back().first;
-  }
+    const PerceptionReplayerCommonParam & param, std::unique_ptr<RosbagManager> rosbag_manager,
+    const std::string & node_name, const rclcpp::NodeOptions & node_options = rclcpp::NodeOptions());
 
   /**
    * @brief Publish objects and traffic light the given timestamp
@@ -119,24 +97,13 @@ public:
 protected:
   const PerceptionReplayerCommonParam param_;
 
-  // rosbag data
-  std::vector<utils::DataStamped<Odometry>> rosbag_ego_odom_data_;
-  std::vector<utils::DataStamped<PredictedObjects>> rosbag_predicted_objects_data_;
-  std::vector<utils::DataStamped<TrackedObjects>> rosbag_tracked_objects_data_;
-  std::vector<utils::DataStamped<TrafficLightGroupArray>> rosbag_traffic_signals_data_;
-  std::vector<utils::DataStamped<OccupancyGrid>> rosbag_occupancy_grid_data_;
-  std::vector<utils::DataStamped<PointCloud2>> rosbag_pointcloud_data_;
-  std::vector<utils::DataStamped<RouteState>> rosbag_route_state_data_;
-  std::vector<utils::DataStamped<LaneletRoute>> rosbag_route_data_;
-
-  void load_rosbag(const std::string & rosbag_path, const std::string & rosbag_format);
-  std::vector<std::string> find_rosbag_files(
-    const std::string & directory_path, const std::string & rosbag_format) const;
-  Odometry find_ego_odom_by_timestamp(const rclcpp::Time & timestamp) const;
+  // Rosbag manager handles all rosbag I/O and message storage
+  std::unique_ptr<RosbagManager> rosbag_manager_;
 
   void kill_online_perception_node();
   void kill_process(const std::string & process_name);
   void unload_component(const std::string & container_name, const std::string & component_name);
+  void load_cache_data(const rclcpp::Time & bag_timestamp);
 
   // subscriber
   void on_ego_odom(const Odometry::SharedPtr msg);
@@ -161,6 +128,7 @@ protected:
   // route cache indices (tracks which routes have been published)
   size_t next_route_state_idx_ = 0;
   size_t next_route_idx_ = 0;
+
 };
 
 }  // namespace autoware::planning_debug_tools

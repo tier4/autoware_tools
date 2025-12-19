@@ -30,8 +30,9 @@ namespace autoware::planning_debug_tools
 {
 
 PerceptionReproducer::PerceptionReproducer(
-  const PerceptionReproducerParam & param, const rclcpp::NodeOptions & node_options)
-: PerceptionReplayerCommon(param, "perception_reproducer", node_options), param_(param)
+  const PerceptionReproducerParam & param, std::unique_ptr<RosbagManager> rosbag_manager,
+  const rclcpp::NodeOptions & node_options)
+: PerceptionReplayerCommon(param, std::move(rosbag_manager), "perception_reproducer", node_options), param_(param)
 {
   RCLCPP_INFO(get_logger(), "Starting PerceptionReproducer initialization");
 
@@ -47,7 +48,7 @@ PerceptionReproducer::PerceptionReproducer(
     std::bind(&PerceptionReproducer::on_timer, this));
 
   if (param_.publish_route) {
-    publish_recorded_ego_pose(get_bag_start_time());
+    publish_recorded_ego_pose(rosbag_manager_->get_bag_start_time());
     // temporarily add a sleep because sometimes the route is not generated correctly without it.
     // Need to consider a proper solution.
     rclcpp::sleep_for(std::chrono::seconds(2));
@@ -167,7 +168,7 @@ void PerceptionReproducer::on_timer()
                   (ego_rosbag_dist > ego_odom_search_radius_);
   }
 
-  // publish messages
+  // get the next bag timestamp for publish
   const auto bag_timestamp = [&]() -> std::optional<rclcpp::Time> {
     if (!repeat_flag) {
       const size_t ego_odom_idx = reproduce_sequence_indices_.front();
@@ -189,10 +190,18 @@ void PerceptionReproducer::on_timer()
   }();
 
   if (bag_timestamp.has_value()) {
+    const auto bag_ts = bag_timestamp.value();
+
+    // Publish all data first
     if (param_.use_rosbag_route) {
-      check_and_publish_route(bag_timestamp.value());
+      check_and_publish_route(bag_ts);
     }
-    publish_topics_at_timestamp(bag_timestamp.value(), current_timestamp);
+    publish_topics_at_timestamp(bag_ts, current_timestamp);
+    
+    // Update cache topic data
+    if (rosbag_manager_->is_cache_enabled()) {
+      load_cache_data(bag_ts);
+    }
   } else {
     RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 3000, "No valid bag timestamp to publish.");
   }
@@ -205,6 +214,7 @@ void PerceptionReproducer::on_timer()
     RCLCPP_INFO(get_logger(), "on_timer processing time: %.3f ms", total_time);
   }
 }
+
 
 size_t PerceptionReproducer::find_nearest_ego_odom_index(
   const geometry_msgs::msg::Pose & ego_pose) const

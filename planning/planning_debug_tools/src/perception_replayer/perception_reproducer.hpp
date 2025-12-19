@@ -43,7 +43,8 @@ class PerceptionReproducer : public PerceptionReplayerCommon
 {
 public:
   explicit PerceptionReproducer(
-    const PerceptionReproducerParam & param, const rclcpp::NodeOptions & node_options);
+    const PerceptionReproducerParam & param, std::unique_ptr<RosbagManager> rosbag_manager,
+    const rclcpp::NodeOptions & node_options);
 
 private:
   void on_timer();
