@@ -165,7 +165,7 @@ int main(int argc, char ** argv)
     rosbag_manager->cache_config_.enabled = parser.isSet(enable_cache_option);
     rosbag_manager->cache_config_.window_before_sec = parser.value(cache_window_before_option).toDouble();
     rosbag_manager->cache_config_.window_after_sec = parser.value(cache_window_option).toDouble();
-    rosbag_manager->initialize_from_path(parser.value(bag_option).toStdString());
+    rosbag_manager->initialize(parser.value(bag_option).toStdString());
 
     auto node = std::make_shared<autoware::planning_debug_tools::PerceptionReproducer>(
       param, std::move(rosbag_manager), rclcpp::NodeOptions());

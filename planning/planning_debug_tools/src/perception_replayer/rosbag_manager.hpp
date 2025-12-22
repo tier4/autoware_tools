@@ -63,76 +63,9 @@ public:
   std::string route_topic;
 
   // Initialize from rosbag path (handles both directory and single file)
-  void initialize_from_path(const std::string & rosbag_path);
+  void initialize(const std::string & rosbag_path);
 
-  // Non-cache-based loading
-  void load_rosbag(const std::string & rosbag_path);
-
-  // Cache-based loading
-  void initialize_rosbag_cache(const std::vector<std::string> & rosbag_files);
-  void load_cache_data(const rclcpp::Time & current_timestamp);
-
-  // Data access
-  const std::vector<utils::DataStamped<Odometry>> & get_ego_odom_data() const
-  {
-    return rosbag_ego_odom_data_;
-  }
-  const std::vector<utils::DataStamped<PredictedObjects>> & get_predicted_objects_data() const
-  {
-    return rosbag_predicted_objects_data_;
-  }
-  const std::vector<utils::DataStamped<TrackedObjects>> & get_tracked_objects_data() const
-  {
-    return rosbag_tracked_objects_data_;
-  }
-  const std::vector<utils::DataStamped<TrafficLightGroupArray>> & get_traffic_signals_data() const
-  {
-    return rosbag_traffic_signals_data_;
-  }
-  const std::vector<utils::DataStamped<OccupancyGrid>> & get_occupancy_grid_data() const
-  {
-    return rosbag_occupancy_grid_data_;
-  }
-  const std::vector<utils::DataStamped<PointCloud2>> & get_pointcloud_data() const
-  {
-    return rosbag_pointcloud_data_;
-  }
-  const std::vector<utils::DataStamped<RouteState>> & get_route_state_data() const
-  {
-    return rosbag_route_state_data_;
-  }
-  const std::vector<utils::DataStamped<LaneletRoute>> & get_route_data() const
-  {
-    return rosbag_route_data_;
-  }
-
-  // Non-const access for cache updates
-  std::vector<utils::DataStamped<Odometry>> & get_ego_odom_data() { return rosbag_ego_odom_data_; }
-  std::vector<utils::DataStamped<PredictedObjects>> & get_predicted_objects_data()
-  {
-    return rosbag_predicted_objects_data_;
-  }
-  std::vector<utils::DataStamped<TrackedObjects>> & get_tracked_objects_data()
-  {
-    return rosbag_tracked_objects_data_;
-  }
-  std::vector<utils::DataStamped<TrafficLightGroupArray>> & get_traffic_signals_data()
-  {
-    return rosbag_traffic_signals_data_;
-  }
-  std::vector<utils::DataStamped<OccupancyGrid>> & get_occupancy_grid_data()
-  {
-    return rosbag_occupancy_grid_data_;
-  }
-  std::vector<utils::DataStamped<PointCloud2>> & get_pointcloud_data()
-  {
-    return rosbag_pointcloud_data_;
-  }
-  std::vector<utils::DataStamped<RouteState>> & get_route_state_data()
-  {
-    return rosbag_route_state_data_;
-  }
-  std::vector<utils::DataStamped<LaneletRoute>> & get_route_data() { return rosbag_route_data_; }
+  void load_cache_data(const rclcpp::Time & base_timestamp);
 
   // Utility functions
   Odometry find_ego_odom_by_timestamp(const rclcpp::Time & timestamp) const;
@@ -143,10 +76,7 @@ public:
   rclcpp::Time get_bag_end_timestamp() const;
 
 private:
-  void load_all_ego_odom_data(const std::vector<std::string> & rosbag_files);
-  void load_all_route_state_data(const std::vector<std::string> & rosbag_files);
   rclcpp::Logger logger_;
-
   RosbagManagerParam param_;
 
   // Rosbag data storage
@@ -172,7 +102,11 @@ private:
   std::unordered_map<std::string, std::shared_ptr<rcpputils::SharedLibrary>> type_support_libs_;
 
   // Helper functions
+  void initialize_rosbag_cache(const std::vector<std::string> & rosbag_files);
+  void load_all_ego_odom_data(const std::vector<std::string> & rosbag_files);
+  void load_all_route_state_data(const std::vector<std::string> & rosbag_files);
   void load_type_support(const rosbag2_storage::TopicMetadata & topic_meta);
+  void load_rosbag(const std::string & rosbag_path);
   void process_message(
     const rclcpp::Time & msg_timestamp, const std::string & topic_name,
     const std::shared_ptr<rcutils_uint8_array_t> & serialized_data);

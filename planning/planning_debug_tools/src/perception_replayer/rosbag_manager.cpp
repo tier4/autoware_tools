@@ -28,8 +28,8 @@
 namespace autoware::planning_debug_tools
 {
 
-RosbagManager::RosbagManager(rclcpp::Logger logger, bool tracked_object)
-: logger_(logger), tracked_object_(tracked_object)
+RosbagManager::RosbagManager(rclcpp::Logger logger, bool tracked_object, const RosbagManagerParam & param)
+: logger_(logger), tracked_object_(tracked_object), param_(param)
 {
   // Initialize topic names
   ego_odom_topic_ = "/localization/kinematic_state";
@@ -44,7 +44,6 @@ RosbagManager::RosbagManager(rclcpp::Logger logger, bool tracked_object)
 
 void RosbagManager::load_type_support(const rosbag2_storage::TopicMetadata & topic_meta)
 {
-  // Only add to type_support_map_ if not already present
   if (type_support_map_.find(topic_meta.name) == type_support_map_.end()) {
     try {
       auto library =
@@ -103,7 +102,7 @@ void RosbagManager::process_message(
 
 void RosbagManager::load_rosbag(const std::string & rosbag_path)
 {
-  std::cout << "Loading rosbag: " << rosbag_path << std::endl;
+  std::cout << "Load rosbag: " << rosbag_path << std::endl;
 
   auto reader = std::make_unique<rosbag2_cpp::Reader>();
 
@@ -113,11 +112,8 @@ void RosbagManager::load_rosbag(const std::string & rosbag_path)
 
   reader->open(storage_options);
 
-  // get topic metadata
-  const auto topics = reader->get_all_topics_and_types();
-  std::cout << "Found " << topics.size() << " topics in bag" << std::endl;
-
   // load type support for each topic
+  const auto topics = reader->get_all_topics_and_types();
   for (const auto & topic_meta : topics) {
     load_type_support(topic_meta);
   }
@@ -146,11 +142,9 @@ void RosbagManager::load_rosbag(const std::string & rosbag_path)
       continue;
     }
   }
-
-  std::cout << "Finished loading rosbag: " << rosbag_path << std::endl;
 }
 
-void RosbagManager::initialize_from_path(const std::string & rosbag_path)
+void RosbagManager::initialize(const std::string & rosbag_path)
 {
   // Collect rosbag files
   std::vector<std::string> rosbag_files;
@@ -163,25 +157,20 @@ void RosbagManager::initialize_from_path(const std::string & rosbag_path)
       }
     }
     std::sort(rosbag_files.begin(), rosbag_files.end());
-    std::cout << "Found " << rosbag_files.size() << " bag files in directory: " << rosbag_path << std::endl;
   } else {
     rosbag_files.push_back(rosbag_path);
-    std::cout << "Loading single bag file: " << rosbag_path << std::endl;
   }
 
   // Use cache-based loading or load all data at once
   if (cache_config_.enabled) {
-    std::cout << "Using cache-based loading mode" << std::endl;
+    RCLCPP_INFO(logger_, "Use cache-based loading mode to load %zu bag files", rosbag_files.size());
     initialize_rosbag_cache(rosbag_files);
   } else {
-    // Traditional mode: load all data at once
-    std::cout << "Loading all rosbag data..." << std::endl;
+    RCLCPP_INFO(logger_, "Load all data at once from %zu bag files", rosbag_files.size());
     for (size_t i = 0; i < rosbag_files.size(); ++i) {
-      std::cout << "Loading bag file " << (i + 1) << "/" << rosbag_files.size() << ": "
-                << rosbag_files[i] << std::endl;
+      RCLCPP_INFO(logger_, "Load bag file %zu/%zu: %s", i + 1, rosbag_files.size(), rosbag_files[i].c_str());
       load_rosbag(rosbag_files[i]);
     }
-    std::cout << "Finished loading rosbag data" << std::endl;
   }
 }
 
@@ -191,7 +180,7 @@ Odometry RosbagManager::find_ego_odom_by_timestamp(const rclcpp::Time & timestam
   return rosbag_ego_odom_data_.at(idx).second;
 }
 
-void RosbagManager::initialize_rosbag_cache(const std::vector<std::string> & rosbag_files)
+void RosbagManager::initialize_rosbag_cache(const std::vector<std::string> & rosbag_files) // TODO 从这往下看。odashima的pr merge后用这个rosbag_manager重构代码
 {
   // Clear existing readers
   rosbag_readers_.clear();
@@ -290,23 +279,23 @@ void RosbagManager::initialize_rosbag_cache(const std::vector<std::string> & ros
   load_all_route_state_data(rosbag_files);
 }
 
-void RosbagManager::load_cache_data(const rclcpp::Time & current_timestamp)
+void RosbagManager::load_cache_data(const rclcpp::Time & base_timestamp)
 {
   if (!rosbag_cache_initialized_ || rosbag_readers_.empty()) {
     return;
   }
 
-  if (current_timestamp.nanoseconds() == 0) {
+  if (base_timestamp.nanoseconds() == 0) {
     return;  // No current timestamp yet
   }
 
   // Update internal cache timestamp
-  current_cache_timestamp_ = current_timestamp;
+  current_cache_timestamp_ = base_timestamp;
 
   const rclcpp::Time target_end_time =
-    current_timestamp + rclcpp::Duration::from_seconds(cache_config_.window_after_sec);
+    base_timestamp + rclcpp::Duration::from_seconds(param_.cache_window_after_sec);
   const rclcpp::Time cleanup_before_time =
-    current_timestamp - rclcpp::Duration::from_seconds(cache_config_.window_before_sec);
+    base_timestamp - rclcpp::Duration::from_seconds(param_.cache_window_before_sec);
 
   // Check if current timestamp is outside the cache window
   // Find the earliest and latest timestamps in cache
@@ -331,13 +320,13 @@ void RosbagManager::load_cache_data(const rclcpp::Time & current_timestamp)
   // Check if current timestamp is outside the cache window
   // Only backward time jump requires reset (rosbag2 doesn't support backward seek)
   const bool cache_empty = cache_earliest == rclcpp::Time::max();
-  const bool time_jumped_backward = !cache_empty && current_timestamp < cleanup_before_time;
+  const bool time_jumped_backward = !cache_empty && base_timestamp < cleanup_before_time;
 
   if (time_jumped_backward) {
     RCLCPP_INFO(
       logger_,
       "Backward time jump detected (current: %.3f, cache range: [%.3f, %.3f]). Resetting cache...",
-      current_timestamp.seconds(), cache_empty ? 0.0 : cache_earliest.seconds(),
+      base_timestamp.seconds(), cache_empty ? 0.0 : cache_earliest.seconds(),
       cache_empty ? 0.0 : cache_latest.seconds());
 
     // Clear all cached data (except ego_odom and route_state which are always fully loaded)
@@ -351,7 +340,7 @@ void RosbagManager::load_cache_data(const rclcpp::Time & current_timestamp)
     // Find which rosbag files contain the target timestamp
     std::vector<std::string> rosbag_files_to_load;
     for (const auto & info : cached_rosbag_infos_) {
-      if (current_timestamp >= info.start_time && current_timestamp <= info.end_time) {
+      if (base_timestamp >= info.start_time && base_timestamp <= info.end_time) {
         rosbag_files_to_load.push_back(info.file_path);
       }
     }

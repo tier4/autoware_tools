@@ -134,7 +134,7 @@ int main(int argc, char * argv[])
     };
     auto rosbag_manager = std::make_unique<autoware::planning_debug_tools::RosbagManager>(
       rclcpp::get_logger("rosbag_manager"), perception_replayer_param.tracked_object, rosbag_manager_param);
-    rosbag_manager->initialize_from_path(rosbag_path);
+    rosbag_manager->initialize(rosbag_path);
 
     rclcpp::NodeOptions node_options;
     auto node = std::make_shared<PerceptionReplayer>(
