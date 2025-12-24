@@ -52,7 +52,7 @@ class PerceptionReproducer(PerceptionReplayerCommon):
         self.last_sequenced_ego_pose = None
 
         pose_timestamp, self.prev_ego_odom_msg = self.rosbag_ego_odom_data[0]
-        self.perv_objects_msg, self.prev_traffic_signals_msg = self.find_topics_by_timestamp(
+        self.perv_objects_msg, self.prev_traffic_signals_msg, self.prev_image_data = self.find_topics_by_timestamp(
             pose_timestamp
         )
         self.memorized_original_objects_msg = self.memorized_noised_objects_msg = (
@@ -189,7 +189,7 @@ class PerceptionReproducer(PerceptionReplayerCommon):
             ego_odom_idx = self.reproduce_sequence_indices.popleft()
             # extract messages by the nearest ego odom timestamp
             pose_timestamp, ego_odom_msg = self.rosbag_ego_odom_data[ego_odom_idx]
-            objects_msg, traffic_signals_msg = self.find_topics_by_timestamp(pose_timestamp)
+            objects_msg, traffic_signals_msg, image_msg = self.find_topics_by_timestamp(pose_timestamp)
             self.stopwatch.toc("find_topics_by_timestamp")
             # update cool down info.
             self.ego_odom_id2last_published_timestamp[ego_odom_idx] = timestamp
@@ -197,6 +197,7 @@ class PerceptionReproducer(PerceptionReplayerCommon):
         else:
             ego_odom_msg = self.prev_ego_odom_msg
             objects_msg = self.perv_objects_msg
+            image_msg = self.prev_image_data
             traffic_signals_msg = self.prev_traffic_signals_msg
 
         # Transform and publish messages.
@@ -254,6 +255,11 @@ class PerceptionReproducer(PerceptionReplayerCommon):
                         prediction.predicted_stamp.nanosec -= int(1e9)
             self.prev_traffic_signals_msg = traffic_signals_msg
             self.traffic_signals_pub.publish(traffic_signals_msg)
+        
+        if image_msg:
+            image_msg.header.stamp = timestamp_msg
+            self.prev_image_data = image_msg
+            self.image_pub.publish(image_msg)
 
         self.stopwatch.toc("transform and publish")
 

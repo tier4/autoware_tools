@@ -37,6 +37,7 @@ from rclpy.serialization import deserialize_message
 from rosbag2_py import StorageFilter
 from rosidl_runtime_py.utilities import get_message
 from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import CompressedImage
 from utils import get_starting_time
 from utils import open_reader
 
@@ -50,6 +51,7 @@ class PerceptionReplayerCommon(Node):
         self.rosbag_objects_data = []
         self.rosbag_ego_odom_data = []
         self.rosbag_traffic_signals_data = []
+        self.rosbag_compressed_image_data = []
 
         # subscriber
         self.sub_odom = self.create_subscription(
@@ -87,6 +89,10 @@ class PerceptionReplayerCommon(Node):
 
         self.traffic_signals_pub = self.create_publisher(
             TrafficLightGroupArray, "/perception/traffic_light_recognition/traffic_signals", 1
+        )
+
+        self.image_pub = self.create_publisher(
+            CompressedImage, "/sensing/camera/camera0/image_raw/compressed"
         )
 
         # load rosbag
@@ -133,7 +139,8 @@ class PerceptionReplayerCommon(Node):
         )
         ego_odom_topic = "/localization/kinematic_state"
         traffic_signals_topic = "/perception/traffic_light_recognition/traffic_signals"
-        topic_filter = StorageFilter(topics=[objects_topic, ego_odom_topic, traffic_signals_topic])
+        image_topic = "/sensing/camera/camera0/image_raw/compressed"
+        topic_filter = StorageFilter(topics=[objects_topic, ego_odom_topic, traffic_signals_topic, image_topic])
         reader.set_filter(topic_filter)
 
         while reader.has_next():
@@ -182,6 +189,8 @@ class PerceptionReplayerCommon(Node):
                         raise AssertionError(f"Unsupported conversion from {type(msg)}")
                     msg = new_msg
                 self.rosbag_traffic_signals_data.append((stamp, msg))
+            if topic == image_topic:
+                self.rosbag_compressed_image_data.append((stamp, msg))
 
     def kill_online_perception_node(self):
         # kill node if required
@@ -228,7 +237,8 @@ class PerceptionReplayerCommon(Node):
     def find_topics_by_timestamp(self, timestamp):
         objects_data = self.binary_search(self.rosbag_objects_data, timestamp)
         traffic_signals_data = self.binary_search(self.rosbag_traffic_signals_data, timestamp)
-        return objects_data, traffic_signals_data
+        image_data = self.binary_search(self.rosbag_compressed_image_data, timestamp)
+        return objects_data, traffic_signals_data, image_data
 
     def find_ego_odom_by_timestamp(self, timestamp):
         return self.binary_search(self.rosbag_ego_odom_data, timestamp)
