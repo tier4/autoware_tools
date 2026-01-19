@@ -202,6 +202,9 @@ The following topics are loaded from the rosbag and replayed:
 - `/perception/object_recognition/objects` (autoware_perception_msgs/msg/PredictedObjects): Predicted objects (default)
 - `/perception/traffic_light_recognition/traffic_signals` (autoware_perception_msgs/msg/TrafficLightGroupArray): Traffic light signals
 - `/perception/occupancy_grid_map/map` (nav_msgs/msg/OccupancyGrid): Occupancy grid map (with transient_local QoS)
+- `/perception/obstacle_segmentation/pointcloud` (sensor_msgs/msg/PointCloud2): Obstacle segmentation pointclouds
+- `/planning/mission_planning/route` (autoware_planning_msgs/msg/LaneletRoute): Route (with transient_local QoS)
+- `/planning/mission_planning/state` (autoware_planning_msgs/msg/RouteState): Route state (with transient_local QoS)
 - `<any CompressedImage topic>` (sensor_msgs/msg/CompressedImage): Reference images for visualization (when `--reference-image-topics` is used)
 
 ### Published Topics
@@ -211,6 +214,9 @@ The following topics are published during replay:
 - `/perception/object_recognition/tracking/objects` or `/perception/object_recognition/objects`: Replayed perception objects
 - `/perception/traffic_light_recognition/traffic_signals`: Replayed traffic light signals
 - `/perception/occupancy_grid_map/map`: Replayed occupancy grid map (published with transient_local QoS, so late subscribers can receive the latest map)
+- `/perception/obstacle_segmentation/pointcloud` (sensor_msgs/msg/PointCloud2): Replayed obstacle segmentation pointclouds
+- `/planning/mission_planning/route` (autoware_planning_msgs/msg/LaneletRoute): Replayed route
+- `/planning/mission_planning/state` (autoware_planning_msgs/msg/RouteState): Replayed route state
 - `<any CompressedImage topic>`: Replayed reference images (published to the same topic name as in the rosbag)
 - `/perception_reproducer/rosbag_ego_odom`: Debug topic for recorded ego odometry
 - `/initialpose`: Initial pose (when `-p` option is used)
@@ -239,6 +245,13 @@ This design results in the following behavior:
 - `--reference-image-topics`: Comma-separated list of CompressedImage topics to load and publish (e.g., `"/sensing/camera/camera0/image_raw/compressed,/sensing/camera/camera1/image_raw/compressed"`)
 - `-v`, `--verbose`: Output debug data
 - `-h`, `--help`: Show help message
+- `--use-cache`: Use rosbag cache instead of reading all messages at once for large rosbags
+- `--cache-window-before`: Cache window size before current timestamp (seconds), default: 20.0
+- `--cache-window-after`: Cache window size after current timestamp (seconds), default: 40.0
+- `--use-rosbag-route`: Use route data from rosbag and publish it based on timestamp.
+- `--off-occupancy-grid-map`: Disable publishing occupancy grid map
+- `--off-pointcloud`: Disable publishing obstacle segmentation pointclouds
+
 
 ### How to use
 
@@ -290,6 +303,9 @@ The following topics are loaded from the rosbag and replayed:
 - `/perception/object_recognition/objects` (autoware_perception_msgs/msg/PredictedObjects): Predicted objects (default)
 - `/perception/traffic_light_recognition/traffic_signals` (autoware_perception_msgs/msg/TrafficLightGroupArray): Traffic light signals
 - `/perception/occupancy_grid_map/map` (nav_msgs/msg/OccupancyGrid): Occupancy grid map (with transient_local QoS)
+- `/planning/mission_planning/route` (autoware_planning_msgs/msg/LaneletRoute): Route (with transient_local QoS)
+- `/planning/mission_planning/state` (autoware_planning_msgs/msg/RouteState): Route state (with transient_local QoS)
+- `/perception/obstacle_segmentation/pointcloud` (sensor_msgs/msg/PointCloud2): Obstacle segmentation pointclouds
 - `<any CompressedImage topic>` (sensor_msgs/msg/CompressedImage): Reference images for visualization
 
 ### Published Topics
@@ -299,6 +315,9 @@ The following topics are published during replay:
 - `/perception/object_recognition/tracking/objects` or `/perception/object_recognition/objects`: Replayed perception objects
 - `/perception/traffic_light_recognition/traffic_signals`: Replayed traffic light signals
 - `/perception/occupancy_grid_map/map`: Replayed occupancy grid map (published with transient_local QoS, so late subscribers can receive the latest map)
+- `/planning/mission_planning/route` (autoware_planning_msgs/msg/LaneletRoute): Replayed route
+- `/planning/mission_planning/state` (autoware_planning_msgs/msg/RouteState): Replayed route state
+- `/perception/obstacle_segmentation/pointcloud` (sensor_msgs/msg/PointCloud2): Replayed obstacle segmentation pointclouds
 - `<any CompressedImage topic>`: Replayed reference images
 - `/perception_reproducer/rosbag_ego_odom`: Debug topic for recorded ego odometry
 
@@ -309,6 +328,11 @@ The following topics are published during replay:
 - `-f`, `--rosbag-format`: Specify rosbag data format (default: "db3")
 - `-v`, `--verbose`: Output debug data
 - `-h`, `--help`: Show help message
+- `--use-cache`: Use rosbag cache instead of reading all messages at once for large rosbags
+- `--cache-window-before`: Cache window size before current timestamp (seconds), default: 20.0
+- `--cache-window-after`: Cache window size after current timestamp (seconds), default: 40.0
+- `--off-occupancy-grid-map`: Disable publishing occupancy grid map
+- `--off-pointcloud`: Disable publishing obstacle segmentation pointclouds
 
 ### How to use
 

@@ -56,6 +56,7 @@ rclcpp_components_register_node(stop_reason_visualizer_node
 
 ament_auto_add_executable(perception_replayer
   src/perception_replayer/time_manager_widget.cpp
+  src/perception_replayer/rosbag_manager.cpp
   src/perception_replayer/perception_replayer_common.cpp
   src/perception_replayer/perception_replayer.cpp
   src/perception_replayer/perception_replayer_node.cpp
@@ -66,6 +67,7 @@ target_link_libraries(perception_replayer
 )
 
 ament_auto_add_executable(perception_reproducer
+  src/perception_replayer/rosbag_manager.cpp
   src/perception_replayer/perception_replayer_common.cpp
   src/perception_replayer/perception_reproducer.cpp
   src/perception_replayer/perception_reproducer_node.cpp
