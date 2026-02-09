@@ -32,6 +32,8 @@ ProcessResult BagProcessor::process(const std::string & bag_path, const std::str
   ProcessResult result;
   result.input_bag = bag_path;
 
+  const auto bag_name = std::filesystem::path(bag_path).filename().string();
+
   try {
     if (!std::filesystem::exists(bag_path)) {
       result.error_message = "Input bag does not exist: " + bag_path;
@@ -45,12 +47,12 @@ ProcessResult BagProcessor::process(const std::string & bag_path, const std::str
     result.events = events;
 
     if (events.empty()) {
-      std::cout << "  No override events found." << std::endl;
+      std::cout << "  [" << bag_name << "] No override events found." << std::endl;
       result.success = true;
       return result;
     }
 
-    std::cout << "  Found " << events.size() << " override event(s)" << std::endl;
+    std::cout << "  [" << bag_name << "] Found " << events.size() << " override event(s)" << std::endl;
 
     const auto base_name = getBagBaseName(bag_path);
     const auto output_subdir = std::filesystem::path(output_dir) / base_name;
@@ -59,7 +61,7 @@ ProcessResult BagProcessor::process(const std::string & bag_path, const std::str
 
     result.output_files = splitter_.split(bag_path, events, output_subdir.string());
 
-    std::cout << "  Extracted " << result.output_files.size() << " segment(s)" << std::endl;
+    std::cout << "  [" << bag_name << "] Extracted " << result.output_files.size() << " segment(s)" << std::endl;
 
     generateSummary(result, output_subdir.string());
 
@@ -67,7 +69,7 @@ ProcessResult BagProcessor::process(const std::string & bag_path, const std::str
 
   } catch (const std::exception & e) {
     result.error_message = std::string("Exception: ") + e.what();
-    std::cerr << "  Error: " << result.error_message << std::endl;
+    std::cerr << "  [" << bag_name << "] Error: " << result.error_message << std::endl;
   }
 
   return result;

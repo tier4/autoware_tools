@@ -55,11 +55,8 @@ void BagSplitter::extractSegment(
   storage_options.uri = output_path;
   storage_options.storage_id = config_.storage_id;
 
-  rosbag2_cpp::ConverterOptions converter_options;
-  converter_options.output_serialization_format = config_.serialization_format;
-
   rosbag2_cpp::Writer writer;
-  writer.open(storage_options, converter_options);
+  writer.open(storage_options);
 
   std::unordered_set<std::string> created_topics;
 
@@ -81,7 +78,7 @@ void BagSplitter::extractSegment(
           rosbag2_storage::TopicMetadata topic_metadata;
           topic_metadata.name = topic_meta.name;
           topic_metadata.type = topic_meta.type;
-          topic_metadata.serialization_format = config_.serialization_format;
+          topic_metadata.serialization_format = topic_meta.serialization_format;
 
           writer.create_topic(topic_metadata);
           created_topics.insert(bag_message->topic_name);

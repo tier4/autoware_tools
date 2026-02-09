@@ -18,11 +18,14 @@
       - "/vehicle/status/control_mode"
       - "/localization/kinematic_state"
       - "/perception/object_recognition/objects"
+      - "/perception/object_recognition/tracking/objects"
       - "/planning/trajectory"
       - "/vehicle/status/steering_status"
       - "/vehicle/status/velocity_status"
+      - "/vehicle/status/turn_indicators_status"
       - "/tf"
       - "/tf_static"
+      - "/planning/mission_planning/route"
 
     # Parallel processing
     num_threads: -1  # -1 = auto-detect
