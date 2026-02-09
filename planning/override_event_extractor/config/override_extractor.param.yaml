@@ -1,0 +1,33 @@
+/**:
+  ros__parameters:
+    # Override detection settings
+    control_mode_topic: "/vehicle/status/control_mode"
+    override_mode_value: 4  # MANUAL
+    autonomous_mode_value: 1  # AUTONOMOUS
+
+    # Time margins (seconds)
+    pre_margin: 1.0   # Before override starts
+    post_margin: 10.0 # After override ends
+
+    # Filtering
+    filter_brief_overrides: true
+    min_override_duration: 0.5  # seconds
+
+    # Topics to preserve in output MCAP files
+    preserved_topics:
+      - "/vehicle/status/control_mode"
+      - "/localization/kinematic_state"
+      - "/perception/object_recognition/objects"
+      - "/planning/trajectory"
+      - "/vehicle/status/steering_status"
+      - "/vehicle/status/velocity_status"
+      - "/tf"
+      - "/tf_static"
+
+    # Parallel processing
+    num_threads: -1  # -1 = auto-detect
+    recursive_scan: true
+
+    # Output settings
+    output_format: "mcap"
+    storage_preset: "mcap"
