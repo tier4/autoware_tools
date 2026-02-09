@@ -14,6 +14,8 @@
 
 #include "parallel_executor.hpp"
 
+#include <rosbag2_cpp/reader.hpp>
+
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -28,6 +30,22 @@ ParallelExecutor::ParallelExecutor(const ExecutorConfig & config)
 {
 }
 
+void ParallelExecutor::initializeStoragePlugins(const std::vector<std::string> & rosbags)
+{
+  if (rosbags.empty()) {
+    return;
+  }
+
+  try {
+    // Open the first rosbag to pre-load storage plugins in main thread
+    rosbag2_cpp::Reader reader;
+    reader.open(rosbags[0]);
+    // Plugin is now loaded, close immediately
+  } catch (const std::exception & e) {
+    std::cerr << "Warning: Could not pre-initialize storage plugins: " << e.what() << std::endl;
+  }
+}
+
 BatchResult ParallelExecutor::execute()
 {
   BatchResult batch_result;
@@ -40,6 +58,9 @@ BatchResult ParallelExecutor::execute()
   if (rosbags.empty()) {
     return batch_result;
   }
+
+  // Pre-initialize storage plugins to avoid race conditions in threads
+  initializeStoragePlugins(rosbags);
 
   std::vector<ProcessResult> results(rosbags.size());
   processWithThreadPool(rosbags, results);

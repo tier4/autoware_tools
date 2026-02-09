@@ -34,6 +34,8 @@ public:
 private:
   std::vector<std::string> discoverRosbags() const;
 
+  void initializeStoragePlugins(const std::vector<std::string> & rosbags);
+
   void processWithThreadPool(
     const std::vector<std::string> & bags, std::vector<ProcessResult> & results);
 
