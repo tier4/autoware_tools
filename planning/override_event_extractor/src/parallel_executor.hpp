@@ -18,7 +18,9 @@
 #include "bag_processor.hpp"
 #include "type_alias.hpp"
 
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace override_event_extractor
@@ -36,6 +38,10 @@ private:
 
   void initializeStoragePlugins(const std::vector<std::string> & rosbags);
 
+  std::string getBagSeriesName(const std::string & bag_path) const;
+
+  void extractRouteMessages(const std::vector<std::string> & rosbags);
+
   void processWithThreadPool(
     const std::vector<std::string> & bags, std::vector<ProcessResult> & results);
 
@@ -43,6 +49,7 @@ private:
 
   ExecutorConfig config_;
   BagProcessor processor_;
+  std::unordered_map<std::string, RouteMessage> route_cache_;
 };
 
 }  // namespace override_event_extractor

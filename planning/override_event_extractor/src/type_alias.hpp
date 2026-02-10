@@ -18,8 +18,10 @@
 #include <autoware_vehicle_msgs/msg/control_mode_report.hpp>
 
 #include <rosbag2_storage/bag_metadata.hpp>
+#include <rosbag2_storage/serialized_bag_message.hpp>
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -73,11 +75,19 @@ struct DetectorConfig
   double min_override_duration_sec{0.5};
 };
 
+struct RouteMessage
+{
+  std::shared_ptr<rosbag2_storage::SerializedBagMessage> message;
+  bool valid{false};
+};
+
 struct SplitterConfig
 {
   std::vector<std::string> preserved_topics;
   std::string storage_id{"mcap"};
   std::string serialization_format{"cdr"};
+  std::string route_topic{"/planning/mission_planning/route"};
+  RouteMessage route_message;
 };
 
 struct ProcessorConfig

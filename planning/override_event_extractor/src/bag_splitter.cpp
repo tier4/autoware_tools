@@ -14,6 +14,9 @@
 
 #include "bag_splitter.hpp"
 
+#include <rcutils/allocator.h>
+
+#include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -29,7 +32,7 @@ BagSplitter::BagSplitter(const SplitterConfig & config) : config_(config)
 
 std::vector<std::string> BagSplitter::split(
   const std::string & input_bag, const std::vector<OverrideEvent> & events,
-  const std::string & output_dir)
+  const std::string & output_dir, const RouteMessage & route_msg)
 {
   std::vector<std::string> output_files;
   const auto base_name = getBagBaseName(input_bag);
@@ -38,7 +41,7 @@ std::vector<std::string> BagSplitter::split(
     const auto output_filename = base_name + "_or_" + std::to_string(event.index) + ".mcap";
     const auto output_path = std::filesystem::path(output_dir) / output_filename;
 
-    extractSegment(input_bag, event, output_path.string());
+    extractSegment(input_bag, event, output_path.string(), route_msg);
     output_files.push_back(output_filename);
   }
 
@@ -46,7 +49,8 @@ std::vector<std::string> BagSplitter::split(
 }
 
 void BagSplitter::extractSegment(
-  const std::string & input_bag, const OverrideEvent & event, const std::string & output_path)
+  const std::string & input_bag, const OverrideEvent & event, const std::string & output_path,
+  const RouteMessage & route_msg)
 {
   rosbag2_cpp::Reader reader;
   reader.open(input_bag);
@@ -59,6 +63,46 @@ void BagSplitter::extractSegment(
   writer.open(storage_options);
 
   std::unordered_set<std::string> created_topics;
+
+  // Inject route message first if available
+  if (route_msg.valid && route_msg.message) {
+    // Create topic for route
+    const auto & topics = reader.get_all_topics_and_types();
+    for (const auto & topic_meta : topics) {
+      if (topic_meta.name == config_.route_topic) {
+        rosbag2_storage::TopicMetadata topic_metadata;
+        topic_metadata.name = topic_meta.name;
+        topic_metadata.type = topic_meta.type;
+        topic_metadata.serialization_format = topic_meta.serialization_format;
+
+        writer.create_topic(topic_metadata);
+        created_topics.insert(topic_meta.name);
+
+        // Create a deep copy of the route message with new timestamp
+        auto route_copy = std::make_shared<rosbag2_storage::SerializedBagMessage>();
+        route_copy->topic_name = route_msg.message->topic_name;
+        route_copy->time_stamp = event.extended_range.start_ns;
+        route_copy->serialized_data = std::make_shared<rcutils_uint8_array_t>();
+        *route_copy->serialized_data = rcutils_get_zero_initialized_uint8_array();
+
+        // Allocate and copy data
+        auto allocator = rcutils_get_default_allocator();
+        auto ret = rcutils_uint8_array_init(
+          route_copy->serialized_data.get(), route_msg.message->serialized_data->buffer_length,
+          &allocator);
+        if (ret == RCUTILS_RET_OK) {
+          memcpy(
+            route_copy->serialized_data->buffer, route_msg.message->serialized_data->buffer,
+            route_msg.message->serialized_data->buffer_length);
+          route_copy->serialized_data->buffer_length =
+            route_msg.message->serialized_data->buffer_length;
+
+          writer.write(route_copy);
+        }
+        break;
+      }
+    }
+  }
 
   while (reader.has_next()) {
     auto bag_message = reader.read_next();

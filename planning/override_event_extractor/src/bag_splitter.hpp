@@ -36,11 +36,12 @@ public:
 
   std::vector<std::string> split(
     const std::string & input_bag, const std::vector<OverrideEvent> & events,
-    const std::string & output_dir);
+    const std::string & output_dir, const RouteMessage & route_msg = RouteMessage());
 
 private:
   void extractSegment(
-    const std::string & input_bag, const OverrideEvent & event, const std::string & output_path);
+    const std::string & input_bag, const OverrideEvent & event, const std::string & output_path,
+    const RouteMessage & route_msg);
 
   bool inRange(int64_t timestamp, const TimeRange & range) const;
 

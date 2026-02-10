@@ -75,9 +75,11 @@ int main(int argc, char ** argv)
   config.processor_config.splitter_config.preserved_topics = {
     "/vehicle/status/control_mode", "/localization/kinematic_state",
     "/perception/object_recognition/objects", "/planning/trajectory",
-    "/vehicle/status/steering_status", "/vehicle/status/velocity_status", "/tf", "/tf_static"};
+    "/vehicle/status/steering_status", "/vehicle/status/velocity_status", "/tf", "/tf_static",
+    "/planning/mission_planning/route"};
   config.processor_config.splitter_config.storage_id = "mcap";
   config.processor_config.splitter_config.serialization_format = "cdr";
+  config.processor_config.splitter_config.route_topic = "/planning/mission_planning/route";
 
   config.num_threads = -1;
   config.recursive = false;

@@ -16,11 +16,14 @@
 
 #include <rosbag2_cpp/reader.hpp>
 
+#include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <thread>
 #include <future>
+#include <unordered_set>
 
 namespace override_event_extractor
 {
@@ -36,14 +39,107 @@ void ParallelExecutor::initializeStoragePlugins(const std::vector<std::string> &
     return;
   }
 
-  try {
-    // Open the first rosbag to pre-load storage plugins in main thread
-    rosbag2_cpp::Reader reader;
-    reader.open(rosbags[0]);
-    // Plugin is now loaded, close immediately
-  } catch (const std::exception & e) {
-    std::cerr << "Warning: Could not pre-initialize storage plugins: " << e.what() << std::endl;
+  // Open and close several bags to ensure plugins are fully loaded
+  // This prevents race conditions when many threads start simultaneously
+  int bags_to_open = std::min(static_cast<int>(rosbags.size()), 3);
+  for (int i = 0; i < bags_to_open; ++i) {
+    try {
+      rosbag2_cpp::Reader reader;
+      reader.open(rosbags[i]);
+      // Give plugin time to fully initialize
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    } catch (const std::exception & e) {
+      // Ignore errors during pre-initialization
+    }
   }
+
+  // Extract route messages from _0 bags
+  extractRouteMessages(rosbags);
+}
+
+std::string ParallelExecutor::getBagSeriesName(const std::string & bag_path) const
+{
+  std::filesystem::path p(bag_path);
+  std::string stem = p.stem().string();
+
+  // Remove _N suffix (e.g., recording_name_0 -> recording_name)
+  auto pos = stem.rfind('_');
+  if (pos != std::string::npos) {
+    std::string suffix = stem.substr(pos + 1);
+    // Check if suffix is a number
+    if (!suffix.empty() && std::all_of(suffix.begin(), suffix.end(), ::isdigit)) {
+      return stem.substr(0, pos);
+    }
+  }
+  return stem;
+}
+
+void ParallelExecutor::extractRouteMessages(const std::vector<std::string> & rosbags)
+{
+  const std::string route_topic = config_.processor_config.splitter_config.route_topic;
+  std::cout << "Extracting route messages from _0 bags..." << std::endl;
+
+  // Find all _0 bags first
+  std::vector<std::string> zero_bags;
+  std::unordered_set<std::string> seen_series;
+
+  for (const auto & bag_path : rosbags) {
+    std::filesystem::path p(bag_path);
+    std::string stem = p.stem().string();
+
+    // Only process _0 bags
+    if (stem.size() < 2 || stem.substr(stem.size() - 2) != "_0") {
+      continue;
+    }
+
+    std::string series_name = getBagSeriesName(bag_path);
+
+    // Skip if already seen this series
+    if (seen_series.find(series_name) != seen_series.end()) {
+      continue;
+    }
+
+    seen_series.insert(series_name);
+    zero_bags.push_back(bag_path);
+  }
+
+  if (zero_bags.empty()) {
+    std::cout << "No _0 bags found" << std::endl;
+    return;
+  }
+
+  // Extract routes sequentially (fast enough, avoids plugin race conditions)
+  for (const auto & bag_path : zero_bags) {
+    std::string series_name = getBagSeriesName(bag_path);
+
+    try {
+      rosbag2_cpp::Reader reader;
+      reader.open(bag_path);
+
+      rosbag2_storage::StorageFilter filter;
+      filter.topics.push_back(route_topic);
+      reader.set_filter(filter);
+
+      if (reader.has_next()) {
+        auto bag_message = reader.read_next();
+        if (bag_message->topic_name == route_topic) {
+          RouteMessage route_msg;
+          route_msg.message = std::make_shared<rosbag2_storage::SerializedBagMessage>(*bag_message);
+          route_msg.valid = true;
+          route_cache_[series_name] = route_msg;
+
+          std::filesystem::path p(bag_path);
+          std::cout << "  Extracted route from: " << p.filename().string() << std::endl;
+        }
+      }
+    } catch (const std::exception & e) {
+      std::filesystem::path p(bag_path);
+      std::cerr << "  Warning: Could not extract route from " << p.filename().string() << ": "
+                << e.what() << std::endl;
+    }
+  }
+
+  std::cout << "Found " << route_cache_.size() << " route message(s)" << std::endl;
 }
 
 BatchResult ParallelExecutor::execute()
@@ -134,11 +230,32 @@ void ParallelExecutor::processWithThreadPool(
   std::cout << "Using " << num_threads << " thread(s)" << std::endl;
 
   std::vector<std::future<ProcessResult>> futures;
+  std::vector<size_t> skipped_indices;
 
   for (size_t i = 0; i < bags.size(); ++i) {
+    // Look up route for this bag's series
+    std::string series_name = getBagSeriesName(bags[i]);
+    auto it = route_cache_.find(series_name);
+
+    if (it == route_cache_.end() || !it->second.valid) {
+      // No route found for this series - skip the bag
+      std::filesystem::path p(bags[i]);
+      std::cerr << "Warning: Skipping " << p.filename().string()
+                << " - no route found for series '" << series_name << "'" << std::endl;
+      ProcessResult skipped_result;
+      skipped_result.input_bag = bags[i];
+      skipped_result.success = false;
+      skipped_result.error_message = "No route message found for bag series '" + series_name + "'";
+      results[i] = skipped_result;
+      continue;
+    }
+
+    RouteMessage route_msg = it->second;
+
     auto future = std::async(
-      std::launch::async,
-      [this, &bags, i]() { return processor_.process(bags[i], config_.output_dir); });
+      std::launch::async, [this, &bags, i, route_msg]() {
+        return processor_.process(bags[i], config_.output_dir, route_msg);
+      });
     futures.push_back(std::move(future));
 
     if (futures.size() >= static_cast<size_t>(num_threads)) {

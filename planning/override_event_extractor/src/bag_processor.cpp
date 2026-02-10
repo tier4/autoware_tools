@@ -27,7 +27,8 @@ BagProcessor::BagProcessor(const ProcessorConfig & config)
 {
 }
 
-ProcessResult BagProcessor::process(const std::string & bag_path, const std::string & output_dir)
+ProcessResult BagProcessor::process(
+  const std::string & bag_path, const std::string & output_dir, const RouteMessage & route_msg)
 {
   ProcessResult result;
   result.input_bag = bag_path;
@@ -59,7 +60,7 @@ ProcessResult BagProcessor::process(const std::string & bag_path, const std::str
 
     std::filesystem::create_directories(output_subdir);
 
-    result.output_files = splitter_.split(bag_path, events, output_subdir.string());
+    result.output_files = splitter_.split(bag_path, events, output_subdir.string(), route_msg);
 
     std::cout << "  [" << bag_name << "] Extracted " << result.output_files.size() << " segment(s)" << std::endl;
 

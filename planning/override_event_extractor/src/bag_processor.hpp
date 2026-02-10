@@ -29,7 +29,9 @@ class BagProcessor
 public:
   explicit BagProcessor(const ProcessorConfig & config);
 
-  ProcessResult process(const std::string & bag_path, const std::string & output_dir);
+  ProcessResult process(
+    const std::string & bag_path, const std::string & output_dir,
+    const RouteMessage & route_msg = RouteMessage());
 
 private:
   void generateSummary(const ProcessResult & result, const std::string & output_dir) const;
