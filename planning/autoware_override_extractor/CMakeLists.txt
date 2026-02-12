@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(override_event_extractor)
+project(autoware_override_extractor)
 
 find_package(autoware_cmake REQUIRED)
 autoware_package()

@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>override_event_extractor</name>
+  <name>autoware_override_extractor</name>
   <version>0.1.0</version>
   <description>Tool for extracting override events from rosbags</description>
   <maintainer email="danielsanchez@tier4.jp">Daniel Sanchez</maintainer>
