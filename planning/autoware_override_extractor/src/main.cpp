@@ -23,7 +23,7 @@
 namespace override_event_extractor
 {
 
-void printUsage(const char * program_name)
+void print_usage(const char * program_name)
 {
   std::cout << "Usage: " << program_name << " [options]\n"
             << "\nRequired:\n"
@@ -41,7 +41,7 @@ void printUsage(const char * program_name)
             << std::endl;
 }
 
-std::vector<std::string> parseTopicList(const std::string & topics_str)
+std::vector<std::string> parse_topic_list(const std::string & topics_str)
 {
   std::vector<std::string> topics;
   std::stringstream ss(topics_str);
@@ -91,7 +91,7 @@ int main(int argc, char ** argv)
     std::string arg = argv[i];
 
     if (arg == "--help" || arg == "-h") {
-      printUsage(argv[0]);
+      print_usage(argv[0]);
       return 0;
     } else if (arg == "--input-dir" && i + 1 < argc) {
       config.input_dir = argv[++i];
@@ -108,21 +108,21 @@ int main(int argc, char ** argv)
     } else if (arg == "--no-filter-brief") {
       config.processor_config.detector_config.filter_brief_overrides = false;
     } else if (arg == "--topics" && i + 1 < argc) {
-      config.processor_config.splitter_config.preserved_topics = parseTopicList(argv[++i]);
+      config.processor_config.splitter_config.preserved_topics = parse_topic_list(argv[++i]);
     } else if (arg == "--pre-margin" && i + 1 < argc) {
       config.processor_config.detector_config.pre_margin_sec = std::stod(argv[++i]);
     } else if (arg == "--post-margin" && i + 1 < argc) {
       config.processor_config.detector_config.post_margin_sec = std::stod(argv[++i]);
     } else {
       std::cerr << "Unknown argument: " << arg << std::endl;
-      printUsage(argv[0]);
+      print_usage(argv[0]);
       return 1;
     }
   }
 
   if (!has_input_dir || !has_output_dir) {
     std::cerr << "Error: --input-dir and --output-dir are required" << std::endl;
-    printUsage(argv[0]);
+    print_usage(argv[0]);
     return 1;
   }
 

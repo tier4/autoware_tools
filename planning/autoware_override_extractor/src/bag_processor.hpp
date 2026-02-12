@@ -34,9 +34,9 @@ public:
     const RouteMessage & route_msg = RouteMessage());
 
 private:
-  void generateSummary(const ProcessResult & result, const std::string & output_dir) const;
+  void generate_summary(const ProcessResult & result, const std::string & output_dir) const;
 
-  std::string getBagBaseName(const std::string & bag_path) const;
+  std::string get_bag_base_name(const std::string & bag_path) const;
 
   ProcessorConfig config_;
   OverrideDetector detector_;

@@ -35,20 +35,20 @@ std::vector<std::string> BagSplitter::split(
   const std::string & output_dir, const RouteMessage & route_msg)
 {
   std::vector<std::string> output_files;
-  const auto base_name = getBagBaseName(input_bag);
+  const auto base_name = get_bag_base_name(input_bag);
 
   for (const auto & event : events) {
     const auto output_filename = base_name + "_or_" + std::to_string(event.index) + ".mcap";
     const auto output_path = std::filesystem::path(output_dir) / output_filename;
 
-    extractSegment(input_bag, event, output_path.string(), route_msg);
+    extract_segment(input_bag, event, output_path.string(), route_msg);
     output_files.push_back(output_filename);
   }
 
   return output_files;
 }
 
-void BagSplitter::extractSegment(
+void BagSplitter::extract_segment(
   const std::string & input_bag, const OverrideEvent & event, const std::string & output_path,
   const RouteMessage & route_msg)
 {
@@ -107,11 +107,11 @@ void BagSplitter::extractSegment(
   while (reader.has_next()) {
     auto bag_message = reader.read_next();
 
-    if (!inRange(bag_message->time_stamp, event.extended_range)) {
+    if (!in_range(bag_message->time_stamp, event.extended_range)) {
       continue;
     }
 
-    if (!shouldPreserveTopic(bag_message->topic_name)) {
+    if (!should_preserve_topic(bag_message->topic_name)) {
       continue;
     }
 
@@ -135,17 +135,17 @@ void BagSplitter::extractSegment(
   }
 }
 
-bool BagSplitter::inRange(int64_t timestamp, const TimeRange & range) const
+bool BagSplitter::in_range(int64_t timestamp, const TimeRange & range) const
 {
   return timestamp >= range.start_ns && timestamp <= range.end_ns;
 }
 
-bool BagSplitter::shouldPreserveTopic(const std::string & topic_name) const
+bool BagSplitter::should_preserve_topic(const std::string & topic_name) const
 {
   return preserved_topics_set_.find(topic_name) != preserved_topics_set_.end();
 }
 
-std::string BagSplitter::getBagBaseName(const std::string & bag_path) const
+std::string BagSplitter::get_bag_base_name(const std::string & bag_path) const
 {
   std::filesystem::path p(bag_path);
   auto stem = p.stem().string();

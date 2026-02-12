@@ -33,7 +33,7 @@ ParallelExecutor::ParallelExecutor(const ExecutorConfig & config)
 {
 }
 
-void ParallelExecutor::initializeStoragePlugins(const std::vector<std::string> & rosbags)
+void ParallelExecutor::initialize_storage_plugins(const std::vector<std::string> & rosbags)
 {
   if (rosbags.empty()) {
     return;
@@ -54,10 +54,10 @@ void ParallelExecutor::initializeStoragePlugins(const std::vector<std::string> &
   }
 
   // Extract route messages from _0 bags
-  extractRouteMessages(rosbags);
+  extract_route_messages(rosbags);
 }
 
-std::string ParallelExecutor::getBagSeriesName(const std::string & bag_path) const
+std::string ParallelExecutor::get_bag_series_name(const std::string & bag_path) const
 {
   std::filesystem::path p(bag_path);
   std::string stem = p.stem().string();
@@ -74,7 +74,7 @@ std::string ParallelExecutor::getBagSeriesName(const std::string & bag_path) con
   return stem;
 }
 
-void ParallelExecutor::extractRouteMessages(const std::vector<std::string> & rosbags)
+void ParallelExecutor::extract_route_messages(const std::vector<std::string> & rosbags)
 {
   const std::string route_topic = config_.processor_config.splitter_config.route_topic;
   std::cout << "Extracting route messages from _0 bags..." << std::endl;
@@ -92,7 +92,7 @@ void ParallelExecutor::extractRouteMessages(const std::vector<std::string> & ros
       continue;
     }
 
-    std::string series_name = getBagSeriesName(bag_path);
+    std::string series_name = get_bag_series_name(bag_path);
 
     // Skip if already seen this series
     if (seen_series.find(series_name) != seen_series.end()) {
@@ -110,7 +110,7 @@ void ParallelExecutor::extractRouteMessages(const std::vector<std::string> & ros
 
   // Extract routes sequentially (fast enough, avoids plugin race conditions)
   for (const auto & bag_path : zero_bags) {
-    std::string series_name = getBagSeriesName(bag_path);
+    std::string series_name = get_bag_series_name(bag_path);
 
     try {
       rosbag2_cpp::Reader reader;
@@ -148,7 +148,7 @@ BatchResult ParallelExecutor::execute()
 
   std::filesystem::create_directories(config_.output_dir);
 
-  auto rosbags = discoverRosbags();
+  auto rosbags = discover_rosbags();
   std::cout << "Discovered " << rosbags.size() << " rosbag(s) to process" << std::endl;
 
   if (rosbags.empty()) {
@@ -156,10 +156,10 @@ BatchResult ParallelExecutor::execute()
   }
 
   // Pre-initialize storage plugins to avoid race conditions in threads
-  initializeStoragePlugins(rosbags);
+  initialize_storage_plugins(rosbags);
 
   std::vector<ProcessResult> results(rosbags.size());
-  processWithThreadPool(rosbags, results);
+  process_with_thread_pool(rosbags, results);
 
   batch_result.results = results;
   batch_result.total_bags_processed = rosbags.size();
@@ -172,7 +172,7 @@ BatchResult ParallelExecutor::execute()
     }
   }
 
-  generateBatchSummary(batch_result);
+  generate_batch_summary(batch_result);
 
   std::cout << "\nBatch processing complete:" << std::endl;
   std::cout << "  Total bags processed: " << batch_result.total_bags_processed << std::endl;
@@ -182,7 +182,7 @@ BatchResult ParallelExecutor::execute()
   return batch_result;
 }
 
-std::vector<std::string> ParallelExecutor::discoverRosbags() const
+std::vector<std::string> ParallelExecutor::discover_rosbags() const
 {
   std::vector<std::string> rosbags;
 
@@ -218,7 +218,7 @@ std::vector<std::string> ParallelExecutor::discoverRosbags() const
   return rosbags;
 }
 
-void ParallelExecutor::processWithThreadPool(
+void ParallelExecutor::process_with_thread_pool(
   const std::vector<std::string> & bags, std::vector<ProcessResult> & results)
 {
   int num_threads = config_.num_threads;
@@ -234,7 +234,7 @@ void ParallelExecutor::processWithThreadPool(
 
   for (size_t i = 0; i < bags.size(); ++i) {
     // Look up route for this bag's series
-    std::string series_name = getBagSeriesName(bags[i]);
+    std::string series_name = get_bag_series_name(bags[i]);
     auto it = route_cache_.find(series_name);
 
     if (it == route_cache_.end() || !it->second.valid) {
@@ -271,7 +271,7 @@ void ParallelExecutor::processWithThreadPool(
   }
 }
 
-void ParallelExecutor::generateBatchSummary(const BatchResult & result) const
+void ParallelExecutor::generate_batch_summary(const BatchResult & result) const
 {
   const auto summary_path = std::filesystem::path(config_.output_dir) / "batch_summary.json";
   std::ofstream out(summary_path);

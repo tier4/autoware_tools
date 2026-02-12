@@ -34,18 +34,18 @@ public:
   BatchResult execute();
 
 private:
-  std::vector<std::string> discoverRosbags() const;
+  std::vector<std::string> discover_rosbags() const;
 
-  void initializeStoragePlugins(const std::vector<std::string> & rosbags);
+  void initialize_storage_plugins(const std::vector<std::string> & rosbags);
 
-  std::string getBagSeriesName(const std::string & bag_path) const;
+  std::string get_bag_series_name(const std::string & bag_path) const;
 
-  void extractRouteMessages(const std::vector<std::string> & rosbags);
+  void extract_route_messages(const std::vector<std::string> & rosbags);
 
-  void processWithThreadPool(
+  void process_with_thread_pool(
     const std::vector<std::string> & bags, std::vector<ProcessResult> & results);
 
-  void generateBatchSummary(const BatchResult & result) const;
+  void generate_batch_summary(const BatchResult & result) const;
 
   ExecutorConfig config_;
   BagProcessor processor_;

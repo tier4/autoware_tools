@@ -39,15 +39,15 @@ public:
     const std::string & output_dir, const RouteMessage & route_msg = RouteMessage());
 
 private:
-  void extractSegment(
+  void extract_segment(
     const std::string & input_bag, const OverrideEvent & event, const std::string & output_path,
     const RouteMessage & route_msg);
 
-  bool inRange(int64_t timestamp, const TimeRange & range) const;
+  bool in_range(int64_t timestamp, const TimeRange & range) const;
 
-  bool shouldPreserveTopic(const std::string & topic_name) const;
+  bool should_preserve_topic(const std::string & topic_name) const;
 
-  std::string getBagBaseName(const std::string & bag_path) const;
+  std::string get_bag_base_name(const std::string & bag_path) const;
 
   SplitterConfig config_;
   std::unordered_set<std::string> preserved_topics_set_;

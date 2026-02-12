@@ -55,7 +55,7 @@ ProcessResult BagProcessor::process(
 
     std::cout << "  [" << bag_name << "] Found " << events.size() << " override event(s)" << std::endl;
 
-    const auto base_name = getBagBaseName(bag_path);
+    const auto base_name = get_bag_base_name(bag_path);
     const auto output_subdir = std::filesystem::path(output_dir) / base_name;
 
     std::filesystem::create_directories(output_subdir);
@@ -64,7 +64,7 @@ ProcessResult BagProcessor::process(
 
     std::cout << "  [" << bag_name << "] Extracted " << result.output_files.size() << " segment(s)" << std::endl;
 
-    generateSummary(result, output_subdir.string());
+    generate_summary(result, output_subdir.string());
 
     result.success = true;
 
@@ -76,7 +76,7 @@ ProcessResult BagProcessor::process(
   return result;
 }
 
-void BagProcessor::generateSummary(
+void BagProcessor::generate_summary(
   const ProcessResult & result, const std::string & output_dir) const
 {
   const auto summary_path = std::filesystem::path(output_dir) / "summary.json";
@@ -115,7 +115,7 @@ void BagProcessor::generateSummary(
   out.close();
 }
 
-std::string BagProcessor::getBagBaseName(const std::string & bag_path) const
+std::string BagProcessor::get_bag_base_name(const std::string & bag_path) const
 {
   std::filesystem::path p(bag_path);
   auto stem = p.stem().string();

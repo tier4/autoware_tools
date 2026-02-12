@@ -54,15 +54,15 @@ std::vector<OverrideEvent> OverrideDetector::detect(const std::string & bag_path
     const auto current_mode = msg.mode;
     const auto timestamp = bag_message->time_stamp;
 
-    if (!isOverrideActive(last_mode) && isOverrideActive(current_mode)) {
+    if (!is_override_active(last_mode) && is_override_active(current_mode)) {
       override_start = timestamp;
-    } else if (isOverrideActive(last_mode) && !isOverrideActive(current_mode)) {
+    } else if (is_override_active(last_mode) && !is_override_active(current_mode)) {
       if (override_start.has_value()) {
         TimeRange raw_range{override_start.value(), timestamp};
 
-        if (!config_.filter_brief_overrides || meetsMinimumDuration(raw_range)) {
+        if (!config_.filter_brief_overrides || meets_minimum_duration(raw_range)) {
           OverrideEvent event(raw_range, raw_range, raw_events.size());
-          applyMargins(event);
+          apply_margins(event);
           raw_events.push_back(event);
         }
 
@@ -79,22 +79,22 @@ std::vector<OverrideEvent> OverrideDetector::detect(const std::string & bag_path
                     duration_cast<nanoseconds>(metadata.starting_time.time_since_epoch()).count();
 
     TimeRange raw_range{override_start.value(), end_time};
-    if (!config_.filter_brief_overrides || meetsMinimumDuration(raw_range)) {
+    if (!config_.filter_brief_overrides || meets_minimum_duration(raw_range)) {
       OverrideEvent event(raw_range, raw_range, raw_events.size());
-      applyMargins(event);
+      apply_margins(event);
       raw_events.push_back(event);
     }
   }
 
-  return mergeOverlapping(raw_events);
+  return merge_overlapping(raw_events);
 }
 
-bool OverrideDetector::isOverrideActive(uint8_t mode) const
+bool OverrideDetector::is_override_active(uint8_t mode) const
 {
   return mode == config_.override_mode_value;
 }
 
-void OverrideDetector::applyMargins(OverrideEvent & event) const
+void OverrideDetector::apply_margins(OverrideEvent & event) const
 {
   const auto pre_margin_ns = static_cast<int64_t>(config_.pre_margin_sec * 1e9);
   const auto post_margin_ns = static_cast<int64_t>(config_.post_margin_sec * 1e9);
@@ -105,7 +105,7 @@ void OverrideDetector::applyMargins(OverrideEvent & event) const
   event.extended_range.end_ns = raw_start + post_margin_ns;
 }
 
-std::vector<OverrideEvent> OverrideDetector::mergeOverlapping(
+std::vector<OverrideEvent> OverrideDetector::merge_overlapping(
   const std::vector<OverrideEvent> & events) const
 {
   if (events.empty()) {
@@ -139,7 +139,7 @@ std::vector<OverrideEvent> OverrideDetector::mergeOverlapping(
   return merged;
 }
 
-bool OverrideDetector::meetsMinimumDuration(const TimeRange & range) const
+bool OverrideDetector::meets_minimum_duration(const TimeRange & range) const
 {
   return range.duration_seconds() >= config_.min_override_duration_sec;
 }

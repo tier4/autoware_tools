@@ -37,13 +37,13 @@ public:
   std::vector<OverrideEvent> detect(const std::string & bag_path);
 
 private:
-  bool isOverrideActive(uint8_t mode) const;
+  bool is_override_active(uint8_t mode) const;
 
-  void applyMargins(OverrideEvent & event) const;
+  void apply_margins(OverrideEvent & event) const;
 
-  std::vector<OverrideEvent> mergeOverlapping(const std::vector<OverrideEvent> & events) const;
+  std::vector<OverrideEvent> merge_overlapping(const std::vector<OverrideEvent> & events) const;
 
-  bool meetsMinimumDuration(const TimeRange & range) const;
+  bool meets_minimum_duration(const TimeRange & range) const;
 
   DetectorConfig config_;
 };
