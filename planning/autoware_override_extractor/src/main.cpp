@@ -15,6 +15,8 @@
 #include "parallel_executor.hpp"
 #include "type_alias.hpp"
 
+#include <rclcpp/rclcpp.hpp>
+
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -22,6 +24,72 @@
 
 namespace override_event_extractor
 {
+
+class OverrideExtractorNode : public rclcpp::Node
+{
+public:
+  OverrideExtractorNode() : Node("override_extractor_node")
+  {
+    declare_parameter("input_dir", "");
+    declare_parameter("output_dir", "");
+    declare_parameter("control_mode_topic", "/vehicle/status/control_mode");
+    declare_parameter("override_mode_value", 4);
+    declare_parameter("autonomous_mode_value", 1);
+    declare_parameter("pre_margin", 1.0);
+    declare_parameter("post_margin", 10.0);
+    declare_parameter("filter_brief_overrides", true);
+    declare_parameter("min_override_duration", 0.5);
+    declare_parameter("num_threads", -1);
+    declare_parameter("recursive_scan", false);
+    declare_parameter("output_format", "mcap");
+    declare_parameter("storage_preset", "mcap");
+    declare_parameter(
+      "preserved_topics",
+      std::vector<std::string>{"/vehicle/status/control_mode", "/localization/kinematic_state",
+                               "/localization/acceleration",
+                               "/perception/object_recognition/tracking/objects",
+                               "/perception/traffic_light_recognition/traffic_signals",
+                               "/vehicle/status/turn_indicators_status",
+                               "/planning/mission_planning/route", "/tf", "/tf_static",
+                               "/planning/trajectory", "/vehicle/status/steering_status",
+                               "/vehicle/status/velocity_status"});
+    declare_parameter("preserve_all_topics", false);
+  }
+
+  ExecutorConfig get_config() const
+  {
+    ExecutorConfig config;
+
+    config.input_dir = get_parameter("input_dir").as_string();
+    config.output_dir = get_parameter("output_dir").as_string();
+    config.num_threads = get_parameter("num_threads").as_int();
+    config.recursive = get_parameter("recursive_scan").as_bool();
+
+    config.processor_config.detector_config.control_mode_topic =
+      get_parameter("control_mode_topic").as_string();
+    config.processor_config.detector_config.override_mode_value =
+      get_parameter("override_mode_value").as_int();
+    config.processor_config.detector_config.autonomous_mode_value =
+      get_parameter("autonomous_mode_value").as_int();
+    config.processor_config.detector_config.pre_margin_sec = get_parameter("pre_margin").as_double();
+    config.processor_config.detector_config.post_margin_sec =
+      get_parameter("post_margin").as_double();
+    config.processor_config.detector_config.filter_brief_overrides =
+      get_parameter("filter_brief_overrides").as_bool();
+    config.processor_config.detector_config.min_override_duration_sec =
+      get_parameter("min_override_duration").as_double();
+
+    config.processor_config.splitter_config.preserved_topics =
+      get_parameter("preserved_topics").as_string_array();
+    config.processor_config.splitter_config.preserve_all_topics =
+      get_parameter("preserve_all_topics").as_bool();
+    config.processor_config.splitter_config.storage_id = get_parameter("output_format").as_string();
+    config.processor_config.splitter_config.serialization_format = "cdr";
+    config.processor_config.splitter_config.route_topic = "/planning/mission_planning/route";
+
+    return config;
+  }
+};
 
 void print_usage(const char * program_name)
 {
@@ -35,6 +103,7 @@ void print_usage(const char * program_name)
             << "  --min-duration <sec>     Minimum override duration in seconds (default: 0.5)\n"
             << "  --no-filter-brief        Disable filtering of brief overrides\n"
             << "  --topics <t1,t2,...>     Comma-separated list of topics to preserve\n"
+            << "  --all-topics             Preserve all topics (disables topic filtering)\n"
             << "  --pre-margin <sec>       Pre-margin in seconds (default: 1.0)\n"
             << "  --post-margin <sec>      Post-margin in seconds (default: 10.0)\n"
             << "  --help                   Show this help message\n"
@@ -62,43 +131,23 @@ int main(int argc, char ** argv)
 {
   using namespace override_event_extractor;
 
-  ExecutorConfig config;
+  rclcpp::init(argc, argv);
 
-  config.processor_config.detector_config.control_mode_topic = "/vehicle/status/control_mode";
-  config.processor_config.detector_config.override_mode_value = 4;
-  config.processor_config.detector_config.autonomous_mode_value = 1;
-  config.processor_config.detector_config.pre_margin_sec = 1.0;
-  config.processor_config.detector_config.post_margin_sec = 10.0;
-  config.processor_config.detector_config.filter_brief_overrides = true;
-  config.processor_config.detector_config.min_override_duration_sec = 0.5;
+  auto node = std::make_shared<OverrideExtractorNode>();
 
-  config.processor_config.splitter_config.preserved_topics = {
-    "/vehicle/status/control_mode", "/localization/kinematic_state",
-    "/perception/object_recognition/objects", "/planning/trajectory",
-    "/vehicle/status/steering_status", "/vehicle/status/velocity_status", "/tf", "/tf_static",
-    "/planning/mission_planning/route"};
-  config.processor_config.splitter_config.storage_id = "mcap";
-  config.processor_config.splitter_config.serialization_format = "cdr";
-  config.processor_config.splitter_config.route_topic = "/planning/mission_planning/route";
-
-  config.num_threads = -1;
-  config.recursive = false;
-
-  bool has_input_dir = false;
-  bool has_output_dir = false;
+  ExecutorConfig config = node->get_config();
 
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
 
     if (arg == "--help" || arg == "-h") {
       print_usage(argv[0]);
+      rclcpp::shutdown();
       return 0;
     } else if (arg == "--input-dir" && i + 1 < argc) {
       config.input_dir = argv[++i];
-      has_input_dir = true;
     } else if (arg == "--output-dir" && i + 1 < argc) {
       config.output_dir = argv[++i];
-      has_output_dir = true;
     } else if (arg == "--threads" && i + 1 < argc) {
       config.num_threads = std::stoi(argv[++i]);
     } else if (arg == "--recursive") {
@@ -109,46 +158,57 @@ int main(int argc, char ** argv)
       config.processor_config.detector_config.filter_brief_overrides = false;
     } else if (arg == "--topics" && i + 1 < argc) {
       config.processor_config.splitter_config.preserved_topics = parse_topic_list(argv[++i]);
+    } else if (arg == "--all-topics") {
+      config.processor_config.splitter_config.preserve_all_topics = true;
     } else if (arg == "--pre-margin" && i + 1 < argc) {
       config.processor_config.detector_config.pre_margin_sec = std::stod(argv[++i]);
     } else if (arg == "--post-margin" && i + 1 < argc) {
       config.processor_config.detector_config.post_margin_sec = std::stod(argv[++i]);
-    } else {
+    } else if (arg.rfind("--ros-args", 0) == 0 || arg.rfind("-r", 0) == 0 || arg.rfind("__", 0) == 0 || arg == "--params-file" || arg == "-p") {
+      if ((arg == "--params-file" || arg == "-p") && i + 1 < argc) {
+        ++i;  // Skip the next argument (the file path or param assignment)
+      }
+      continue;
+    } else if (i > 1) {
       std::cerr << "Unknown argument: " << arg << std::endl;
       print_usage(argv[0]);
+      rclcpp::shutdown();
       return 1;
     }
   }
 
-  if (!has_input_dir || !has_output_dir) {
-    std::cerr << "Error: --input-dir and --output-dir are required" << std::endl;
-    print_usage(argv[0]);
+  if (config.input_dir.empty() || config.output_dir.empty()) {
+    RCLCPP_ERROR(node->get_logger(), "input_dir and output_dir parameters are required");
+    rclcpp::shutdown();
     return 1;
   }
 
-  std::cout << "Override Event Extractor" << std::endl;
-  std::cout << "========================" << std::endl;
-  std::cout << "Input directory: " << config.input_dir << std::endl;
-  std::cout << "Output directory: " << config.output_dir << std::endl;
-  std::cout << "Pre-margin: " << config.processor_config.detector_config.pre_margin_sec << "s"
-            << std::endl;
-  std::cout << "Post-margin: " << config.processor_config.detector_config.post_margin_sec << "s"
-            << std::endl;
-  std::cout << "Min duration: " << config.processor_config.detector_config.min_override_duration_sec
-            << "s" << std::endl;
-  std::cout << "Filter brief overrides: "
-            << (config.processor_config.detector_config.filter_brief_overrides ? "yes" : "no")
-            << std::endl;
-  std::cout << "Recursive scan: " << (config.recursive ? "yes" : "no") << std::endl;
-  std::cout << std::endl;
+  RCLCPP_INFO(node->get_logger(), "Override Event Extractor");
+  RCLCPP_INFO(node->get_logger(), "========================");
+  RCLCPP_INFO(node->get_logger(), "Input directory: %s", config.input_dir.c_str());
+  RCLCPP_INFO(node->get_logger(), "Output directory: %s", config.output_dir.c_str());
+  RCLCPP_INFO(
+    node->get_logger(), "Pre-margin: %.1fs", config.processor_config.detector_config.pre_margin_sec);
+  RCLCPP_INFO(
+    node->get_logger(), "Post-margin: %.1fs",
+    config.processor_config.detector_config.post_margin_sec);
+  RCLCPP_INFO(
+    node->get_logger(), "Min duration: %.1fs",
+    config.processor_config.detector_config.min_override_duration_sec);
+  RCLCPP_INFO(
+    node->get_logger(), "Filter brief overrides: %s",
+    config.processor_config.detector_config.filter_brief_overrides ? "yes" : "no");
+  RCLCPP_INFO(node->get_logger(), "Recursive scan: %s", config.recursive ? "yes" : "no");
 
   try {
     ParallelExecutor executor(config);
     executor.execute();
   } catch (const std::exception & e) {
-    std::cerr << "Fatal error: " << e.what() << std::endl;
+    RCLCPP_ERROR(node->get_logger(), "Fatal error: %s", e.what());
+    rclcpp::shutdown();
     return 1;
   }
 
+  rclcpp::shutdown();
   return 0;
 }

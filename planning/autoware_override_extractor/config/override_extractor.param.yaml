@@ -14,21 +14,27 @@
     min_override_duration: 0.5  # seconds
 
     # Topics to preserve in output MCAP files
+    # Required for Diffusion Planner NPZ conversion
     preserved_topics:
       - "/vehicle/status/control_mode"
-      - "/localization/kinematic_state"
-      - "/perception/object_recognition/objects"
-      - "/perception/object_recognition/tracking/objects"
+      - "/localization/kinematic_state"  # Odometry for ego state
+      - "/localization/acceleration"     # Ego acceleration
+      - "/perception/object_recognition/tracking/objects"  # Tracked objects (neighbors)
+      - "/perception/traffic_light_recognition/traffic_signals"  # Traffic light states
+      - "/vehicle/status/turn_indicators_status"  # Turn indicator state
+      - "/planning/mission_planning/route"  # Route (injected from first bag)
+      - "/tf"
+      - "/tf_static"
+      # Optional: additional topics for analysis
       - "/planning/trajectory"
       - "/vehicle/status/steering_status"
       - "/vehicle/status/velocity_status"
-      - "/vehicle/status/turn_indicators_status"
-      - "/tf"
-      - "/tf_static"
-      - "/planning/mission_planning/route"
+
+    # Preserve all topics (disables topic filtering)
+    preserve_all_topics: false
 
     # Parallel processing
-    num_threads: -1  # -1 = auto-detect
+    num_threads: 2  # Number of parallel threads (-1 = auto-detect, default: 2)
     recursive_scan: true
 
     # Output settings

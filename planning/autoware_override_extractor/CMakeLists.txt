@@ -15,4 +15,5 @@ ament_auto_add_executable(${PROJECT_NAME}_node
 ament_auto_package(
   INSTALL_TO_SHARE
   config
+  launch
 )

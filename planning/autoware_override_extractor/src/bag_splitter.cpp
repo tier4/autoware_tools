@@ -142,6 +142,9 @@ bool BagSplitter::in_range(int64_t timestamp, const TimeRange & range) const
 
 bool BagSplitter::should_preserve_topic(const std::string & topic_name) const
 {
+  if (config_.preserve_all_topics) {
+    return true;
+  }
   return preserved_topics_set_.find(topic_name) != preserved_topics_set_.end();
 }
 

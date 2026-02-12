@@ -84,6 +84,7 @@ struct RouteMessage
 struct SplitterConfig
 {
   std::vector<std::string> preserved_topics;
+  bool preserve_all_topics{false};
   std::string storage_id{"mcap"};
   std::string serialization_format{"cdr"};
   std::string route_topic{"/planning/mission_planning/route"};

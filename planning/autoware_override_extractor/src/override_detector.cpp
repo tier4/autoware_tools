@@ -99,10 +99,8 @@ void OverrideDetector::apply_margins(OverrideEvent & event) const
   const auto pre_margin_ns = static_cast<int64_t>(config_.pre_margin_sec * 1e9);
   const auto post_margin_ns = static_cast<int64_t>(config_.post_margin_sec * 1e9);
 
-  const int64_t raw_start = event.raw_range.start_ns;
-
-  event.extended_range.start_ns = std::max<int64_t>(0, raw_start - pre_margin_ns);
-  event.extended_range.end_ns = raw_start + post_margin_ns;
+  event.extended_range.start_ns = std::max<int64_t>(0, event.raw_range.start_ns - pre_margin_ns);
+  event.extended_range.end_ns = event.raw_range.end_ns + post_margin_ns;
 }
 
 std::vector<OverrideEvent> OverrideDetector::merge_overlapping(

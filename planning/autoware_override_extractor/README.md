@@ -15,24 +15,41 @@ A tool for extracting override events from Autoware rosbag recordings. This tool
 
 ```bash
 cd /path/to/autoware/workspace
-colcon build --packages-select override_event_extractor --symlink-install
+colcon build --packages-select autoware_override_extractor --symlink-install
 source install/setup.bash
 ```
 
 ## Usage
 
-### Basic Usage
+### Using Launch File (Recommended)
 
 ```bash
-ros2 run override_event_extractor override_event_extractor_node \
+ros2 launch autoware_override_extractor override_extractor.launch.py \
+  input_dir:=/data/rosbags \
+  output_dir:=/data/override_segments
+```
+
+### Using ros2 run
+
+```bash
+ros2 run autoware_override_extractor autoware_override_extractor_node \
   --input-dir /data/rosbags \
   --output-dir /data/override_segments
 ```
 
 ### Advanced Options
 
+**With launch file:**
 ```bash
-ros2 run override_event_extractor override_event_extractor_node \
+ros2 launch autoware_override_extractor override_extractor.launch.py \
+  input_dir:=/data/rosbags \
+  output_dir:=/data/override_segments \
+  config_file:=/path/to/custom_config.yaml
+```
+
+**With command-line arguments:**
+```bash
+ros2 run autoware_override_extractor autoware_override_extractor_node \
   --input-dir /data/rosbags \
   --output-dir /data/override_segments \
   --threads 8 \
@@ -94,7 +111,7 @@ Edit `config/override_extractor.param.yaml` to customize:
 ### Process all rosbags in a directory
 
 ```bash
-ros2 run override_event_extractor override_event_extractor_node \
+ros2 run autoware_override_extractor autoware_override_extractor_node \
   --input-dir /data/2024_recordings \
   --output-dir /data/overrides \
   --recursive
@@ -103,7 +120,7 @@ ros2 run override_event_extractor override_event_extractor_node \
 ### Custom topic list
 
 ```bash
-ros2 run override_event_extractor override_event_extractor_node \
+ros2 run autoware_override_extractor autoware_override_extractor_node \
   --input-dir /data/rosbags \
   --output-dir /data/output \
   --topics "/tf,/localization/kinematic_state,/planning/trajectory"
@@ -112,7 +129,7 @@ ros2 run override_event_extractor override_event_extractor_node \
 ### Filter out very brief overrides
 
 ```bash
-ros2 run override_event_extractor override_event_extractor_node \
+ros2 run autoware_override_extractor autoware_override_extractor_node \
   --input-dir /data/rosbags \
   --output-dir /data/output \
   --min-duration 2.0

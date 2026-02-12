@@ -14,10 +14,13 @@
 
 #include "bag_processor.hpp"
 
+#include <chrono>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iomanip>
+#include <sstream>
 
 namespace override_event_extractor
 {
@@ -56,7 +59,8 @@ ProcessResult BagProcessor::process(
     std::cout << "  [" << bag_name << "] Found " << events.size() << " override event(s)" << std::endl;
 
     const auto base_name = get_bag_base_name(bag_path);
-    const auto output_subdir = std::filesystem::path(output_dir) / base_name;
+    const auto date = extract_date_from_bag_name(base_name);
+    const auto output_subdir = std::filesystem::path(output_dir) / date / base_name;
 
     std::filesystem::create_directories(output_subdir);
 
@@ -125,6 +129,22 @@ std::string BagProcessor::get_bag_base_name(const std::string & bag_path) const
   }
 
   return stem;
+}
+
+std::string BagProcessor::extract_date_from_bag_name(const std::string & bag_name) const
+{
+  size_t pos = bag_name.find("_20");
+  if (pos == std::string::npos) {
+    return "unknown_date";
+  }
+
+  std::string date_part = bag_name.substr(pos + 1);
+
+  if (date_part.length() >= 10) {
+    return date_part.substr(0, 10);
+  }
+
+  return "unknown_date";
 }
 
 }  // namespace override_event_extractor
