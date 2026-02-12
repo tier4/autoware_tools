@@ -32,20 +32,23 @@ BagSplitter::BagSplitter(const SplitterConfig & config) : config_(config)
 
 std::vector<std::string> BagSplitter::split(
   const std::string & input_bag, const std::vector<OverrideEvent> & events,
-  const std::string & output_dir, const RouteMessage & route_msg)
+  const std::string & output_base_dir, const std::string & date, const std::string & time,
+  const RouteMessage & route_msg)
 {
-  std::vector<std::string> output_files;
-  const auto base_name = get_bag_base_name(input_bag);
+  std::vector<std::string> output_dirs;
+
+  const auto date_dir = std::filesystem::path(output_base_dir) / "bag" / date;
+  std::filesystem::create_directories(date_dir);
 
   for (const auto & event : events) {
-    const auto output_filename = base_name + "_or_" + std::to_string(event.index) + ".mcap";
-    const auto output_path = std::filesystem::path(output_dir) / output_filename;
+    const auto dir_name = time + "_or_" + std::to_string(event.index);
+    const auto output_path = date_dir / dir_name;
 
     extract_segment(input_bag, event, output_path.string(), route_msg);
-    output_files.push_back(output_filename);
+    output_dirs.push_back(dir_name);
   }
 
-  return output_files;
+  return output_dirs;
 }
 
 void BagSplitter::extract_segment(

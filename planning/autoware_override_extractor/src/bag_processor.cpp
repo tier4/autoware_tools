@@ -60,15 +60,15 @@ ProcessResult BagProcessor::process(
 
     const auto base_name = get_bag_base_name(bag_path);
     const auto date = extract_date_from_bag_name(base_name);
-    const auto output_subdir = std::filesystem::path(output_dir) / date / base_name;
+    const auto time = extract_time_from_bag_name(base_name);
 
-    std::filesystem::create_directories(output_subdir);
-
-    result.output_files = splitter_.split(bag_path, events, output_subdir.string(), route_msg);
+    result.output_files = splitter_.split(bag_path, events, output_dir, date, time, route_msg);
 
     std::cout << "  [" << bag_name << "] Extracted " << result.output_files.size() << " segment(s)" << std::endl;
 
-    generate_summary(result, output_subdir.string());
+    const auto summary_dir = std::filesystem::path(output_dir) / "bag" / date;
+    std::filesystem::create_directories(summary_dir);
+    generate_summary(result, summary_dir.string());
 
     result.success = true;
 
@@ -83,7 +83,9 @@ ProcessResult BagProcessor::process(
 void BagProcessor::generate_summary(
   const ProcessResult & result, const std::string & output_dir) const
 {
-  const auto summary_path = std::filesystem::path(output_dir) / "summary.json";
+  const auto base_name = get_bag_base_name(result.input_bag);
+  const auto summary_filename = "summary_" + base_name + ".json";
+  const auto summary_path = std::filesystem::path(output_dir) / summary_filename;
   std::ofstream out(summary_path);
 
   if (!out.is_open()) {
@@ -145,6 +147,27 @@ std::string BagProcessor::extract_date_from_bag_name(const std::string & bag_nam
   }
 
   return "unknown_date";
+}
+
+std::string BagProcessor::extract_time_from_bag_name(const std::string & bag_name) const
+{
+  size_t pos = bag_name.find("_20");
+  if (pos == std::string::npos) {
+    return "unknown_time";
+  }
+
+  std::string time_part = bag_name.substr(pos + 1);
+
+  if (time_part.length() >= 19 && time_part[10] == '-') {
+    std::string result = time_part.substr(11);
+    size_t dot_pos = result.find('.');
+    if (dot_pos != std::string::npos) {
+      result = result.substr(0, dot_pos);
+    }
+    return result;
+  }
+
+  return "unknown_time";
 }
 
 }  // namespace override_event_extractor

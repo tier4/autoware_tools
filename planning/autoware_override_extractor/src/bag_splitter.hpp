@@ -36,7 +36,8 @@ public:
 
   std::vector<std::string> split(
     const std::string & input_bag, const std::vector<OverrideEvent> & events,
-    const std::string & output_dir, const RouteMessage & route_msg = RouteMessage());
+    const std::string & output_base_dir, const std::string & date, const std::string & time,
+    const RouteMessage & route_msg = RouteMessage());
 
 private:
   void extract_segment(

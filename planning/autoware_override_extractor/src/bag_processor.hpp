@@ -40,6 +40,8 @@ private:
 
   std::string extract_date_from_bag_name(const std::string & bag_name) const;
 
+  std::string extract_time_from_bag_name(const std::string & bag_name) const;
+
   ProcessorConfig config_;
   OverrideDetector detector_;
   BagSplitter splitter_;
