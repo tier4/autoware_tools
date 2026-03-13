@@ -156,9 +156,8 @@ auto Buffer<TFMessage>::get_closest(
 
   for (auto itr = msgs.begin(); itr != msgs.end(); ++itr) {
     if (!itr->transforms.empty()) {
-      const double diff = std::abs(
-        static_cast<double>(
-          rclcpp::Time(itr->transforms.front().header.stamp).nanoseconds() - target_time));
+      const double diff = std::abs(static_cast<double>(
+        rclcpp::Time(itr->transforms.front().header.stamp).nanoseconds() - target_time));
       if (diff < min_diff) {
         min_diff = diff;
         closest_itr = itr;
