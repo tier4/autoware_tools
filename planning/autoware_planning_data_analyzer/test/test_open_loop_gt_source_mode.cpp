@@ -12,11 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <sstream>
+
+#define private public
 #include "../src/open_loop_evaluator.hpp"
+#undef private
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <memory>
+#include <string>
 #include <vector>
 
 using autoware::planning_data_analyzer::OpenLoopEvaluator;
@@ -124,4 +130,33 @@ TEST_F(OpenLoopGTSourceModeTest, GTTrajectoryModeUsesSyncToleranceForBoundaryInt
     OpenLoopEvaluator::GTSourceMode::GT_TRAJECTORY, 120.0);
   EXPECT_NO_THROW(tolerant_evaluator.evaluate(sync_data_list, nullptr));
   EXPECT_EQ(tolerant_evaluator.get_metrics().size(), 1u);
+}
+
+TEST_F(OpenLoopGTSourceModeTest, VariantsNamespaceOpenLoopResultTopics)
+{
+  OpenLoopEvaluator evaluator(
+    rclcpp::get_logger("open_loop_gt_source_test"), nullptr,
+    OpenLoopEvaluator::GTSourceMode::GT_TRAJECTORY, 200.0);
+
+  evaluator.set_metric_variant("raw");
+
+  EXPECT_EQ(evaluator.metric_topic("ade"), "/open_loop/metrics/raw/ade");
+  EXPECT_EQ(
+    evaluator.trajectory_metric_topic("lateral_accelerations"),
+    "/trajectory/raw/lateral_accelerations");
+  EXPECT_EQ(evaluator.compared_trajectory_topic(), "/evaluation/compared_trajectory/raw");
+  EXPECT_EQ(
+    evaluator.dlr_result_topic(), "/driving_log_replayer/time_step_based_trajectory/raw/results");
+
+  const auto topics = evaluator.get_result_topics();
+  const auto has_topic = [&topics](const std::string & topic_name) {
+    return std::any_of(topics.begin(), topics.end(), [&topic_name](const auto & topic) {
+      return topic.first == topic_name;
+    });
+  };
+
+  EXPECT_TRUE(has_topic("/open_loop/metrics/raw/ade"));
+  EXPECT_TRUE(has_topic("/trajectory/raw/lateral_accelerations"));
+  EXPECT_TRUE(has_topic("/evaluation/compared_trajectory/raw"));
+  EXPECT_TRUE(has_topic("/driving_log_replayer/time_step_based_trajectory/raw/results"));
 }

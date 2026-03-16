@@ -100,6 +100,8 @@ public:
     const std::string & bag_path, rosbag2_cpp::Writer * evaluation_bag_writer,
     const TopicNames & topic_names) = 0;
 
+  void set_json_output_dir(const std::string & output_dir) { json_output_dir_ = output_dir; }
+
 protected:
   /**
    * @brief Create topics in bag writer
@@ -109,8 +111,13 @@ protected:
   {
     const auto topics = get_result_topics();
     for (const auto & [topic_name, topic_type] : topics) {
+#ifdef ROS_DISTRO_HUMBLE
       const auto topic_info =
         rosbag2_storage::TopicMetadata{topic_name, topic_type, rmw_get_serialization_format(), ""};
+#else
+      const auto topic_info = rosbag2_storage::TopicMetadata{
+        0, topic_name, topic_type, rmw_get_serialization_format(), {}, ""};
+#endif
       bag_writer.create_topic(topic_info);
     }
   }
@@ -157,8 +164,17 @@ protected:
    */
   void save_json_results(
     const nlohmann::json & json_output, const std::string & bag_path,
-    const std::string & evaluation_mode,
-    const std::string & output_filename = "evaluation_result") const;
+    const std::string & evaluation_mode, const std::string & output_filename = "evaluation_result",
+    bool add_timestamp = true, bool include_evaluation_info = true) const;
+
+  /**
+   * @brief Save an array of JSON objects as JSONL (one object per line)
+   * @param results_array Array of JSON objects, each with Result, Frame, Stamp
+   * @param output_filename Base filename for output (e.g.
+   * "time_step_based_trajectory_result.jsonl")
+   */
+  void save_jsonl_results(
+    const nlohmann::json & results_array, const std::string & output_filename) const;
 
   /**
    * @brief Write tf_static messages to evaluation bag
@@ -192,6 +208,7 @@ protected:
 
   rclcpp::Logger logger_;
   std::shared_ptr<autoware::route_handler::RouteHandler> route_handler_;
+  std::string json_output_dir_;
 
   // For normalized timestamp calculation
   rclcpp::Time first_bag_timestamp_;
