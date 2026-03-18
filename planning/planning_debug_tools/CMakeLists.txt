@@ -75,6 +75,17 @@ target_link_libraries(perception_reproducer
   ${QT_LIBRARIES}
 )
 
+ament_auto_add_executable(trajectory_replayer
+  src/perception_replayer/time_manager_widget.cpp
+  src/trajectory_replayer/trajectory_replayer_common.cpp
+  src/trajectory_replayer/trajectory_replayer.cpp
+  src/trajectory_replayer/trajectory_replayer_node.cpp
+)
+
+target_link_libraries(trajectory_replayer
+  ${QT_LIBRARIES}
+)
+
 ament_auto_package(
   INSTALL_TO_SHARE
     launch
@@ -85,5 +96,6 @@ install(PROGRAMS
   scripts/trajectory_visualizer.py
   scripts/closest_velocity_checker.py
   scripts/update_logger_level.sh
+  scripts/trajectory_comparison.py
   DESTINATION lib/${PROJECT_NAME}
 )
