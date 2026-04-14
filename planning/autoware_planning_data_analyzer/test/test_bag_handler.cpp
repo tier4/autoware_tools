@@ -82,3 +82,25 @@ TEST_F(BagHandlerTest, GetLatestBeforeOrEqual)
   EXPECT_EQ(
     buffer.get_latest_before_or_equal(rclcpp::Time(10, 0).nanoseconds())->header.stamp.sec, 3);
 }
+
+TEST_F(BagHandlerTest, SetHeaderTimestampIfNeededPreservesValidStamp)
+{
+  nav_msgs::msg::Odometry msg;
+  msg.header.stamp = rclcpp::Time(100, 0);
+
+  autoware::planning_data_analyzer::set_header_timestamp_if_needed(
+    msg, true, rclcpp::Time(200, 0));
+
+  EXPECT_EQ(rclcpp::Time(msg.header.stamp).nanoseconds(), rclcpp::Time(100, 0).nanoseconds());
+}
+
+TEST_F(BagHandlerTest, SetHeaderTimestampIfNeededFillsZeroStampFromBagTime)
+{
+  nav_msgs::msg::Odometry msg;
+  msg.header.stamp = rclcpp::Time(0, 0);
+
+  autoware::planning_data_analyzer::set_header_timestamp_if_needed(
+    msg, true, rclcpp::Time(200, 0));
+
+  EXPECT_EQ(rclcpp::Time(msg.header.stamp).nanoseconds(), rclcpp::Time(200, 0).nanoseconds());
+}
