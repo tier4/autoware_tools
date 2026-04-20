@@ -22,6 +22,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
+#include <QFrame>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -31,6 +32,7 @@
 
 class QHideEvent;
 class QShowEvent;
+class QVBoxLayout;
 
 #include <memory>
 #include <string>
@@ -103,6 +105,9 @@ private Q_SLOTS:
   /// @brief Replots when X/Y axis combo selection changes.
   void onAxisChanged();
 
+  /// @brief Adds a plot window with independent axes and ranges.
+  void onAddPlot();
+
   /// @brief Refills the topic dropdown from `get_topic_names_and_types()` filtered by the selected
   /// message type.
   void refreshTopicList();
@@ -127,14 +132,39 @@ private:
   /// any).
   void updateSummary(const std::vector<TrajectorySeriesData> & plotted);
 
-  /// @brief Fills X/Y axis combos from xAxisDefinitions() / yAxisDefinitions().
-  void populateAxisCombos();
-
   /// @brief Applies Material Design–style colors and the panel UI font to child widgets.
   void applyPanelStyle();
 
+  struct PlotConfig
+  {
+    QFrame * frame{nullptr};
+    QLabel * title_label{nullptr};
+    QComboBox * x_axis_combo{nullptr};
+    QComboBox * y_axis_combo{nullptr};
+    QCheckBox * fix_x_range{nullptr};
+    QDoubleSpinBox * plot_x_min_spin{nullptr};
+    QDoubleSpinBox * plot_x_max_spin{nullptr};
+    QCheckBox * fix_y_range{nullptr};
+    QDoubleSpinBox * plot_y_min_spin{nullptr};
+    QDoubleSpinBox * plot_y_max_spin{nullptr};
+    QPushButton * remove_button{nullptr};
+    TrajectoryKinematicsPlotWidget * plot_widget{nullptr};
+  };
+
+  /// @brief Creates and inserts one plot window.
+  PlotConfig * addPlotWindow(AxisId y_axis = AxisId::LONGITUDINAL_VELOCITY);
+
+  /// @brief Removes the plot window at `index` while keeping at least one plot.
+  void removePlotWindow(size_t index);
+
+  /// @brief Updates plot titles and remove-button enabled state.
+  void updatePlotWindowLabels();
+
+  /// @brief Fills a plot's X/Y axis combos from xAxisDefinitions() / yAxisDefinitions().
+  void populatePlotAxisCombos(PlotConfig & plot, AxisId y_axis);
+
   /// @brief Reads fixed-range checkboxes and spin values into PlotAxisRangeOptions.
-  PlotAxisRangeOptions readPlotRangeOptions() const;
+  static PlotAxisRangeOptions readPlotRangeOptions(const PlotConfig & plot);
 
   /// @brief Encodes topic configuration as `topic|kind` segments joined by `;` for RViz
   /// persistence.
@@ -155,23 +185,16 @@ private:
   QPushButton * refresh_topics_button_{nullptr};
   QPushButton * add_topic_button_{nullptr};
   QPushButton * remove_topic_button_{nullptr};
+  QPushButton * add_plot_button_{nullptr};
 
   QListWidget * series_list_{nullptr};
-  QComboBox * x_axis_combo_{nullptr};
-  QComboBox * y_axis_combo_{nullptr};
-
-  QCheckBox * fix_x_range_{nullptr};
-  QDoubleSpinBox * plot_x_min_spin_{nullptr};
-  QDoubleSpinBox * plot_x_max_spin_{nullptr};
-  QCheckBox * fix_y_range_{nullptr};
-  QDoubleSpinBox * plot_y_min_spin_{nullptr};
-  QDoubleSpinBox * plot_y_max_spin_{nullptr};
 
   QLabel * metric_velocity_{nullptr};
   QLabel * metric_accel_{nullptr};
   QLabel * metric_duration_{nullptr};
 
-  TrajectoryKinematicsPlotWidget * plot_widget_{nullptr};
+  QVBoxLayout * plots_layout_{nullptr};
+  std::vector<std::unique_ptr<PlotConfig>> plots_;
 
   QTimer * topic_poll_timer_{nullptr};
   /// Coalesces rapid `dataUpdated` signals before rebuilding list + plot (GUI thread).

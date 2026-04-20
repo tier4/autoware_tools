@@ -121,15 +121,14 @@ TrajectoryKinematicsChartView::TrajectoryKinematicsChartView(QWidget * parent)
   setRubberBand(QtCharts::QChartView::NoRubberBand);
 
   const auto & pal = style::default_colors;
-  setStyleSheet(QStringLiteral(
-                  "QToolTip {"
-                  "  background-color: %1;"
-                  "  color: %2;"
-                  "  border: 1px solid %3;"
-                  "  border-radius: 6px;"
-                  "  padding: 6px 8px;"
-                  "  font-size: 11px;"
-                  "}")
+  setStyleSheet(QStringLiteral("QToolTip {"
+                               "  background-color: %1;"
+                               "  color: %2;"
+                               "  border: 1px solid %3;"
+                               "  border-radius: 6px;"
+                               "  padding: 6px 8px;"
+                               "  font-size: 11px;"
+                               "}")
                   .arg(QString::fromStdString(pal.surface_container_high))
                   .arg(QString::fromStdString(pal.on_surface))
                   .arg(QString::fromStdString(pal.outline_variant)));

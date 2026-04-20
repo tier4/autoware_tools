@@ -34,6 +34,7 @@
 #include <rviz_common/display_context.hpp>
 
 #include <algorithm>
+#include <cstddef>
 #include <exception>
 #include <map>
 #include <memory>
@@ -161,30 +162,31 @@ TrajectoryKinematicsPanel::TrajectoryKinematicsPanel(QWidget * parent) : rviz_co
     row->addWidget(new QLabel(QStringLiteral("Topic:")));
     topic_combo_ = new QComboBox();
     topic_combo_->setEditable(false);
-    topic_combo_->setMinimumWidth(260);
+    topic_combo_->setMinimumWidth(170);
     topic_combo_->setMaxVisibleItems(18);
     topic_combo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-    topic_combo_->setMinimumContentsLength(28);
-    topic_combo_->setToolTip(QStringLiteral(
-      "Open the list and click a topic. Use “Other topic” below to type a name not "
-      "listed."));
+    topic_combo_->setMinimumContentsLength(18);
+    topic_combo_->setToolTip(
+      QStringLiteral("Open the list and click a topic. Use “Other topic” below to type a name not "
+                     "listed."));
     row->addWidget(topic_combo_, 1);
     kind_combo_ = new QComboBox();
     kind_combo_->addItem(
       QStringLiteral("Trajectory"), static_cast<int>(TopicMessageKind::Trajectory));
     kind_combo_->addItem(
-      QStringLiteral("ScoredCandidateTrajectories"),
-      static_cast<int>(TopicMessageKind::ScoredCandidateTrajectories));
+      QStringLiteral("Scored"), static_cast<int>(TopicMessageKind::ScoredCandidateTrajectories));
+    kind_combo_->setToolTip(QStringLiteral("ScoredCandidateTrajectories"));
+    kind_combo_->setMaximumWidth(110);
     row->addWidget(kind_combo_);
-    refresh_topics_button_ = new QPushButton(QStringLiteral("Refresh topics"));
+    refresh_topics_button_ = new QPushButton(QStringLiteral("Refresh"));
     refresh_topics_button_->setToolTip(
       QStringLiteral("Reload topic list from the ROS graph (filtered by message type)"));
     row->addWidget(refresh_topics_button_);
     add_topic_button_ = new QPushButton(QStringLiteral("Add"));
     remove_topic_button_ = new QPushButton(QStringLiteral("Remove"));
-    remove_topic_button_->setToolTip(QStringLiteral(
-      "Select one or more trajectories below, then remove their ROS topic "
-      "subscription(s)."));
+    remove_topic_button_->setToolTip(
+      QStringLiteral("Select one or more trajectories below, then remove their ROS topic "
+                     "subscription(s)."));
     row->addWidget(add_topic_button_);
     row->addWidget(remove_topic_button_);
     root->addLayout(row);
@@ -197,9 +199,9 @@ TrajectoryKinematicsPanel::TrajectoryKinematicsPanel(QWidget * parent) : rviz_co
     manual_topic_edit_->setObjectName(QStringLiteral("TkmManualTopic"));
     manual_topic_edit_->setPlaceholderText(
       QStringLiteral("Optional: type a full topic name if it is not in the list above"));
-    manual_topic_edit_->setToolTip(QStringLiteral(
-      "If set, Add uses this text instead of the dropdown (for topics not yet on "
-      "the graph)."));
+    manual_topic_edit_->setToolTip(
+      QStringLiteral("If set, Add uses this text instead of the dropdown (for topics not yet on "
+                     "the graph)."));
     row->addWidget(manual_topic_edit_, 1);
     root->addLayout(row);
   }
@@ -210,70 +212,30 @@ TrajectoryKinematicsPanel::TrajectoryKinematicsPanel(QWidget * parent) : rviz_co
     root->addWidget(series_label);
     series_list_ = new QListWidget();
     series_list_->setSelectionMode(QAbstractItemView::ExtendedSelection);
-    series_list_->setToolTip(QStringLiteral(
-      "Swatch = plot line color. Check rows to plot. Select row(s) and use Remove "
-      "to drop that topic subscription."));
+    series_list_->setToolTip(
+      QStringLiteral("Swatch = plot line color. Check rows to plot. Select row(s) and use Remove "
+                     "to drop that topic subscription."));
     series_list_->setIconSize(QSize(20, 20));
-    series_list_->setMinimumHeight(160);
+    series_list_->setMinimumHeight(80);
+    series_list_->setMaximumHeight(120);
     root->addWidget(series_list_);
   }
 
   {
     auto * row = new QHBoxLayout();
-    row->addWidget(new QLabel(QStringLiteral("X axis:")));
-    x_axis_combo_ = new QComboBox();
-    row->addWidget(x_axis_combo_);
-    row->addWidget(new QLabel(QStringLiteral("Y axis:")));
-    y_axis_combo_ = new QComboBox();
-    row->addWidget(y_axis_combo_);
+    auto * plots_label = new QLabel(QStringLiteral("Plots"));
+    plots_label->setStyleSheet(QStringLiteral("font-weight: 700;"));
+    row->addWidget(plots_label);
+    row->addStretch();
+    add_plot_button_ = new QPushButton(QStringLiteral("Add plot"));
+    row->addWidget(add_plot_button_);
     root->addLayout(row);
   }
 
-  {
-    auto * row = new QHBoxLayout();
-    fix_x_range_ = new QCheckBox(QStringLiteral("Fix X range"));
-    plot_x_min_spin_ = new QDoubleSpinBox();
-    plot_x_max_spin_ = new QDoubleSpinBox();
-    for (auto * sp : {plot_x_min_spin_, plot_x_max_spin_}) {
-      sp->setDecimals(4);
-      sp->setRange(-1e9, 1e9);
-      sp->setMaximumWidth(130);
-    }
-    plot_x_min_spin_->setValue(0.0);
-    plot_x_max_spin_->setValue(20.0);
-    plot_x_min_spin_->setToolTip(QStringLiteral("Used when “Fix X range” is checked"));
-    plot_x_max_spin_->setToolTip(QStringLiteral("Must be greater than min"));
-    row->addWidget(fix_x_range_);
-    row->addWidget(new QLabel(QStringLiteral("min")));
-    row->addWidget(plot_x_min_spin_);
-    row->addWidget(new QLabel(QStringLiteral("max")));
-    row->addWidget(plot_x_max_spin_);
-    row->addStretch();
-    root->addLayout(row);
-  }
-
-  {
-    auto * row = new QHBoxLayout();
-    fix_y_range_ = new QCheckBox(QStringLiteral("Fix Y range"));
-    plot_y_min_spin_ = new QDoubleSpinBox();
-    plot_y_max_spin_ = new QDoubleSpinBox();
-    for (auto * sp : {plot_y_min_spin_, plot_y_max_spin_}) {
-      sp->setDecimals(4);
-      sp->setRange(-1e9, 1e9);
-      sp->setMaximumWidth(130);
-    }
-    plot_y_min_spin_->setValue(-5.0);
-    plot_y_max_spin_->setValue(15.0);
-    plot_y_min_spin_->setToolTip(QStringLiteral("Used when “Fix Y range” is checked"));
-    plot_y_max_spin_->setToolTip(QStringLiteral("Must be greater than min"));
-    row->addWidget(fix_y_range_);
-    row->addWidget(new QLabel(QStringLiteral("min")));
-    row->addWidget(plot_y_min_spin_);
-    row->addWidget(new QLabel(QStringLiteral("max")));
-    row->addWidget(plot_y_max_spin_);
-    row->addStretch();
-    root->addLayout(row);
-  }
+  plots_layout_ = new QVBoxLayout();
+  plots_layout_->setSpacing(8);
+  plots_layout_->setContentsMargins(0, 0, 0, 0);
+  root->addLayout(plots_layout_, 1);
 
   {
     auto * row = new QHBoxLayout();
@@ -289,9 +251,6 @@ TrajectoryKinematicsPanel::TrajectoryKinematicsPanel(QWidget * parent) : rviz_co
     root->addLayout(row);
   }
 
-  plot_widget_ = new TrajectoryKinematicsPlotWidget();
-  root->addWidget(plot_widget_, 1);
-
   auto * outer = new QVBoxLayout(this);
   outer->setContentsMargins(2, 2, 2, 2);
   outer->addWidget(panel_root_);
@@ -304,7 +263,7 @@ TrajectoryKinematicsPanel::TrajectoryKinematicsPanel(QWidget * parent) : rviz_co
   plot_refresh_coalesce_timer_->setSingleShot(true);
   plot_refresh_coalesce_timer_->setInterval(kPlotRefreshCoalesceMs);
 
-  populateAxisCombos();
+  addPlotWindow(AxisId::LONGITUDINAL_VELOCITY);
   applyPanelStyle();
 
   connect(add_topic_button_, &QPushButton::clicked, this, &TrajectoryKinematicsPanel::onAddTopic);
@@ -322,60 +281,186 @@ TrajectoryKinematicsPanel::TrajectoryKinematicsPanel(QWidget * parent) : rviz_co
     &TrajectoryKinematicsPanel::processDataUpdated);
   connect(
     series_list_, &QListWidget::itemChanged, this, &TrajectoryKinematicsPanel::onSeriesItemChanged);
-  connect(
-    x_axis_combo_, qOverload<int>(&QComboBox::currentIndexChanged), this,
-    &TrajectoryKinematicsPanel::onAxisChanged);
-  connect(
-    y_axis_combo_, qOverload<int>(&QComboBox::currentIndexChanged), this,
-    &TrajectoryKinematicsPanel::onAxisChanged);
-  connect(fix_x_range_, &QCheckBox::toggled, this, &TrajectoryKinematicsPanel::refreshPlot);
-  connect(fix_y_range_, &QCheckBox::toggled, this, &TrajectoryKinematicsPanel::refreshPlot);
-  connect(
-    plot_x_min_spin_, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
-    &TrajectoryKinematicsPanel::refreshPlot);
-  connect(
-    plot_x_max_spin_, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
-    &TrajectoryKinematicsPanel::refreshPlot);
-  connect(
-    plot_y_min_spin_, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
-    &TrajectoryKinematicsPanel::refreshPlot);
-  connect(
-    plot_y_max_spin_, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
-    &TrajectoryKinematicsPanel::refreshPlot);
+  connect(add_plot_button_, &QPushButton::clicked, this, &TrajectoryKinematicsPanel::onAddPlot);
 }
 
 void TrajectoryKinematicsPanel::applyPanelStyle()
 {
   const QFont ui_font = makePanelUiFont();
   panel_root_->setFont(ui_font);
-  plot_widget_->setFont(ui_font);
+  for (const auto & plot : plots_) {
+    plot->plot_widget->setFont(ui_font);
+  }
   panel_root_->setStyleSheet(panelStyleSheet(style::default_colors));
 }
 
-PlotAxisRangeOptions TrajectoryKinematicsPanel::readPlotRangeOptions() const
+PlotAxisRangeOptions TrajectoryKinematicsPanel::readPlotRangeOptions(const PlotConfig & plot)
 {
   PlotAxisRangeOptions o;
-  o.lock_x = fix_x_range_->isChecked();
-  o.x_min = plot_x_min_spin_->value();
-  o.x_max = plot_x_max_spin_->value();
-  o.lock_y = fix_y_range_->isChecked();
-  o.y_min = plot_y_min_spin_->value();
-  o.y_max = plot_y_max_spin_->value();
+  o.lock_x = plot.fix_x_range->isChecked();
+  o.x_min = plot.plot_x_min_spin->value();
+  o.x_max = plot.plot_x_max_spin->value();
+  o.lock_y = plot.fix_y_range->isChecked();
+  o.y_min = plot.plot_y_min_spin->value();
+  o.y_max = plot.plot_y_max_spin->value();
   return o;
 }
 
-void TrajectoryKinematicsPanel::populateAxisCombos()
+void TrajectoryKinematicsPanel::populatePlotAxisCombos(PlotConfig & plot, const AxisId y_axis)
 {
-  x_axis_combo_->clear();
+  plot.x_axis_combo->clear();
   for (const auto & d : xAxisDefinitions()) {
-    x_axis_combo_->addItem(QString::fromUtf8(d.label), static_cast<int>(d.id));
+    plot.x_axis_combo->addItem(QString::fromUtf8(d.label), static_cast<int>(d.id));
   }
-  y_axis_combo_->clear();
+  plot.y_axis_combo->clear();
   for (const auto & d : yAxisDefinitions()) {
-    y_axis_combo_->addItem(QString::fromUtf8(d.label), static_cast<int>(d.id));
+    plot.y_axis_combo->addItem(QString::fromUtf8(d.label), static_cast<int>(d.id));
   }
-  x_axis_combo_->setCurrentIndex(0);
-  y_axis_combo_->setCurrentIndex(0);
+  plot.x_axis_combo->setCurrentIndex(0);
+  for (int i = 0; i < plot.y_axis_combo->count(); ++i) {
+    if (plot.y_axis_combo->itemData(i).toInt() == static_cast<int>(y_axis)) {
+      plot.y_axis_combo->setCurrentIndex(i);
+      break;
+    }
+  }
+}
+
+TrajectoryKinematicsPanel::PlotConfig * TrajectoryKinematicsPanel::addPlotWindow(
+  const AxisId y_axis)
+{
+  auto plot = std::make_unique<PlotConfig>();
+  auto * plot_ptr = plot.get();
+
+  plot->frame = new QFrame(panel_root_);
+  plot->frame->setFrameShape(QFrame::StyledPanel);
+  plot->frame->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+  auto * layout = new QVBoxLayout(plot->frame);
+  layout->setSpacing(3);
+  layout->setContentsMargins(4, 4, 4, 4);
+
+  {
+    auto * row = new QHBoxLayout();
+    row->setSpacing(4);
+    plot->title_label = new QLabel();
+    plot->title_label->setStyleSheet(QStringLiteral("font-weight: 700;"));
+    row->addWidget(plot->title_label);
+    row->addWidget(new QLabel(QStringLiteral("X:")));
+    plot->x_axis_combo = new QComboBox();
+    plot->x_axis_combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    plot->x_axis_combo->setMinimumContentsLength(6);
+    plot->x_axis_combo->setMaximumWidth(110);
+    row->addWidget(plot->x_axis_combo);
+    row->addWidget(new QLabel(QStringLiteral("Y:")));
+    plot->y_axis_combo = new QComboBox();
+    plot->y_axis_combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    plot->y_axis_combo->setMinimumContentsLength(10);
+    plot->y_axis_combo->setMaximumWidth(150);
+    row->addWidget(plot->y_axis_combo);
+    plot->fix_x_range = new QCheckBox(QStringLiteral("Fix X"));
+    plot->plot_x_min_spin = new QDoubleSpinBox();
+    plot->plot_x_max_spin = new QDoubleSpinBox();
+    for (auto * sp : {plot->plot_x_min_spin, plot->plot_x_max_spin}) {
+      sp->setDecimals(4);
+      sp->setRange(-1e9, 1e9);
+      sp->setMaximumWidth(65);
+    }
+    plot->plot_x_min_spin->setValue(0.0);
+    plot->plot_x_max_spin->setValue(20.0);
+    plot->plot_x_min_spin->setToolTip(QStringLiteral("Used when “Fix X range” is checked"));
+    plot->plot_x_max_spin->setToolTip(QStringLiteral("Must be greater than min"));
+    row->addWidget(plot->fix_x_range);
+    row->addWidget(new QLabel(QStringLiteral("min")));
+    row->addWidget(plot->plot_x_min_spin);
+    row->addWidget(new QLabel(QStringLiteral("max")));
+    row->addWidget(plot->plot_x_max_spin);
+    plot->fix_y_range = new QCheckBox(QStringLiteral("Fix Y"));
+    plot->plot_y_min_spin = new QDoubleSpinBox();
+    plot->plot_y_max_spin = new QDoubleSpinBox();
+    for (auto * sp : {plot->plot_y_min_spin, plot->plot_y_max_spin}) {
+      sp->setDecimals(4);
+      sp->setRange(-1e9, 1e9);
+      sp->setMaximumWidth(65);
+    }
+    plot->plot_y_min_spin->setValue(-5.0);
+    plot->plot_y_max_spin->setValue(15.0);
+    plot->plot_y_min_spin->setToolTip(QStringLiteral("Used when “Fix Y range” is checked"));
+    plot->plot_y_max_spin->setToolTip(QStringLiteral("Must be greater than min"));
+    row->addWidget(plot->fix_y_range);
+    row->addWidget(new QLabel(QStringLiteral("min")));
+    row->addWidget(plot->plot_y_min_spin);
+    row->addWidget(new QLabel(QStringLiteral("max")));
+    row->addWidget(plot->plot_y_max_spin);
+    row->addStretch();
+    plot->remove_button = new QPushButton(QStringLiteral("Remove"));
+    row->addWidget(plot->remove_button);
+    layout->addLayout(row);
+  }
+
+  plot->plot_widget = new TrajectoryKinematicsPlotWidget(plot->frame);
+  layout->addWidget(plot->plot_widget, 1);
+  plots_layout_->addWidget(plot->frame, 1);
+
+  populatePlotAxisCombos(*plot, y_axis);
+
+  connect(
+    plot->x_axis_combo, qOverload<int>(&QComboBox::currentIndexChanged), this,
+    &TrajectoryKinematicsPanel::onAxisChanged);
+  connect(
+    plot->y_axis_combo, qOverload<int>(&QComboBox::currentIndexChanged), this,
+    &TrajectoryKinematicsPanel::onAxisChanged);
+  connect(plot->fix_x_range, &QCheckBox::toggled, this, &TrajectoryKinematicsPanel::refreshPlot);
+  connect(plot->fix_y_range, &QCheckBox::toggled, this, &TrajectoryKinematicsPanel::refreshPlot);
+  connect(
+    plot->plot_x_min_spin, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+    &TrajectoryKinematicsPanel::refreshPlot);
+  connect(
+    plot->plot_x_max_spin, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+    &TrajectoryKinematicsPanel::refreshPlot);
+  connect(
+    plot->plot_y_min_spin, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+    &TrajectoryKinematicsPanel::refreshPlot);
+  connect(
+    plot->plot_y_max_spin, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+    &TrajectoryKinematicsPanel::refreshPlot);
+  connect(plot->remove_button, &QPushButton::clicked, this, [this, plot_ptr]() {
+    const auto it = std::find_if(
+      plots_.begin(), plots_.end(),
+      [plot_ptr](const std::unique_ptr<PlotConfig> & p) { return p.get() == plot_ptr; });
+    if (it != plots_.end()) {
+      removePlotWindow(static_cast<size_t>(std::distance(plots_.begin(), it)));
+    }
+  });
+
+  plots_.push_back(std::move(plot));
+  updatePlotWindowLabels();
+  refreshPlot();
+  return plot_ptr;
+}
+
+void TrajectoryKinematicsPanel::removePlotWindow(const size_t index)
+{
+  if (plots_.size() <= 1 || index >= plots_.size()) {
+    return;
+  }
+  auto plot = std::move(plots_[index]);
+  plots_.erase(plots_.begin() + static_cast<std::ptrdiff_t>(index));
+  plots_layout_->removeWidget(plot->frame);
+  plot->frame->deleteLater();
+  updatePlotWindowLabels();
+  refreshPlot();
+}
+
+void TrajectoryKinematicsPanel::updatePlotWindowLabels()
+{
+  for (size_t i = 0; i < plots_.size(); ++i) {
+    plots_[i]->title_label->setText(QStringLiteral("Plot %1").arg(i + 1));
+    plots_[i]->remove_button->setEnabled(plots_.size() > 1);
+  }
+}
+
+void TrajectoryKinematicsPanel::onAddPlot()
+{
+  addPlotWindow(AxisId::LONGITUDINAL_VELOCITY);
 }
 
 void TrajectoryKinematicsPanel::onInitialize()
@@ -617,11 +702,9 @@ void TrajectoryKinematicsPanel::onAxisChanged()
 
 void TrajectoryKinematicsPanel::refreshPlot()
 {
-  if (!series_manager_ || !plot_widget_) {
+  if (!series_manager_ || plots_.empty()) {
     return;
   }
-  const AxisId x_axis = static_cast<AxisId>(x_axis_combo_->currentData().toInt());
-  const AxisId y_axis = static_cast<AxisId>(y_axis_combo_->currentData().toInt());
   const auto all = series_manager_->allSeries();
   std::vector<TrajectorySeriesData> selected;
   std::vector<QColor> colors;
@@ -644,7 +727,11 @@ void TrajectoryKinematicsPanel::refreshPlot()
     selected.push_back(all[static_cast<size_t>(ai)]);
     colors.push_back(colorForSeriesListIndex(ai));
   }
-  plot_widget_->updatePlot(selected, colors, x_axis, y_axis, readPlotRangeOptions());
+  for (const auto & plot : plots_) {
+    const AxisId x_axis = static_cast<AxisId>(plot->x_axis_combo->currentData().toInt());
+    const AxisId y_axis = static_cast<AxisId>(plot->y_axis_combo->currentData().toInt());
+    plot->plot_widget->updatePlot(selected, colors, x_axis, y_axis, readPlotRangeOptions(*plot));
+  }
   updateSummary(selected);
 }
 
@@ -710,8 +797,6 @@ void TrajectoryKinematicsPanel::save(rviz_common::Config config) const
 {
   rviz_common::Panel::save(config);
   config.mapSetValue("topics_config", QString::fromStdString(serializeTopics(configured_topics_)));
-  config.mapSetValue("x_axis", static_cast<int>(x_axis_combo_->currentData().toInt()));
-  config.mapSetValue("y_axis", static_cast<int>(y_axis_combo_->currentData().toInt()));
   QStringList checked_ids;
   for (const auto & kv : series_checked_) {
     if (kv.second) {
@@ -720,12 +805,46 @@ void TrajectoryKinematicsPanel::save(rviz_common::Config config) const
   }
   checked_ids.sort();
   config.mapSetValue("checked_series", checked_ids.join(QStringLiteral(",")));
-  config.mapSetValue("plot_lock_x", fix_x_range_->isChecked() ? 1 : 0);
-  config.mapSetValue("plot_lock_y", fix_y_range_->isChecked() ? 1 : 0);
-  config.mapSetValue("plot_x_min", QString::number(plot_x_min_spin_->value(), 'g', 12));
-  config.mapSetValue("plot_x_max", QString::number(plot_x_max_spin_->value(), 'g', 12));
-  config.mapSetValue("plot_y_min", QString::number(plot_y_min_spin_->value(), 'g', 12));
-  config.mapSetValue("plot_y_max", QString::number(plot_y_max_spin_->value(), 'g', 12));
+
+  config.mapSetValue("plot_count", static_cast<int>(plots_.size()));
+  for (size_t i = 0; i < plots_.size(); ++i) {
+    const auto & plot = *plots_[i];
+    config.mapSetValue(
+      QStringLiteral("plot_%1_x_axis").arg(i),
+      static_cast<int>(plot.x_axis_combo->currentData().toInt()));
+    config.mapSetValue(
+      QStringLiteral("plot_%1_y_axis").arg(i),
+      static_cast<int>(plot.y_axis_combo->currentData().toInt()));
+    config.mapSetValue(
+      QStringLiteral("plot_%1_lock_x").arg(i), plot.fix_x_range->isChecked() ? 1 : 0);
+    config.mapSetValue(
+      QStringLiteral("plot_%1_lock_y").arg(i), plot.fix_y_range->isChecked() ? 1 : 0);
+    config.mapSetValue(
+      QStringLiteral("plot_%1_x_min").arg(i),
+      QString::number(plot.plot_x_min_spin->value(), 'g', 12));
+    config.mapSetValue(
+      QStringLiteral("plot_%1_x_max").arg(i),
+      QString::number(plot.plot_x_max_spin->value(), 'g', 12));
+    config.mapSetValue(
+      QStringLiteral("plot_%1_y_min").arg(i),
+      QString::number(plot.plot_y_min_spin->value(), 'g', 12));
+    config.mapSetValue(
+      QStringLiteral("plot_%1_y_max").arg(i),
+      QString::number(plot.plot_y_max_spin->value(), 'g', 12));
+  }
+
+  if (!plots_.empty()) {
+    const auto & plot = *plots_.front();
+    // Legacy keys keep older saved configs readable by older plugin versions.
+    config.mapSetValue("x_axis", static_cast<int>(plot.x_axis_combo->currentData().toInt()));
+    config.mapSetValue("y_axis", static_cast<int>(plot.y_axis_combo->currentData().toInt()));
+    config.mapSetValue("plot_lock_x", plot.fix_x_range->isChecked() ? 1 : 0);
+    config.mapSetValue("plot_lock_y", plot.fix_y_range->isChecked() ? 1 : 0);
+    config.mapSetValue("plot_x_min", QString::number(plot.plot_x_min_spin->value(), 'g', 12));
+    config.mapSetValue("plot_x_max", QString::number(plot.plot_x_max_spin->value(), 'g', 12));
+    config.mapSetValue("plot_y_min", QString::number(plot.plot_y_min_spin->value(), 'g', 12));
+    config.mapSetValue("plot_y_max", QString::number(plot.plot_y_max_spin->value(), 'g', 12));
+  }
 }
 
 void TrajectoryKinematicsPanel::load(const rviz_common::Config & config)
@@ -734,22 +853,6 @@ void TrajectoryKinematicsPanel::load(const rviz_common::Config & config)
   QString topics_q;
   if (config.mapGetString("topics_config", &topics_q)) {
     deserializeTopics(topics_q.toStdString(), &configured_topics_);
-  }
-  int x_axis = static_cast<int>(AxisId::TIME_FROM_START);
-  int y_axis = static_cast<int>(AxisId::LONGITUDINAL_VELOCITY);
-  config.mapGetInt("x_axis", &x_axis);
-  config.mapGetInt("y_axis", &y_axis);
-  for (int i = 0; i < x_axis_combo_->count(); ++i) {
-    if (x_axis_combo_->itemData(i).toInt() == x_axis) {
-      x_axis_combo_->setCurrentIndex(i);
-      break;
-    }
-  }
-  for (int i = 0; i < y_axis_combo_->count(); ++i) {
-    if (y_axis_combo_->itemData(i).toInt() == y_axis) {
-      y_axis_combo_->setCurrentIndex(i);
-      break;
-    }
   }
   QString checked_q;
   series_checked_.clear();
@@ -762,27 +865,75 @@ void TrajectoryKinematicsPanel::load(const rviz_common::Config & config)
     }
   }
 
-  int plot_lock_x = 0;
-  int plot_lock_y = 0;
-  if (config.mapGetInt("plot_lock_x", &plot_lock_x)) {
-    fix_x_range_->setChecked(plot_lock_x != 0);
+  int plot_count = 0;
+  config.mapGetInt("plot_count", &plot_count);
+  if (plot_count <= 0) {
+    plot_count = 1;
   }
-  if (config.mapGetInt("plot_lock_y", &plot_lock_y)) {
-    fix_y_range_->setChecked(plot_lock_y != 0);
+  while (plots_.size() < static_cast<size_t>(plot_count)) {
+    addPlotWindow(AxisId::LONGITUDINAL_VELOCITY);
   }
-  QString q_string;
-  if (config.mapGetString("plot_x_min", &q_string)) {
-    plot_x_min_spin_->setValue(q_string.toDouble());
+  while (plots_.size() > static_cast<size_t>(plot_count)) {
+    removePlotWindow(plots_.size() - 1);
   }
-  if (config.mapGetString("plot_x_max", &q_string)) {
-    plot_x_max_spin_->setValue(q_string.toDouble());
+
+  for (size_t pi = 0; pi < plots_.size(); ++pi) {
+    auto & plot = *plots_[pi];
+    int x_axis = static_cast<int>(AxisId::TIME_FROM_START);
+    int y_axis = static_cast<int>(AxisId::LONGITUDINAL_VELOCITY);
+    config.mapGetInt(QStringLiteral("plot_%1_x_axis").arg(pi), &x_axis);
+    config.mapGetInt(QStringLiteral("plot_%1_y_axis").arg(pi), &y_axis);
+    if (pi == 0) {
+      config.mapGetInt("x_axis", &x_axis);
+      config.mapGetInt("y_axis", &y_axis);
+    }
+    for (int i = 0; i < plot.x_axis_combo->count(); ++i) {
+      if (plot.x_axis_combo->itemData(i).toInt() == x_axis) {
+        plot.x_axis_combo->setCurrentIndex(i);
+        break;
+      }
+    }
+    for (int i = 0; i < plot.y_axis_combo->count(); ++i) {
+      if (plot.y_axis_combo->itemData(i).toInt() == y_axis) {
+        plot.y_axis_combo->setCurrentIndex(i);
+        break;
+      }
+    }
+
+    int plot_lock_x = 0;
+    int plot_lock_y = 0;
+    config.mapGetInt(QStringLiteral("plot_%1_lock_x").arg(pi), &plot_lock_x);
+    config.mapGetInt(QStringLiteral("plot_%1_lock_y").arg(pi), &plot_lock_y);
+    if (pi == 0) {
+      config.mapGetInt("plot_lock_x", &plot_lock_x);
+      config.mapGetInt("plot_lock_y", &plot_lock_y);
+    }
+    plot.fix_x_range->setChecked(plot_lock_x != 0);
+    plot.fix_y_range->setChecked(plot_lock_y != 0);
+
+    QString q_string;
+    if (
+      config.mapGetString(QStringLiteral("plot_%1_x_min").arg(pi), &q_string) ||
+      (pi == 0 && config.mapGetString("plot_x_min", &q_string))) {
+      plot.plot_x_min_spin->setValue(q_string.toDouble());
+    }
+    if (
+      config.mapGetString(QStringLiteral("plot_%1_x_max").arg(pi), &q_string) ||
+      (pi == 0 && config.mapGetString("plot_x_max", &q_string))) {
+      plot.plot_x_max_spin->setValue(q_string.toDouble());
+    }
+    if (
+      config.mapGetString(QStringLiteral("plot_%1_y_min").arg(pi), &q_string) ||
+      (pi == 0 && config.mapGetString("plot_y_min", &q_string))) {
+      plot.plot_y_min_spin->setValue(q_string.toDouble());
+    }
+    if (
+      config.mapGetString(QStringLiteral("plot_%1_y_max").arg(pi), &q_string) ||
+      (pi == 0 && config.mapGetString("plot_y_max", &q_string))) {
+      plot.plot_y_max_spin->setValue(q_string.toDouble());
+    }
   }
-  if (config.mapGetString("plot_y_min", &q_string)) {
-    plot_y_min_spin_->setValue(q_string.toDouble());
-  }
-  if (config.mapGetString("plot_y_max", &q_string)) {
-    plot_y_max_spin_->setValue(q_string.toDouble());
-  }
+  updatePlotWindowLabels();
 
   applyTopicConfigsToManager();
 }
