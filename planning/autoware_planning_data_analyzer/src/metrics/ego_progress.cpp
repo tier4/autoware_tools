@@ -16,7 +16,7 @@
 
 #include "metric_utils.hpp"
 
-#include <autoware/lanelet2_utils/geometry.hpp>
+#include <autoware_lanelet2_extension/utility/utilities.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -50,12 +50,10 @@ std::optional<double> calculate_raw_progress_m(
     return std::nullopt;
   }
 
-  const auto start_arc =
-    autoware::experimental::lanelet2_utils::get_arc_coordinates_on_ego_centerline(
-      route_lanelets, trajectory.points.front().pose, lanelet_map_ptr);
-  const auto end_arc =
-    autoware::experimental::lanelet2_utils::get_arc_coordinates_on_ego_centerline(
-      route_lanelets, trajectory.points.back().pose, lanelet_map_ptr);
+  const auto start_arc = lanelet::utils::getArcCoordinatesOnEgoCenterline(
+    route_lanelets, trajectory.points.front().pose, lanelet_map_ptr);
+  const auto end_arc = lanelet::utils::getArcCoordinatesOnEgoCenterline(
+    route_lanelets, trajectory.points.back().pose, lanelet_map_ptr);
 
   return std::max(end_arc.length - start_arc.length, 0.0);
 }

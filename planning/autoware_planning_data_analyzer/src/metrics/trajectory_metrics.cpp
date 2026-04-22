@@ -22,7 +22,6 @@
 #include "traffic_light_compliance.hpp"
 #include "ttc_within_bound.hpp"
 
-#include <autoware/lanelet2_utils/geometry.hpp>
 #include <autoware/lanelet2_utils/intersection.hpp>
 #include <autoware/motion_utils/trajectory/trajectory.hpp>
 #include <autoware_lanelet2_extension/utility/utilities.hpp>
@@ -275,11 +274,10 @@ TrajectoryPointMetrics calculate_trajectory_point_metrics(
           trajectory.points.at(i - 1).pose.position, trajectory.points.at(i).pose.position);
       }
       const auto & point = trajectory.points.at(i);
-      driving_direction_evaluation_points.push_back(
-        DrivingDirectionEvaluationPoint{
-          rclcpp::Duration(point.time_from_start).seconds(), progress_m,
-          !is_pose_in_route_lane(point.pose, route_handler),
-          is_pose_in_intersection(point.pose, route_handler)});
+      driving_direction_evaluation_points.push_back(DrivingDirectionEvaluationPoint{
+        rclcpp::Duration(point.time_from_start).seconds(), progress_m,
+        !is_pose_in_route_lane(point.pose, route_handler),
+        is_pose_in_intersection(point.pose, route_handler)});
     }
 
     const auto ddc_result = calculate_driving_direction_compliance(
@@ -353,13 +351,11 @@ TrajectoryPointMetrics calculate_trajectory_point_metrics(
           LaneKeepingEvaluationPoint{point.time_from_start, metrics.lateral_deviations[i], false});
       } else {
         metrics.lateral_deviations[i] =
-          autoware::experimental::lanelet2_utils::get_lateral_distance_to_centerline(
-            reference_lanelet.value(), point.pose);
-        lane_keeping_evaluation_points.push_back(
-          LaneKeepingEvaluationPoint{
-            point.time_from_start, metrics.lateral_deviations[i],
-            autoware::experimental::lanelet2_utils::is_intersection_lanelet(
-              reference_lanelet.value())});
+          lanelet::utils::getLateralDistanceToCenterline(reference_lanelet.value(), point.pose);
+        lane_keeping_evaluation_points.push_back(LaneKeepingEvaluationPoint{
+          point.time_from_start, metrics.lateral_deviations[i],
+          autoware::experimental::lanelet2_utils::is_intersection_lanelet(
+            reference_lanelet.value())});
       }
     }
   }
