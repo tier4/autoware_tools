@@ -279,8 +279,8 @@ std::vector<TrajectoryPoint> OptimizationTrajectoryBasedCenterline::optimize_tra
 }
 
 void OptimizationTrajectoryBasedCenterline::init_path_generator_node(
-  const geometry_msgs::msg::Pose current_pose, LaneletMapBin::ConstSharedPtr & map_bin_ptr,
-  const LaneletRoute & route) const
+  [[maybe_unused]] const geometry_msgs::msg::Pose current_pose,
+  LaneletMapBin::ConstSharedPtr & map_bin_ptr, const LaneletRoute & route) const
 {
   if (path_generator_node_) {
     return;
@@ -290,11 +290,11 @@ void OptimizationTrajectoryBasedCenterline::init_path_generator_node(
   path_generator_node_ =
     std::make_shared<autoware::path_generator::PathGenerator>(create_node_options());
 
-  autoware::path_generator::PathGenerator::RouteManagerData route_manager_data;
-  route_manager_data.lanelet_map_bin_ptr = map_bin_ptr;
-  route_manager_data.route_ptr = std::make_shared<LaneletRoute>(route);
+  autoware::path_generator::PathGenerator::InputData input_data;
+  input_data.lanelet_map_bin_ptr = map_bin_ptr;
+  input_data.route_ptr = std::make_shared<LaneletRoute>(route);
 
-  path_generator_node_->initialize_route_manager(route_manager_data, current_pose);
+  path_generator_node_->set_planner_data(input_data);
 }
 
 std::shared_ptr<autoware::behavior_path_planner::PlannerData>

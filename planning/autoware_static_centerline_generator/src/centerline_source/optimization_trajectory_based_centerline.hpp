@@ -58,8 +58,8 @@ private:
     std::shared_ptr<RouteHandler> & route_handler_ptr, const geometry_msgs::msg::Pose & start_pose,
     const geometry_msgs::msg::Pose & goal_pose) const;
   void init_path_generator_node(
-    const geometry_msgs::msg::Pose current_pose, LaneletMapBin::ConstSharedPtr & map_bin_ptr,
-    const LaneletRoute & route) const;
+    [[maybe_unused]] const geometry_msgs::msg::Pose current_pose,
+    LaneletMapBin::ConstSharedPtr & map_bin_ptr, const LaneletRoute & route) const;
   std::shared_ptr<autoware::behavior_path_planner::PlannerData> create_behavior_path_planner_data(
     rclcpp::Node & node, std::shared_ptr<RouteHandler> & route_handler_ptr) const;
   std::shared_ptr<autoware::behavior_path_planner::DefaultFixedGoalPlanner>
