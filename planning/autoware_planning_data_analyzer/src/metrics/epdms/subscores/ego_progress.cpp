@@ -50,10 +50,6 @@ std::optional<double> calculate_raw_progress_m(
   if (route_lanelets.empty()) {
     return std::nullopt;
   }
-  const auto lanelet_map_ptr = route_handler->getLaneletMapPtr();
-  if (!lanelet_map_ptr) {
-    return std::nullopt;
-  }
 
   if (route_reference_points) {
     route_reference_points->clear();
@@ -65,12 +61,10 @@ std::optional<double> calculate_raw_progress_m(
     }
   }
 
-  const auto start_arc =
-    autoware::experimental::lanelet2_utils::get_arc_coordinates_on_ego_centerline(
-      route_lanelets, trajectory.points.front().pose, lanelet_map_ptr);
-  const auto end_arc =
-    autoware::experimental::lanelet2_utils::get_arc_coordinates_on_ego_centerline(
-      route_lanelets, trajectory.points.back().pose, lanelet_map_ptr);
+  const auto start_arc = autoware::experimental::lanelet2_utils::get_arc_coordinates(
+    route_lanelets, trajectory.points.front().pose);
+  const auto end_arc = autoware::experimental::lanelet2_utils::get_arc_coordinates(
+    route_lanelets, trajectory.points.back().pose);
 
   return std::max(end_arc.length - start_arc.length, 0.0);
 }
