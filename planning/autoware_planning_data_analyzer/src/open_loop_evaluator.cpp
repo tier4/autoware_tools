@@ -415,6 +415,7 @@ void OpenLoopEvaluator::set_enabled_metrics(const std::vector<std::string> & ena
   // Empty keeps the default all-enabled behavior for backward compatibility.
   if (enabled_metric_names.empty()) {
     enabled_metrics_ = EnabledOpenLoopMetrics{};
+    RCLCPP_INFO(logger_, "[DEBUG OPEN_LOOP] enabled_metrics: empty list → ALL ENABLED (default)");
     return;
   }
 
@@ -432,6 +433,7 @@ void OpenLoopEvaluator::set_enabled_metrics(const std::vector<std::string> & ena
   }
   if (has_all) {
     enabled_metrics_ = EnabledOpenLoopMetrics{};
+    RCLCPP_INFO(logger_, "[DEBUG OPEN_LOOP] enabled_metrics: 'all' → ALL ENABLED");
     return;
   }
 
@@ -440,6 +442,20 @@ void OpenLoopEvaluator::set_enabled_metrics(const std::vector<std::string> & ena
     enable_metric_name(enabled_metrics, name);
   }
   enabled_metrics_ = enabled_metrics;
+  RCLCPP_INFO(logger_, "[DEBUG OPEN_LOOP] enabled_metrics configured (list='%s'): traj_errs=%s hc=%s ec=%s ttc=%s lk=%s ep=%s dac=%s nafc=%s ddc=%s tlc=%s syn_epdms=%s debug_topics=%s",
+    metric_variant_.c_str(),
+    enabled_metrics.trajectory_errors ? "ON" : "OFF",
+    enabled_metrics.history_comfort ? "ON" : "OFF",
+    enabled_metrics.extended_comfort ? "ON" : "OFF",
+    enabled_metrics.time_to_collision_within_bound ? "ON" : "OFF",
+    enabled_metrics.lane_keeping ? "ON" : "OFF",
+    enabled_metrics.ego_progress ? "ON" : "OFF",
+    enabled_metrics.drivable_area_compliance ? "ON" : "OFF",
+    enabled_metrics.no_at_fault_collision ? "ON" : "OFF",
+    enabled_metrics.driving_direction_compliance ? "ON" : "OFF",
+    enabled_metrics.traffic_light_compliance ? "ON" : "OFF",
+    enabled_metrics.synthetic_epdms ? "ON" : "OFF",
+    debug_topics_enabled_ ? "YES" : "NO");
 }
 
 bool OpenLoopEvaluator::should_write_synthetic_epdms() const
@@ -470,10 +486,12 @@ void OpenLoopEvaluator::evaluate(
   }
 
   // Prepare evaluation data with ground truth trajectories
+  RCLCPP_INFO(logger_, "[DEBUG OPEN_LOOP] prepare_evaluation_data: input %zu synchronized samples", synchronized_data_list.size());
   const auto evaluation_data_list = prepare_evaluation_data(synchronized_data_list);
+  RCLCPP_INFO(logger_, "[DEBUG OPEN_LOOP] prepare_evaluation_data returned: %zu evaluation-valid samples (skipped %zu)", evaluation_data_list.size(), synchronized_data_list.size() - evaluation_data_list.size());
 
   if (evaluation_data_list.empty()) {
-    RCLCPP_WARN(logger_, "No valid trajectories with ground truth found for evaluation");
+    RCLCPP_WARN(logger_, "[DEBUG OPEN_LOOP] No valid trajectories with ground truth found for evaluation. Output bag will be empty (only tf_static + map_markers).");
     return;
   }
 
@@ -719,6 +737,7 @@ void OpenLoopEvaluator::evaluate(
     phase2_processed.load());
   RCLCPP_INFO(logger_, "Sequential output phase started: bag writing and summary aggregation");
 
+  RCLCPP_INFO(logger_, "[DEBUG OPEN_LOOP] Writing %zu evaluation samples to bag (bag_writer=%s)...", total_samples, bag_writer ? "VALID" : "NULL");
   for (std::size_t i = 0; i < total_samples; ++i) {
     if (bag_writer) {
       save_metrics_to_bag(
@@ -731,6 +750,11 @@ void OpenLoopEvaluator::evaluate(
 
   // Calculate summary statistics
   calculate_summary();
+  RCLCPP_INFO(
+    logger_, "[DEBUG OPEN_LOOP] Open-loop evaluation finished: %zu trajectories evaluated. Summary: ADE_mean=%.4f, FDE_mean=%.4f, valid=%zu/%zu",
+    evaluation_data_list.size(),
+    summary_.mean_ade, summary_.mean_fde,
+    summary_.valid_trajectories, summary_.total_trajectories);
   RCLCPP_INFO(
     logger_, "Open-loop evaluation finished: processed %zu trajectory samples",
     evaluation_data_list.size());
@@ -797,6 +821,10 @@ std::vector<OpenLoopEvaluator::EvaluationData> OpenLoopEvaluator::prepare_evalua
     result.push_back({truncated_data, ground_truth_opt.value()});
   }
 
+  RCLCPP_INFO(logger_, "[DEBUG OPEN_LOOP] prepare_evaluation_data complete: %zu valid out of %zu input (gt_source_mode=%s, horizon=%.1fs)",
+    result.size(), synchronized_data_list.size(),
+    gt_source_mode_ == GTSourceMode::GT_TRAJECTORY ? "gt_trajectory" : "kinematic_state",
+    trajectory_evaluation_horizon_s_);
   return result;
 }
 
@@ -2427,11 +2455,19 @@ std::pair<rclcpp::Time, rclcpp::Time> OpenLoopEvaluator::run_evaluation_from_bag
   const std::string & bag_path, rosbag2_cpp::Writer * evaluation_bag_writer,
   const TopicNames & topic_names)
 {
-  RCLCPP_INFO(logger_, "Running open-loop evaluation for trajectory analysis");
+  RCLCPP_INFO(logger_, "[DEBUG OPEN_LOOP] run_evaluation_from_bag: bag=%s, metric_variant=%s",
+    bag_path.c_str(), metric_variant_.c_str());
 
   // Use base class method to process bag and get synchronized data
+  RCLCPP_INFO(logger_, "[DEBUG OPEN_LOOP] Calling process_bag_common()...");
   auto bag_result = process_bag_common(bag_path, evaluation_bag_writer, topic_names);
   object_timeline_ = bag_result.tracked_object_timeline;
+
+  RCLCPP_INFO(logger_, "[DEBUG OPEN_LOOP] process_bag_common returned: %zu synchronized samples, %zu odometry messages in interval, %zu tf_static msgs, %zu tracked_objects",
+    bag_result.synchronized_data_list.size(),
+    bag_result.odometry_count,
+    bag_result.tf_static_msgs.transforms.size(),
+    bag_result.tracked_object_timeline.size());
 
   // Pass the control_mode timeline to enable override-only aggregation in the summary.
   set_control_mode_events(std::move(bag_result.control_mode_events));
@@ -2459,6 +2495,7 @@ std::pair<rclcpp::Time, rclcpp::Time> OpenLoopEvaluator::run_evaluation_from_bag
     }
 
     // Get and save evaluation results
+    RCLCPP_INFO(logger_, "[DEBUG OPEN_LOOP] Saving JSON results...");
     auto summary_json = get_summary_as_json();
     auto detailed_json = get_detailed_results_as_json();
     auto full_json = get_full_results_as_json();
@@ -2469,6 +2506,9 @@ std::pair<rclcpp::Time, rclcpp::Time> OpenLoopEvaluator::run_evaluation_from_bag
     save_json_results(
       full_json, bag_path, "open_loop", "time_step_based_trajectory_detailed_result.json", false,
       true);
+    RCLCPP_INFO(logger_, "[DEBUG OPEN_LOOP] JSON results saved to output_dir: %s", json_output_dir_.c_str());
+  } else {
+    RCLCPP_WARN(logger_, "[DEBUG OPEN_LOOP] ZERO synchronized samples — no evaluation data, no JSON results saved.");
   }
 
   RCLCPP_INFO(logger_, "Open-loop evaluation complete");

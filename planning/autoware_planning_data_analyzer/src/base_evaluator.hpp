@@ -112,7 +112,9 @@ protected:
   void create_topics_in_bag(rosbag2_cpp::Writer & bag_writer) const
   {
     const auto topics = get_result_topics();
+    RCLCPP_INFO(logger_, "[DEBUG BASE] create_topics_in_bag: registering %zu topic schemas in evaluation bag", topics.size());
     for (const auto & [topic_name, topic_type] : topics) {
+      RCLCPP_DEBUG(logger_, "[DEBUG BASE]   registering topic: %s (%s)", topic_name.c_str(), topic_type.c_str());
 #ifdef ROS_DISTRO_HUMBLE
       const auto topic_info =
         rosbag2_storage::TopicMetadata{topic_name, topic_type, rmw_get_serialization_format(), ""};
@@ -152,6 +154,7 @@ protected:
     tf2_msgs::msg::TFMessage tf_static_msgs;
     bool gt_trajectory_topic_seen = false;
     size_t gt_trajectory_message_count = 0;
+    size_t odometry_count = 0;
     // Timeline of /vehicle/status/control_mode samples sorted by stamp,
     // captured as (timestamp_ns, mode) tuples. Used to detect override
     // windows (AUTONOMOUS -> MANUAL transitions).

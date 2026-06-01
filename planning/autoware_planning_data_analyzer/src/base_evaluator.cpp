@@ -35,6 +35,8 @@ BaseEvaluator::BagProcessingResult BaseEvaluator::process_bag_common(
   const std::string & bag_path, rosbag2_cpp::Writer * /*evaluation_bag_writer*/,
   const TopicNames & topic_names)
 {
+  RCLCPP_INFO(logger_, "[DEBUG BAG] process_bag_common: opening bag: %s", bag_path.c_str());
+
   // Open bag reader
   rosbag2_cpp::Reader bag_reader;
   bag_reader.open(bag_path);
@@ -54,10 +56,17 @@ BaseEvaluator::BagProcessingResult BaseEvaluator::process_bag_common(
 
   const bool use_bag_timestamp = true;  // TODO(go-sakayori): make configurable
 
+  size_t total_messages = 0;
+  size_t odometry_count = 0;
+  size_t trajectory_count = 0;
+  std::set<std::string> seen_topics;
+
   // Process all messages in the bag
   while (bag_reader.has_next() && rclcpp::ok()) {
     auto serialized_message = bag_reader.read_next();
+    total_messages++;
     const auto & topic_name = serialized_message->topic_name;
+    seen_topics.insert(topic_name);
     rclcpp::Time msg_time(get_timestamp_ns(*serialized_message));
 
     // Update time range
@@ -66,9 +75,11 @@ BaseEvaluator::BagProcessingResult BaseEvaluator::process_bag_common(
 
     // Process messages using template helper
     if (topic_name == topic_names.odometry_topic) {
+      odometry_count++;
       process_and_append_message<Odometry>(
         serialized_message, bag_data, topic_names.odometry_topic, use_bag_timestamp, logger_);
     } else if (topic_name == topic_names.trajectory_topic) {
+      trajectory_count++;
       process_and_append_message<Trajectory>(
         serialized_message, bag_data, topic_names.trajectory_topic, use_bag_timestamp, logger_);
     } else if (
@@ -135,6 +146,23 @@ BaseEvaluator::BagProcessingResult BaseEvaluator::process_bag_common(
     }
   }
 
+  result.odometry_count = odometry_count;
+
+  RCLCPP_INFO(logger_, "[DEBUG BAG] process_bag_common read COMPLETE: %zu messages across %zu unique topics", total_messages, seen_topics.size());
+  RCLCPP_INFO(logger_, "[DEBUG BAG] process_bag_common counts: odometry=%zu, trajectory=%zu, gt_trajectory_topic_seen=%s (messages=%zu)",
+    odometry_count, trajectory_count,
+    result.gt_trajectory_topic_seen ? "YES" : "NO",
+    result.gt_trajectory_message_count);
+  RCLCPP_INFO(logger_, "[DEBUG BAG] process_bag_common target topics: odometry='%s', trajectory='%s'",
+    topic_names.odometry_topic.c_str(), topic_names.trajectory_topic.c_str());
+
+  if (trajectory_count == 0) {
+    RCLCPP_WARN(logger_, "[DEBUG BAG] ZERO trajectory messages found for topic '%s'! No evaluation possible.", topic_names.trajectory_topic.c_str());
+  }
+  if (odometry_count == 0) {
+    RCLCPP_ERROR(logger_, "[DEBUG BAG] ZERO odometry messages found for topic '%s'! No ground-truth possible.", topic_names.odometry_topic.c_str());
+  }
+
   // Sort control_mode events by timestamp so override windows can be derived.
   std::sort(
     result.control_mode_events.begin(), result.control_mode_events.end(),
@@ -157,8 +185,10 @@ BaseEvaluator::BagProcessingResult BaseEvaluator::process_bag_common(
   auto kinematic_states =
     bag_data->get_kinematic_states_at_interval(topic_names.evaluation_interval_ms);
 
+RCLCPP_INFO(logger_, "[DEBUG BAG] process_bag_common: %zu kinematic_states found at interval %.1fms", kinematic_states.size(), topic_names.evaluation_interval_ms);
+
   if (kinematic_states.empty()) {
-    RCLCPP_ERROR(logger_, "No kinematic states found in the rosbag");
+    RCLCPP_ERROR(logger_, "[DEBUG BAG] No kinematic states found in the rosbag");
     result.evaluation_start_time = rclcpp::Clock{RCL_ROS_TIME}.now();
     result.evaluation_end_time = rclcpp::Clock{RCL_ROS_TIME}.now();
     return result;
@@ -174,6 +204,8 @@ BaseEvaluator::BagProcessingResult BaseEvaluator::process_bag_common(
       result.synchronized_data_list.push_back(sync_data);
     }
   }
+
+  RCLCPP_INFO(logger_, "[DEBUG BAG] process_bag_common: %zu kinematic_states → %zu synchronized samples (with trajectory)", kinematic_states.size(), result.synchronized_data_list.size());
 
   // Sort by timestamp
   std::sort(

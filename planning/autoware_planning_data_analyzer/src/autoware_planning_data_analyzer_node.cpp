@@ -85,25 +85,33 @@ AutowarePlanningDataAnalyzerNode::AutowarePlanningDataAnalyzerNode(
 : Node("autoware_planning_data_analyzer", node_options),
   route_handler_{std::make_shared<RouteHandler>()}
 {
+  RCLCPP_INFO(get_logger(), "[DEBUG] AutowarePlanningDataAnalyzerNode constructor started");
+
   try {
     vehicle_info_ = autoware::vehicle_info_utils::VehicleInfoUtils(*this).getVehicleInfo();
+    RCLCPP_INFO(get_logger(), "[DEBUG] Vehicle info loaded successfully");
   } catch (const std::exception & e) {
     RCLCPP_WARN(
       get_logger(),
-      "Vehicle info parameters are unavailable. Drivable area compliance will be marked "
+      "[DEBUG] Vehicle info parameters are unavailable. Drivable area compliance will be marked "
       "unavailable: %s",
       e.what());
     vehicle_info_ = autoware::vehicle_info_utils::VehicleInfo{};
   }
   setup_evaluation_bag_writer();
+  RCLCPP_INFO(
+    get_logger(), "[DEBUG] Evaluation bag writer setup: %s",
+    evaluation_bag_writer_ ? "READY" : "FAILED (nullptr)");
 
   // Open bag file
   bag_path_ =
     resolve_bag_uri(get_or_declare_parameter<std::string>(*this, "input_bag_path")).string();
+  RCLCPP_INFO(get_logger(), "[DEBUG] Resolved bag path: %s", bag_path_.c_str());
   try {
     bag_reader_.open(bag_path_);
+    RCLCPP_INFO(get_logger(), "[DEBUG] Bag opened successfully");
   } catch (const std::exception & e) {
-    RCLCPP_ERROR(get_logger(), "Failed to open bag file: %s", e.what());
+    RCLCPP_ERROR(get_logger(), "[DEBUG] Failed to open bag file: %s", e.what());
     throw;
   }
 
@@ -126,6 +134,26 @@ AutowarePlanningDataAnalyzerNode::AutowarePlanningDataAnalyzerNode(
   debug_topics_enabled_ = get_or_declare_parameter<bool>(*this, "open_loop.debug_topics_enabled");
   trajectory_evaluation_horizon_s_ =
     get_or_declare_parameter<double>(*this, "open_loop.trajectory_evaluation_horizon");
+
+  RCLCPP_INFO(get_logger(), "[DEBUG] === PARAMETERS ===");
+  RCLCPP_INFO(get_logger(), "[DEBUG] bag_path:            %s", bag_path_.c_str());
+  RCLCPP_INFO(get_logger(), "[DEBUG] output_dir:          %s", get_or_declare_parameter<std::string>(*this, "output_dir").c_str());
+  RCLCPP_INFO(get_logger(), "[DEBUG] map_topic:           %s", map_topic_name_.c_str());
+  RCLCPP_INFO(get_logger(), "[DEBUG] route_topic:         %s", route_topic_name_.c_str());
+  RCLCPP_INFO(get_logger(), "[DEBUG] odometry_topic:      %s", odometry_topic_name_.c_str());
+  RCLCPP_INFO(get_logger(), "[DEBUG] trajectory_topic:    %s", trajectory_topic_name_.c_str());
+  RCLCPP_INFO(get_logger(), "[DEBUG] gt_source_mode:      %s", gt_source_mode_.c_str());
+  RCLCPP_INFO(get_logger(), "[DEBUG] gt_trajectory_topic: %s", gt_trajectory_topic_name_.c_str());
+  RCLCPP_INFO(get_logger(), "[DEBUG] gt_sync_tolerance_ms:   %.1f", gt_sync_tolerance_ms_);
+  RCLCPP_INFO(get_logger(), "[DEBUG] evaluation_interval_ms: %.1f", evaluation_interval_ms_);
+  RCLCPP_INFO(get_logger(), "[DEBUG] sync_tolerance_ms:      %.1f", sync_tolerance_ms_);
+  RCLCPP_INFO(get_logger(), "[DEBUG] trajectory_evaluation_horizon_s: %.1f", trajectory_evaluation_horizon_s_);
+  RCLCPP_INFO(get_logger(), "[DEBUG] debug_topics_enabled: %s", debug_topics_enabled_ ? "true" : "false");
+  {
+    std::string metrics_str;
+    for (const auto & m : enabled_metric_names_) metrics_str += m + " ";
+    RCLCPP_INFO(get_logger(), "[DEBUG] enabled_metrics (%zu): [%s]", enabled_metric_names_.size(), metrics_str.c_str());
+  }
   history_comfort_params_.past_horizon_s =
     get_or_declare_parameter<double>(*this, "open_loop.hc.past_horizon_s");
   history_comfort_params_.sample_interval_s =
@@ -200,12 +228,14 @@ AutowarePlanningDataAnalyzerNode::AutowarePlanningDataAnalyzerNode(
 
   // Read evaluation mode
   const auto mode_str = get_or_declare_parameter<std::string>(*this, "evaluation.mode");
+  RCLCPP_INFO(get_logger(), "[DEBUG] evaluation.mode: %s", mode_str.c_str());
   if (mode_str == "open_loop") {
     evaluation_mode_ = EvaluationMode::OPEN_LOOP;
   } else {
     throw std::runtime_error("Invalid evaluation mode: " + mode_str + ". Expected 'open_loop'.");
   }
 
+  RCLCPP_INFO(get_logger(), "[DEBUG] Constructor complete, calling run_evaluation()");
   run_evaluation();
 }
 
@@ -266,6 +296,7 @@ void AutowarePlanningDataAnalyzerNode::merge_bags(
   const std::vector<std::filesystem::path> & input_bags,
   const std::filesystem::path & output_bag) const
 {
+  RCLCPP_INFO(get_logger(), "[DEBUG MERGE] merge_bags: %zu input bags → %s", input_bags.size(), output_bag.string().c_str());
   rosbag2_cpp::Writer writer;
   const rosbag2_storage::StorageOptions storage_options{output_bag.string(), "mcap"};
   const rosbag2_cpp::ConverterOptions converter_options{
@@ -280,7 +311,9 @@ void AutowarePlanningDataAnalyzerNode::merge_bags(
   for (size_t i = 0; i < input_bags.size(); ++i) {
     readers[i].open(input_bags[i].string());
 
-    for (const auto & topic_metadata : readers[i].get_all_topics_and_types()) {
+    auto all_topics = readers[i].get_all_topics_and_types();
+    RCLCPP_INFO(get_logger(), "[DEBUG MERGE] Input bag %zu (%s): %zu topics", i, input_bags[i].filename().string().c_str(), all_topics.size());
+    for (const auto & topic_metadata : all_topics) {
       if (added_topics.insert(topic_metadata.name).second) {
         writer.create_topic(topic_metadata);
       }
@@ -320,6 +353,7 @@ void AutowarePlanningDataAnalyzerNode::merge_bags(
   }
 
   writer.close();
+  RCLCPP_INFO(get_logger(), "[DEBUG MERGE] merge_bags complete: %zu unique topics merged", added_topics.size());
 }
 
 void AutowarePlanningDataAnalyzerNode::replace_input_bag_with_merged_evaluation()
@@ -327,6 +361,8 @@ void AutowarePlanningDataAnalyzerNode::replace_input_bag_with_merged_evaluation(
   if (
     evaluation_metrics_bag_path_.empty() ||
     !std::filesystem::exists(evaluation_metrics_bag_path_)) {
+    RCLCPP_WARN(get_logger(), "[DEBUG] MERGE: evaluation_metrics_bag_path_ is empty or does not exist. Skipping merge. path=%s",
+      evaluation_metrics_bag_path_.string().c_str());
     return;
   }
 
@@ -365,10 +401,12 @@ void AutowarePlanningDataAnalyzerNode::replace_input_bag_with_merged_evaluation(
 
   try {
     merge_bags({input_bag_path, evaluation_metrics_bag_path_}, merged_bag_path);
+    RCLCPP_INFO(get_logger(), "[DEBUG] MERGE: merge_bags() completed. Merged to: %s", merged_bag_path.string().c_str());
     move_path(input_bag_path, backup_bag_path);
 
     try {
       move_path(merged_bag_path, input_bag_path);
+      RCLCPP_INFO(get_logger(), "[DEBUG] MERGE: move_path() succeeded. Merged bag replaced input bag at: %s", input_bag_path.string().c_str());
     } catch (...) {
       move_path(backup_bag_path, input_bag_path);
       throw;
@@ -398,7 +436,7 @@ void AutowarePlanningDataAnalyzerNode::replace_input_bag_with_merged_evaluation(
 
 void AutowarePlanningDataAnalyzerNode::run_evaluation()
 {
-  RCLCPP_INFO(get_logger(), "Starting evaluation...");
+  RCLCPP_INFO(get_logger(), "[DEBUG] Starting evaluation...");
 
   // Storage for the last route message and tf messages
   autoware_planning_msgs::msg::LaneletRoute::SharedPtr last_route_msg = nullptr;
@@ -409,9 +447,16 @@ void AutowarePlanningDataAnalyzerNode::run_evaluation()
   rclcpp::Time bag_start_time(0, 0, RCL_ROS_TIME);
   rclcpp::Time bag_end_time(0, 0, RCL_ROS_TIME);
 
+  size_t scan_message_count = 0;
+  bool map_found = false;
+  bool route_found = false;
+  bool tf_static_found = false;
+
   // Quick scan for route and tf messages
+  RCLCPP_INFO(get_logger(), "[DEBUG] SCAN PHASE: reading bag to find map, route, tf_static...");
   while (bag_reader_.has_next() && rclcpp::ok()) {
     auto serialized_message = bag_reader_.read_next();
+    scan_message_count++;
     const auto & topic_name = serialized_message->topic_name;
     const rclcpp::Time message_time(get_timestamp_ns(*serialized_message));
     if (!bag_time_initialized || message_time < bag_start_time) {
@@ -429,8 +474,10 @@ void AutowarePlanningDataAnalyzerNode::run_evaluation()
         rclcpp::SerializedMessage serialized_msg(*serialized_message->serialized_data);
         serializer.deserialize_message(&serialized_msg, &msg);
         route_handler_->setMap(msg);
+        map_found = true;
+        RCLCPP_INFO(get_logger(), "[DEBUG] SCAN: Found /map/vector_map — route_handler->setMap() succeeded. route_handler ready: %s", route_handler_->isHandlerReady() ? "YES" : "NO");
       } catch (const std::exception & e) {
-        RCLCPP_WARN(get_logger(), "Failed to deserialize map message: %s", e.what());
+        RCLCPP_WARN(get_logger(), "[DEBUG] SCAN: Failed to deserialize map message: %s", e.what());
       }
     } else if (topic_name == map_marker_topic_name_) {
       try {
@@ -449,8 +496,10 @@ void AutowarePlanningDataAnalyzerNode::run_evaluation()
         rclcpp::SerializedMessage serialized_msg(*serialized_message->serialized_data);
         serializer.deserialize_message(&serialized_msg, &msg);
         last_route_msg = std::make_shared<autoware_planning_msgs::msg::LaneletRoute>(msg);
+        route_found = true;
+        RCLCPP_INFO(get_logger(), "[DEBUG] SCAN: Found route topic '%s' — %zu segments", route_topic_name_.c_str(), msg.segments.size());
       } catch (const std::exception & e) {
-        RCLCPP_WARN(get_logger(), "Failed to deserialize route message: %s", e.what());
+        RCLCPP_WARN(get_logger(), "[DEBUG] SCAN: Failed to deserialize route message: %s", e.what());
       }
     } else if (topic_name == "/tf_static") {
       try {
@@ -458,24 +507,42 @@ void AutowarePlanningDataAnalyzerNode::run_evaluation()
         rclcpp::Serialization<tf2_msgs::msg::TFMessage> serializer;
         rclcpp::SerializedMessage serialized_msg(*serialized_message->serialized_data);
         serializer.deserialize_message(&serialized_msg, &msg);
-        // Accumulate all tf_static transforms
         tf_static_msg.transforms.insert(
           tf_static_msg.transforms.end(), msg.transforms.begin(), msg.transforms.end());
+        tf_static_found = true;
       } catch (const std::exception & e) {
-        RCLCPP_WARN(get_logger(), "Failed to deserialize tf_static message: %s", e.what());
+        RCLCPP_WARN(get_logger(), "[DEBUG] SCAN: Failed to deserialize tf_static message: %s", e.what());
       }
     }
   }
 
+  RCLCPP_INFO(get_logger(), "[DEBUG] SCAN COMPLETE: %zu messages scanned", scan_message_count);
+  RCLCPP_INFO(get_logger(), "[DEBUG] SCAN: map_found=%s  route_found=%s  tf_static_found=%s (transforms=%zu)",
+    map_found ? "YES" : "NO",
+    route_found ? "YES" : "NO",
+    tf_static_found ? "YES" : "NO",
+    tf_static_msg.transforms.size());
+  RCLCPP_INFO(get_logger(), "[DEBUG] SCAN: route_handler->isHandlerReady()=%s",
+    route_handler_->isHandlerReady() ? "YES" : "NO");
+
+  if (!map_found) {
+    RCLCPP_WARN(get_logger(), "[DEBUG] SCAN: /map/vector_map NOT found in bag! All map-dependent subscores will be unavailable (drivable_area, driving_direction, ego_progress, lane_keeping, traffic_light). Searched for topic: '%s'", map_topic_name_.c_str());
+  }
+
   if (!last_route_msg) {
-    RCLCPP_WARN(get_logger(), "No route message found in bag. Evaluation aborted.");
+    RCLCPP_WARN(get_logger(), "[DEBUG] SCAN: No route message found in bag. Evaluation ABORTED. Searched for topic: '%s'", route_topic_name_.c_str());
     return;
   }
 
   route_handler_->setRoute(*last_route_msg);
+  RCLCPP_INFO(get_logger(), "[DEBUG] route_handler_->setRoute() called. isHandlerReady()=%s",
+    route_handler_->isHandlerReady() ? "YES" : "NO");
 
   // Seek back to the beginning of the bag for mode-specific evaluation
   bag_reader_.seek(0);
+
+  RCLCPP_INFO(get_logger(), "[DEBUG] Bag seek(0) done. Starting mode-specific evaluation.");
+  RCLCPP_INFO(get_logger(), "[DEBUG] evaluation_mode_: %s", evaluation_mode_ == EvaluationMode::OPEN_LOOP ? "OPEN_LOOP" : "UNKNOWN");
 
   // Store reference times for map/route markers
   rclcpp::Time start_time = now();
@@ -510,6 +577,7 @@ void AutowarePlanningDataAnalyzerNode::run_evaluation()
     case EvaluationMode::OPEN_LOOP: {
       const auto open_loop_metric_variant =
         get_or_declare_parameter<std::string>(*this, "open_loop.metric_variant");
+      RCLCPP_INFO(get_logger(), "[DEBUG] open_loop_metric_variant: %s", open_loop_metric_variant.c_str());
       OpenLoopEvaluator::GTSourceMode gt_mode = OpenLoopEvaluator::GTSourceMode::KINEMATIC_STATE;
       if (gt_source_mode_ == "gt_trajectory") {
         gt_mode = OpenLoopEvaluator::GTSourceMode::GT_TRAJECTORY;
@@ -531,10 +599,13 @@ void AutowarePlanningDataAnalyzerNode::run_evaluation()
       evaluator.set_evaluation_horizons(evaluation_horizons);
       evaluator.set_extended_comfort_parameters(extended_comfort_parameters_);
       evaluator.set_override_window_sec(override_window_sec_);
+      RCLCPP_INFO(get_logger(), "[DEBUG] Calling OpenLoopEvaluator::run_evaluation_from_bag()...");
       auto times =
         evaluator.run_evaluation_from_bag(bag_path_, evaluation_bag_writer_.get(), topic_names);
       start_time = times.first;
       end_time = times.second;
+      RCLCPP_INFO(get_logger(), "[DEBUG] run_evaluation_from_bag() returned. start=%f, end=%f, duration=%.3fs",
+        start_time.seconds(), end_time.seconds(), (end_time - start_time).seconds());
       break;
     }
   }
@@ -549,22 +620,31 @@ void AutowarePlanningDataAnalyzerNode::run_evaluation()
     bag_end_time.seconds() > 0) {
     rclcpp::Time tf_time = bag_start_time;
 
-    // Set timestamps in the transforms to start_time
     tf2_msgs::msg::TFMessage timestamped_tf_static = tf_static_msg;
     for (auto & transform : timestamped_tf_static.transforms) {
       transform.header.stamp = tf_time;
     }
 
     evaluation_bag_writer_->write(timestamped_tf_static, "/tf_static", tf_time);
+    RCLCPP_INFO(get_logger(), "[DEBUG] Wrote /tf_static (%zu transforms) to evaluation bag", tf_static_msg.transforms.size());
+  } else {
+    RCLCPP_INFO(get_logger(), "[DEBUG] Skipped tf_static write: tf_static_empty=%s writer_valid=%s start_valid=%s end_valid=%s",
+      tf_static_msg.transforms.empty() ? "YES" : "NO",
+      evaluation_bag_writer_ ? "YES" : "NO",
+      bag_start_time.seconds() > 0 ? "YES" : "NO",
+      bag_end_time.seconds() > 0 ? "YES" : "NO");
   }
 
   write_map_and_route_markers_to_bag(bag_start_time);
 
+  RCLCPP_INFO(get_logger(), "[DEBUG] Closing evaluation bag writer...");
   close_evaluation_bag_writer();
   bag_reader_.close();
+  RCLCPP_INFO(get_logger(), "[DEBUG] Merging evaluation metrics into result bag...");
   replace_input_bag_with_merged_evaluation();
+  RCLCPP_INFO(get_logger(), "[DEBUG] Merge complete.");
 
-  RCLCPP_INFO(get_logger(), "Evaluation complete");
+  RCLCPP_INFO(get_logger(), "[DEBUG] Evaluation complete");
   rclcpp::shutdown();
 }
 
