@@ -16,13 +16,18 @@
   <buildtool_depend>eigen3_cmake_module</buildtool_depend>
 
   <depend>ament_index_cpp</depend>
+  <depend>autoware_internal_planning_msgs</depend>
   <depend>autoware_lanelet2_extension</depend>
+  <depend>autoware_lanelet2_utils</depend>
   <depend>autoware_map_msgs</depend>
   <depend>autoware_motion_utils</depend>
+  <depend>autoware_object_recognition_utils</depend>
   <depend>autoware_perception_msgs</depend>
   <depend>autoware_planning_msgs</depend>
   <depend>autoware_route_handler</depend>
+  <depend>autoware_traffic_light_utils</depend>
   <depend>autoware_utils</depend>
+  <depend>autoware_utils_math</depend>
   <depend>autoware_utils_rclcpp</depend>
   <depend>autoware_vehicle_info_utils</depend>
   <depend>autoware_vehicle_msgs</depend>
@@ -30,9 +35,12 @@
   <depend>rclcpp</depend>
   <depend>rosbag2_cpp</depend>
   <depend>std_srvs</depend>
+  <depend>tf2_geometry_msgs</depend>
   <depend>tf2_msgs</depend>
   <depend>tf2_ros</depend>
+  <depend>tier4_simulation_msgs</depend>
   <depend>visualization_msgs</depend>
+  <depend>yaml-cpp</depend>
 
   <exec_depend>autoware_global_parameter_loader</exec_depend>
 
