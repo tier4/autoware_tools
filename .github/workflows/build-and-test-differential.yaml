@@ -28,7 +28,7 @@ jobs:
           - -cuda
         include:
           - container-suffix: ""
-            runner: ubuntu-22.04
+            runner: ubuntu-24.04
           - container-suffix: -cuda
             runner: [self-hosted, Linux, X64]
 
