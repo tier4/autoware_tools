@@ -103,10 +103,23 @@ void PerceptionReproducer::on_republish_route_service(
   }
 
   reset_reproduce_state();
-  publish_localization_and_route();
+
+  if (param_.publish_route) {
+    publish_localization_and_route();
+    response->message = "Republished /initialpose and /planning/mission_planning/goal from rosbag.";
+  }
+
+  if (param_.replay_route) {
+    // publish locaization rest
+    publish_recorded_ego_pose(get_bag_start_time());
+
+    const auto bag_timestamp = rosbag_ego_odom_data_.front().first;
+    publish_route_at_timestamp(bag_timestamp, this->get_clock()->now());
+    response->message =
+      "Republished /initialpose and /planning/mission_planning/route from rosbag.";
+  }
 
   response->success = true;
-  response->message = "Republished /initialpose and /planning/mission_planning/goal from rosbag.";
   RCLCPP_INFO(get_logger(), "%s", response->message.c_str());
 }
 
