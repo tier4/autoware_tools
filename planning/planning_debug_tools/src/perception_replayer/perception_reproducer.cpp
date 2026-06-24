@@ -61,12 +61,13 @@ PerceptionReproducer::PerceptionReproducer(
     this, get_clock(), std::chrono::duration<double>(average_ego_odom_interval),
     std::bind(&PerceptionReproducer::on_timer, this), callback_group_check_perception_);
 
+  republish_route_srv_ = this->create_service<std_srvs::srv::Trigger>(
+    "~/republish_route", std::bind(
+                           &PerceptionReproducer::on_republish_route_service, this,
+                           std::placeholders::_1, std::placeholders::_2));
+
   if (param_.publish_route) {
-    publish_recorded_ego_pose(get_bag_start_time());
-    // temporarily add a sleep because sometimes the route is not generated correctly without it.
-    // Need to consider a proper solution.
-    rclcpp::sleep_for(std::chrono::seconds(2));
-    publish_goal_pose();
+    publish_localization_and_route();
   }
 
   RCLCPP_INFO(get_logger(), "PerceptionReproducer initialization completed");
@@ -75,9 +76,7 @@ PerceptionReproducer::PerceptionReproducer(
 void PerceptionReproducer::on_pose_reset(
   const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg)
 {
-  cool_down_indices_.clear();
-
-  last_sequenced_ego_pose_.reset();
+  reset_reproduce_state();
 
   if (!last_published_timestamp_.has_value()) {
     const auto nearest_ego_odom_idx = find_nearest_ego_odom_index(msg->pose.pose);
@@ -85,6 +84,30 @@ void PerceptionReproducer::on_pose_reset(
   }
 
   RCLCPP_INFO(get_logger(), "Cool down indices and last sequenced pose cleared by /initialpose3d");
+}
+
+void PerceptionReproducer::reset_reproduce_state()
+{
+  cool_down_indices_.clear();
+  last_sequenced_ego_pose_.reset();
+}
+
+void PerceptionReproducer::on_republish_route_service(
+  const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+  const std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+{
+  if (rosbag_ego_odom_data_.empty()) {
+    response->success = false;
+    response->message = "No ego odom data loaded from rosbag.";
+    return;
+  }
+
+  reset_reproduce_state();
+  publish_localization_and_route();
+
+  response->success = true;
+  response->message = "Republished /initialpose and /planning/mission_planning/goal from rosbag.";
+  RCLCPP_INFO(get_logger(), "%s", response->message.c_str());
 }
 
 void PerceptionReproducer::on_timer()
