@@ -1,0 +1,86 @@
+# Example configuration for batch diffusion planner evaluation.
+# Usage:
+#   ros2 run diffusion_planner_batch_eval batch_diffusion_eval.py -c /path/to/config.yaml
+
+rosbag_dir: /path/to/rosbags
+output_dir: /path/to/results
+
+map_path: /opt/autoware/maps
+vehicle_model: lv828l
+sensor_model: aip_x2_gen2
+
+# false = you launch psim yourself in another terminal (recommended for debugging).
+# true  = batch tool launches psim — do NOT also launch psim manually.
+manage_psim: false
+psim_startup_sec: 90
+
+# Wait for /api/routing/state == ARRIVED, then add post_arrival_sec before stopping.
+route_timeout_sec: 120
+route_setup_timeout_sec: 60
+route_service_wait_sec: 120
+route_backend: auto   # auto | adapi | mission_planner
+goal_min_move_m: 0.1
+post_arrival_sec: 5.0
+# Extra timeout margin based on rosbag duration when route never arrives.
+bag_duration_margin_sec: 30.0
+
+# Perception reproducer: position-synced replay. If ego stops, perception can freeze with a
+# lead vehicle in front and diffusion planner may output no trajectory.
+# reproducer_search_radius: 0 = always publish nearest bag frame (can reduce deadlock).
+reproducer_search_radius: 1.5
+reproducer_cool_down: 80.0
+# End bag early when ego is nearly stopped for stuck_timeout_sec (after run_grace_sec).
+stuck_timeout_sec: 45.0
+stuck_speed_threshold: 0.2
+run_grace_sec: 20.0
+
+skip_existing: true
+record_video: true      # ffmpeg starts after Auto is engaged (not during route setup / perception warmup)
+display: auto          # dual monitor: tool scans :0/:1 for RViz; or set display: ":1"
+video_capture: rviz    # rviz = RViz window only; display = full screen
+video_window_name: rviz
+video_size: auto       # auto = native size; wrong size (e.g. 1920x1080) causes tiling glitches
+# Fine-tune if RViz capture is shifted (positive x moves crop right)
+video_capture_offset_x: 0
+video_capture_offset_y: 0
+record_trajectories: true   # CSV logs for ego, planned trajectory, NPC objects
+# Videos: output_dir/<model_name>/<bag_folder>/<bag_name>.mp4
+# Verify ffmpeg before batch: ros2 run diffusion_planner_batch_eval batch_diffusion_eval.py -c config.yaml --test-ffmpeg
+auto_engage: true      # calls Enable Autoware Control + Auto (no manual RViz click)
+auto_engage_timeout_sec: 60.0   # engage after reproducer starts; modules need time to become ready
+# Wait for tracked objects to stabilize before engaging Auto.
+perception_warmup_sec: 5.0
+perception_ready_timeout_sec: 45.0
+perception_ready_min_objects: 1
+perception_ready_stable_sec: 2.0
+
+# Optional: override template used to generate per-model param files.
+# param_template_path: /path/to/diffusion_planner.param.yaml
+# Optional: where to deploy generated params before launching psim (must be writable).
+# diffusion_planner_param_deploy_path: /path/to/install/.../diffusion_planner.param.yaml
+
+models:
+  - name: model_baseline
+    onnx_model_path: /opt/autoware/mlmodels/diffusion_planner_for_erga/diffusion_planner.onnx
+    args_path: /opt/autoware/mlmodels/diffusion_planner_for_erga/args.json
+    # ignore_neighbors: true   # optional eval-only: planner ignores other vehicles (not real behavior)
+
+  # Alternatively provide a full param yaml per model:
+  # - name: model_experiment
+  #   param_yaml: /path/to/custom/diffusion_planner.param.yaml
+
+# Optional quantitative analysis (analyze_model_comparison.py)
+analysis:
+  lanelet_boundary_check: false   # set true or pass --lanelet-boundary-check
+  # map_path: /opt/autoware/maps   # defaults to map_path above
+  # vehicle_model: lv828l
+  boundary_types: [road_border, curbstone]
+  lanelet_sample_dt: 0.2          # downsample ego poses [s]
+  footprint_extra_margin: 0.0     # extra margin on ego footprint [m]
+  boundary_search_radius_m: 80.0
+  goal_stop_speed_threshold: 0.2   # speed [m/s] to detect final stop pose
+  goal_min_move_m: 0.1            # same as batch route_setup goal sampling
+  npc_sample_dt: 0.2
+  npc_align_max_dt: 0.15
+  npc_near_miss_threshold_m: 0.5
+  npc_labels: [CAR, TRUCK, BUS, TRAILER, MOTORCYCLE, BICYCLE]

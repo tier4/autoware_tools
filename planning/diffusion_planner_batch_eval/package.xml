@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>diffusion_planner_batch_eval</name>
+  <version>0.1.0</version>
+  <description>Batch evaluation tool for diffusion planner models with planning simulator and perception reproducer</description>
+  <maintainer email="takahiko.hasegawa@tier4.jp">Takahiko Hasegawa</maintainer>
+  <license>Apache License 2.0</license>
+
+  <buildtool_depend>ament_cmake_auto</buildtool_depend>
+  <buildtool_depend>autoware_cmake</buildtool_depend>
+
+  <depend>autoware_adapi_v1_msgs</depend>
+  <depend>autoware_perception_msgs</depend>
+  <depend>autoware_planning_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>rclpy</depend>
+  <depend>tier4_localization_msgs</depend>
+  <depend>tier4_planning_msgs</depend>
+
+  <exec_depend>autoware_launch</exec_depend>
+  <exec_depend>autoware_lanelet2_extension_python</exec_depend>
+  <exec_depend>matplotlib</exec_depend>
+  <exec_depend>planning_debug_tools</exec_depend>
+  <exec_depend>python3-lanelet2</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>rosbag2_py</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>autoware_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

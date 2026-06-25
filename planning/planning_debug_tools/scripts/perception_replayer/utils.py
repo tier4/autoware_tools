@@ -184,6 +184,7 @@ def get_pose_from_bag(input_path: str, interval=(0.1, 10000.0)) -> Tuple[Pose, P
                 if is_first_pose:
                     is_first_pose = False
                     prev_trans = trans
+                    pose_list.append((trans, rot))
                 elif is_close_pose(prev_trans, trans, interval[0], interval[1]):
                     continue
                 pose_list.append((trans, rot))
