@@ -84,3 +84,8 @@ analysis:
   npc_align_max_dt: 0.15
   npc_near_miss_threshold_m: 0.5
   npc_labels: [CAR, TRUCK, BUS, TRAILER, MOTORCYCLE, BICYCLE]
+  comfort_sample_dt: 0.1
+  comfort_min_derivative_dt: 0.05
+  comfort_max_derivative_dt: 0.5
+  harsh_decel_threshold_mps2: -2.5
+  harsh_decel_min_duration_sec: 0.3

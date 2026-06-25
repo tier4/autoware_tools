@@ -31,7 +31,9 @@ Run many rosbags × many models, collect videos + CSV traces, then compare model
 | Set initial pose + route goal from rosbag | `route_setup.py` |
 | Log ego pose, planned trajectory, tracked objects | `trajectory_logger.py` |
 | Interactive multi-model trajectory plot | `compare_trajectories.py` |
+| Interactive comfort / control time-series plots | `compare_comfort.py` |
 | Quantitative model comparison + safety metrics | `analyze_model_comparison.py` |
+| Jerk / harsh deceleration from ego traces | `comfort_metrics.py` |
 
 Typical use case: compare a **baseline** model vs a **new training checkpoint** on ~100 Hiratsuka rosbags, then rank models by success rate, goal accuracy, curb contact, and NPC proximity.
 
@@ -215,6 +217,9 @@ analysis:
   npc_sample_dt: 0.2
   npc_near_miss_threshold_m: 0.5
   npc_labels: [CAR, TRUCK, BUS, TRAILER, MOTORCYCLE, BICYCLE]
+  comfort_sample_dt: 0.1
+  harsh_decel_threshold_mps2: -2.5
+  harsh_decel_min_duration_sec: 0.3
 ```
 
 ---
@@ -331,9 +336,13 @@ output_dir/
 │       └── bag_name.mp4                    # video (if enabled)
 │       └── bag_name/                       # trace directory
 │           ├── ego_pose.csv
+│           ├── ego_accel.csv
+│           ├── control_cmd.csv
 │           ├── planned_trajectory.csv
 │           ├── objects.csv
 │           └── metadata.json
+├── comparisons/
+│   └── comfort/                            # from compare_comfort.py --render-all
 ├── model_b/
 │   └── ...
 └── quantitative_analysis/                  # from analyze_model_comparison.py
@@ -342,6 +351,7 @@ output_dir/
     ├── pairwise_per_bag.csv
     ├── per_model_per_bag_goal_stop.csv
     ├── per_model_per_bag_npc_collision.csv
+    ├── per_model_per_bag_comfort.csv
     ├── per_model_per_bag_lanelet_boundary.csv   # if --lanelet-boundary-check
     └── .goal_pose_cache.json
 ```
@@ -356,6 +366,27 @@ output_dir/
 | `x`, `y`, `z` | Position in map frame |
 | `yaw_rad` | Heading |
 | `vx`, `vy`, `speed_mps` | Velocity |
+
+**ego_accel.csv** — `/localization/acceleration` (base_link; preferred for comfort metrics)
+
+| Column | Description |
+|--------|-------------|
+| `stamp_sec` | ROS time [s] |
+| `ax_mps2`, `ay_mps2`, `az_mps2` | Linear acceleration in base_link |
+| `a_long_mps2`, `a_lat_mps2` | Longitudinal / lateral (= x / y in base_link) |
+
+**control_cmd.csv** — `/control/command/control_cmd`
+
+| Column | Description |
+|--------|-------------|
+| `stamp_sec` | Command time [s] |
+| `cmd_velocity_mps` | Commanded longitudinal speed |
+| `cmd_acceleration_mps2` | Commanded longitudinal acceleration |
+| `cmd_jerk_mps3` | Commanded longitudinal jerk |
+| `cmd_steering_tire_angle_rad` | Lateral steering command |
+| `cmd_steering_tire_rotation_rate_rps` | Steering rate command |
+
+> **Note:** `ego_accel.csv` and `control_cmd.csv` are written by runs after this update. Re-run batch eval (or at least re-log traces) to populate them. Older traces still work — comfort metrics fall back to velocity differentiation.
 
 **planned_trajectory.csv** — `/planning/trajectory`
 
@@ -415,6 +446,47 @@ Controls: left-drag pan, scroll zoom.
 
 ---
 
+### Comfort / control plots — `compare_comfort.py`
+
+Time-series overlay per model: ego speed, longitudinal acceleration, jerk, plus **control command** and **planned trajectory** profiles. Harsh deceleration regions are shaded (threshold from config / CLI).
+
+```bash
+# List bag keys
+ros2 run diffusion_planner_batch_eval compare_comfort.py -o $RESULTS --list-bags
+
+# Interactive compare
+ros2 run diffusion_planner_batch_eval compare_comfort.py \
+  -o $RESULTS \
+  --bag-key "ID1/your_bag_name" \
+  --models model_a,model_b
+
+# Save PNG
+ros2 run diffusion_planner_batch_eval compare_comfort.py \
+  -o $RESULTS --bag-key "ID1/..." --models model_a,model_b \
+  --save /tmp/comfort.png
+
+# Batch export all bags
+ros2 run diffusion_planner_batch_eval compare_comfort.py \
+  -o $RESULTS --render-all --models model_a,model_b
+```
+
+| Flag | Description |
+|------|-------------|
+| `--no-control` | Hide `/control/command/control_cmd` overlays |
+| `--no-plan` | Hide planned trajectory acceleration overlay |
+| `--show-lateral` | Add lateral acceleration subplot |
+| `--harsh-decel-threshold-mps2 -2.5` | Shade regions below this longitudinal accel |
+
+**Plot layers**
+
+| Line style | Source |
+|------------|--------|
+| Solid | Ego motion (`ego_pose.csv` + `ego_accel.csv` if present) |
+| Dashed | Control command (`control_cmd.csv`) |
+| Dotted | Planned trajectory first point (`planned_trajectory.csv`) |
+
+---
+
 ### Quantitative analysis — `analyze_model_comparison.py`
 
 ```bash
@@ -435,6 +507,7 @@ Requires **at least two models** in `output_dir`. Writes CSVs to `quantitative_a
 | `pairwise_per_bag.csv` | Model A vs B metrics on common bags |
 | `per_model_per_bag_goal_stop.csv` | Stop pose vs route goal |
 | `per_model_per_bag_npc_collision.csv` | Ego vs NPC overlap / near-miss |
+| `per_model_per_bag_comfort.csv` | Longitudinal/lateral jerk, harsh deceleration |
 
 #### Optional
 
@@ -450,6 +523,9 @@ Requires **at least two models** in `output_dir`. Writes CSVs to `quantitative_a
 | `--align-max-dt 0.15` | Max time gap for path alignment [s] |
 | `--skip-goal-stop` | Skip goal stop analysis |
 | `--skip-npc-collision` | Skip NPC collision analysis |
+| `--skip-comfort` | Skip jerk / harsh deceleration analysis |
+| `--harsh-decel-threshold-mps2 -2.5` | Harsh decel threshold [m/s²] |
+| `--harsh-decel-min-duration-sec 0.3` | Min harsh decel duration [s] |
 | `--rosbag-dir /path/to/bags` | Fallback for goal pose lookup |
 | `--goal-stop-speed-threshold 0.2` | Speed threshold for stop detection |
 | `--npc-near-miss-threshold-m 0.5` | Near-miss distance |
@@ -496,10 +572,31 @@ Offline OBB check (ego footprint vs tracked object boxes). **Not physics simulat
 
 | Metric | Meaning |
 |--------|---------|
-| `npc_collision_rate` | Fraction of samples with box overlap |
-| `npc_near_miss_rate` | Close approach without overlap (&lt; threshold) |
+| `npc_collision_rate` | Fraction of samples with ego/NPC overlap |
+| `npc_near_miss_rate` | Close approach without overlap |
 | `npc_min_distance_m` | Closest ego-to-NPC distance |
 | `had_npc_collision` | 1 if any overlap in the run |
+
+### Comfort (`per_model_per_bag_comfort.csv`)
+
+Computed from `ego_pose.csv` (`vx`, `vy`, `yaw_rad`) in the ego frame. Uses **`ego_accel.csv`** when present (cleaner than differentiating velocity). Optional plan peaks from `planned_trajectory.csv`.
+
+| Metric | Meaning |
+|--------|---------|
+| `rms_longitudinal_jerk_mps3` | RMS of longitudinal jerk |
+| `rms_lateral_jerk_mps3` | RMS of lateral jerk |
+| `p95_longitudinal_jerk_mps3` | 95th percentile longitudinal jerk magnitude |
+| `p95_lateral_jerk_mps3` | 95th percentile lateral jerk magnitude |
+| `max_decel_mps2` | Peak braking magnitude |
+| `harsh_decel_count` | Events with `a_long < harsh_decel_threshold` for ≥ `harsh_decel_min_duration_sec` |
+| `harsh_decel_ratio` | Fraction of run time in harsh decel |
+| `plan_max_longitudinal_accel_mps2` | Peak planned longitudinal accel (if trajectory logged) |
+
+Default thresholds (configurable in `analysis:`): `harsh_decel_threshold_mps2: -2.5`, `harsh_decel_min_duration_sec: 0.3`.
+
+Pairwise diffs (`pairwise_per_bag.csv`): `rms_longitudinal_jerk_diff_mps3`, `harsh_decel_count_diff`, `max_decel_diff_mps2` (model B − A).
+
+`per_model_run_summary.csv` also includes mean comfort metrics per model when comfort analysis is enabled.
 
 ### Lanelet boundary (`per_model_per_bag_lanelet_boundary.csv`, optional)
 
@@ -537,6 +634,39 @@ Mitigations:
 - `reproducer_search_radius: 0` (always publish nearest bag frame)
 - Lower `stuck_timeout_sec` to fail faster
 - Check videos for planner stopping while NPC is directly ahead
+
+### Video is black (file exists but empty/black content)
+
+Common causes on Linux + RViz2:
+
+1. **Wrong display** — batch terminal captures `:0` but RViz is on `:1` (dual monitor).
+   ```yaml
+   display: ":1"   # or ":0" — match where RViz actually runs
+   ```
+   Verify: `echo $DISPLAY` in the **psim terminal** vs **batch terminal** (must be the same machine).
+
+2. **RViz not visible** — minimized, on another workspace, or covered. Keep RViz **unminimized** on screen during recording.
+
+3. **Wayland** — `ffmpeg -f x11grab` often records black under native Wayland. Use an **X11** desktop session, or log in via Xorg.
+
+4. **SSH / remote** — batch job runs without GUI access to the local display. Run batch eval on the **same machine and desktop** as RViz (not headless SSH).
+
+5. **Preflight check** — always run first; it now detects black clips:
+   ```bash
+   ros2 run diffusion_planner_batch_eval batch_diffusion_eval.py \
+     -c ~/diffusion_batch_config.yaml --test-ffmpeg
+   ```
+   Watch the 2s test clip at `output_dir/.ffmpeg_preflight.mp4`.
+
+**Workarounds if x11grab stays black:**
+
+```yaml
+video_capture: display   # full screen instead of RViz window
+video_size: auto
+display: ":0"            # explicit display where RViz is visible
+```
+
+Ensure RViz fills most of that display. The tool now uses **ffmpeg `-window_id`** for RViz capture (more reliable for OpenGL windows than screen coordinates).
 
 ### No video recorded
 
@@ -596,8 +726,10 @@ diffusion_planner_batch_eval/
     ├── rosbag_utils.py              # Bag discovery, paths, duration
     ├── trajectory_logger.py         # CSV logger node
     ├── compare_trajectories.py      # Visual comparison
+    ├── compare_comfort.py           # Comfort / control time-series plots
     ├── analyze_model_comparison.py  # Quantitative analysis
     ├── goal_stop_error.py           # Goal stop metrics
+    ├── comfort_metrics.py           # Jerk / harsh deceleration
     ├── npc_collision_check.py       # NPC overlap / near-miss
     └── lanelet_boundary_check.py    # Map boundary / out-of-lane
 ```

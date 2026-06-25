@@ -28,8 +28,10 @@ import time
 from pathlib import Path
 
 import rclpy
+from autoware_control_msgs.msg import Control
 from autoware_perception_msgs.msg import TrackedObjects
 from autoware_planning_msgs.msg import Trajectory
+from geometry_msgs.msg import AccelWithCovarianceStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy
@@ -82,10 +84,18 @@ class TrajectoryLoggerNode(Node):
         self.objects_file = (self.output_dir / "objects.csv").open(
             "w", encoding="utf-8", newline=""
         )
+        self.ego_accel_file = (self.output_dir / "ego_accel.csv").open(
+            "w", encoding="utf-8", newline=""
+        )
+        self.control_cmd_file = (self.output_dir / "control_cmd.csv").open(
+            "w", encoding="utf-8", newline=""
+        )
 
         self.ego_writer = csv.writer(self.ego_file)
         self.traj_writer = csv.writer(self.traj_file)
         self.objects_writer = csv.writer(self.objects_file)
+        self.ego_accel_writer = csv.writer(self.ego_accel_file)
+        self.control_cmd_writer = csv.writer(self.control_cmd_file)
 
         self.ego_writer.writerow(
             ["stamp_sec", "x", "y", "z", "yaw_rad", "vx", "vy", "speed_mps"]
@@ -120,6 +130,28 @@ class TrajectoryLoggerNode(Node):
                 "is_stationary",
             ]
         )
+        self.ego_accel_writer.writerow(
+            [
+                "stamp_sec",
+                "ax_mps2",
+                "ay_mps2",
+                "az_mps2",
+                "a_long_mps2",
+                "a_lat_mps2",
+            ]
+        )
+        self.control_cmd_writer.writerow(
+            [
+                "stamp_sec",
+                "cmd_velocity_mps",
+                "cmd_acceleration_mps2",
+                "cmd_jerk_mps3",
+                "cmd_steering_tire_angle_rad",
+                "cmd_steering_tire_rotation_rate_rps",
+                "is_defined_acceleration",
+                "is_defined_jerk",
+            ]
+        )
 
         metadata = {
             "model_name": model_name,
@@ -127,8 +159,10 @@ class TrajectoryLoggerNode(Node):
             "started_at_unix": time.time(),
             "topics": {
                 "ego": "/localization/kinematic_state",
+                "ego_accel": "/localization/acceleration",
                 "trajectory": "/planning/trajectory",
                 "objects": "/perception/object_recognition/tracking/objects",
+                "control_cmd": "/control/command/control_cmd",
             },
         }
         (self.output_dir / "metadata.json").write_text(
@@ -144,8 +178,20 @@ class TrajectoryLoggerNode(Node):
             self._on_objects,
             sensor_qos,
         )
+        self.create_subscription(
+            AccelWithCovarianceStamped,
+            "/localization/acceleration",
+            self._on_ego_accel,
+            sensor_qos,
+        )
+        self.create_subscription(
+            Control,
+            "/control/command/control_cmd",
+            self._on_control_cmd,
+            sensor_qos,
+        )
 
-        self._counts = {"ego": 0, "trajectory": 0, "objects": 0}
+        self._counts = {"ego": 0, "trajectory": 0, "objects": 0, "ego_accel": 0, "control_cmd": 0}
         self.get_logger().info(f"Logging trajectories to {self.output_dir}")
 
     def _on_ego(self, msg: Odometry) -> None:
@@ -220,8 +266,48 @@ class TrajectoryLoggerNode(Node):
             )
         self._counts["objects"] += 1
 
+    def _on_ego_accel(self, msg: AccelWithCovarianceStamped) -> None:
+        stamp = stamp_to_sec(msg.header.stamp)
+        linear = msg.accel.accel.linear
+        # base_link: +X forward, +Y left
+        self.ego_accel_writer.writerow(
+            [
+                f"{stamp:.6f}",
+                linear.x,
+                linear.y,
+                linear.z,
+                linear.x,
+                linear.y,
+            ]
+        )
+        self._counts["ego_accel"] += 1
+
+    def _on_control_cmd(self, msg: Control) -> None:
+        stamp = stamp_to_sec(msg.stamp)
+        lon = msg.longitudinal
+        lat = msg.lateral
+        self.control_cmd_writer.writerow(
+            [
+                f"{stamp:.6f}",
+                lon.velocity,
+                lon.acceleration,
+                lon.jerk,
+                lat.steering_tire_angle,
+                lat.steering_tire_rotation_rate,
+                int(lon.is_defined_acceleration),
+                int(lon.is_defined_jerk),
+            ]
+        )
+        self._counts["control_cmd"] += 1
+
     def close(self) -> None:
-        for handle in (self.ego_file, self.traj_file, self.objects_file):
+        for handle in (
+            self.ego_file,
+            self.traj_file,
+            self.objects_file,
+            self.ego_accel_file,
+            self.control_cmd_file,
+        ):
             handle.flush()
             handle.close()
 
@@ -236,6 +322,8 @@ class TrajectoryLoggerNode(Node):
         self.get_logger().info(
             "Trajectory log closed: "
             f"ego={self._counts['ego']}, "
+            f"ego_accel={self._counts['ego_accel']}, "
+            f"control_cmd={self._counts['control_cmd']}, "
             f"trajectory={self._counts['trajectory']}, "
             f"object_frames={self._counts['objects']}"
         )
@@ -248,7 +336,8 @@ def main() -> None:
         "--output-dir",
         required=True,
         type=Path,
-        help="Directory for ego_pose.csv, planned_trajectory.csv, objects.csv",
+        help="Directory for ego_pose.csv, planned_trajectory.csv, objects.csv, "
+        "ego_accel.csv, control_cmd.csv",
     )
     parser.add_argument("--model-name", default="", help="Model name stored in metadata.json")
     parser.add_argument("--bag-path", default="", help="Source rosbag path stored in metadata.json")

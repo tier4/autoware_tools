@@ -560,6 +560,17 @@ class VideoCaptureSpec:
     grab_x: int
     grab_y: int
     description: str
+    window_id: str | None = None
+
+
+@dataclass
+class WindowMatch:
+    window_id: str
+    x_pos: int
+    y_pos: int
+    width: int
+    height: int
+    title: str
 
 
 _WINDOW_GEOM_RE = re.compile(r"(\d+)x(\d+)\+(-?\d+)\+(-?\d+)")
@@ -601,8 +612,8 @@ def _query_window_absolute_geometry(
     return abs_x, abs_y, width, height
 
 
-def find_window_geometry(display: str, name_hint: str) -> tuple[int, int, int, int, str] | None:
-    """Return absolute x, y, width, height, window title for the largest matching window."""
+def find_window_geometry(display: str, name_hint: str) -> WindowMatch | None:
+    """Return absolute geometry and X11 window id for the largest matching window."""
     if not shutil.which("xwininfo"):
         return None
     try:
@@ -619,7 +630,7 @@ def find_window_geometry(display: str, name_hint: str) -> tuple[int, int, int, i
         return None
 
     hint = name_hint.lower()
-    matches: list[tuple[int, int, int, int, str]] = []
+    matches: list[WindowMatch] = []
     for line in result.stdout.splitlines():
         id_match = _WINDOW_ID_RE.match(line)
         if id_match is None or hint not in line.lower():
@@ -627,19 +638,32 @@ def find_window_geometry(display: str, name_hint: str) -> tuple[int, int, int, i
         window_id, title = id_match.groups()
         geometry = _query_window_absolute_geometry(display, window_id)
         if geometry is None:
-            geom_match = _WINDOW_GEOM_RE.search(line)
-            if geom_match is None:
-                continue
-            width, height, x_pos, y_pos = map(int, geom_match.groups())
-        else:
-            x_pos, y_pos, width, height = geometry
+            # Tree-line geometry is relative to the parent — do not use for x11grab.
+            continue
+        x_pos, y_pos, width, height = geometry
         if width < 200 or height < 200:
             continue
-        matches.append((x_pos, y_pos, width, height, title))
+        matches.append(
+            WindowMatch(
+                window_id=window_id,
+                x_pos=x_pos,
+                y_pos=y_pos,
+                width=width,
+                height=height,
+                title=title,
+            )
+        )
 
     if not matches:
         return None
-    return max(matches, key=lambda item: item[2] * item[3])
+    best = max(matches, key=lambda item: item.width * item.height)
+    return best
+
+
+def normalize_x11_display(display: str) -> str:
+    if display.startswith(":") and "." not in display:
+        return f"{display}.0"
+    return display
 
 
 def _apply_capture_offsets(
@@ -683,17 +707,18 @@ def resolve_video_capture(config: EvalConfig, display: str) -> VideoCaptureSpec:
     if capture_mode == "rviz":
         window = find_window_geometry(display, config.video_window_name)
         if window is not None:
-            x_pos, y_pos, width, height, title = window
             x_pos, y_pos, width, height = _apply_capture_offsets(
-                x_pos, y_pos, width, height, config
+                window.x_pos, window.y_pos, window.width, window.height, config
             )
             return VideoCaptureSpec(
-                display_input=display,
+                display_input=normalize_x11_display(display),
                 video_size=f"{width}x{height}",
                 grab_x=x_pos,
                 grab_y=y_pos,
+                window_id=window.window_id,
                 description=(
-                    f"rviz window '{title}' absolute +{x_pos},{y_pos} {width}x{height}"
+                    f"rviz window '{window.title}' id={window.window_id} "
+                    f"(window_id capture, fallback region +{x_pos},{y_pos} {width}x{height})"
                 ),
             )
         print(
@@ -707,7 +732,7 @@ def resolve_video_capture(config: EvalConfig, display: str) -> VideoCaptureSpec:
         width = _even_dimension(int(width_str))
         height = _even_dimension(int(height_str))
         return VideoCaptureSpec(
-            display_input=display,
+            display_input=normalize_x11_display(display),
             video_size=f"{width}x{height}",
             grab_x=config.video_capture_offset_x,
             grab_y=config.video_capture_offset_y,
@@ -717,7 +742,7 @@ def resolve_video_capture(config: EvalConfig, display: str) -> VideoCaptureSpec:
     dims = get_display_dimensions(display)
     if dims is None:
         return VideoCaptureSpec(
-            display_input=display,
+            display_input=normalize_x11_display(display),
             video_size="1920x1080",
             grab_x=config.video_capture_offset_x,
             grab_y=config.video_capture_offset_y,
@@ -726,7 +751,7 @@ def resolve_video_capture(config: EvalConfig, display: str) -> VideoCaptureSpec:
     width = _even_dimension(dims[0])
     height = _even_dimension(dims[1])
     return VideoCaptureSpec(
-        display_input=display,
+        display_input=normalize_x11_display(display),
         video_size=f"{width}x{height}",
         grab_x=config.video_capture_offset_x,
         grab_y=config.video_capture_offset_y,
@@ -750,15 +775,23 @@ def build_ffmpeg_record_command(
         "x11grab",
         "-framerate",
         "30",
-        "-grab_x",
-        str(capture.grab_x),
-        "-grab_y",
-        str(capture.grab_y),
-        "-video_size",
-        capture.video_size,
-        "-i",
-        capture.display_input,
+        "-draw_mouse",
+        "0",
     ]
+    if capture.window_id:
+        command.extend(["-window_id", capture.window_id])
+    else:
+        command.extend(
+            [
+                "-grab_x",
+                str(capture.grab_x),
+                "-grab_y",
+                str(capture.grab_y),
+                "-video_size",
+                capture.video_size,
+            ]
+        )
+    command.extend(["-i", capture.display_input])
     if duration_sec is not None:
         command.extend(["-t", str(duration_sec)])
     command.extend(
@@ -797,6 +830,39 @@ def display_is_available(display: str) -> bool:
         return bool(os.environ.get("DISPLAY"))
 
 
+def mean_video_luma(path: Path, sample_time: float = 0.5) -> float | None:
+    """Return mean grayscale [0-255] of one frame; low values suggest a black capture."""
+    if not shutil.which("ffmpeg"):
+        return None
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-ss",
+                str(sample_time),
+                "-i",
+                str(path),
+                "-vframes",
+                "1",
+                "-vf",
+                "scale=32:32,format=gray",
+                "-f",
+                "rawvideo",
+                "-",
+            ],
+            capture_output=True,
+            timeout=20.0,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0 or not result.stdout:
+        return None
+    data = result.stdout
+    return sum(data) / len(data)
+
+
 def validate_video_file(path: Path, min_bytes: int = 4096) -> tuple[bool, str]:
     if not path.exists():
         return False, "file_missing"
@@ -804,6 +870,7 @@ def validate_video_file(path: Path, min_bytes: int = 4096) -> tuple[bool, str]:
     if size < min_bytes:
         return False, f"too_small ({size} bytes)"
 
+    duration_sec: float | None = None
     if shutil.which("ffprobe"):
         try:
             result = subprocess.run(
@@ -824,9 +891,15 @@ def validate_video_file(path: Path, min_bytes: int = 4096) -> tuple[bool, str]:
             )
             if result.returncode == 0 and result.stdout.strip():
                 duration_sec = float(result.stdout.strip())
-                return True, f"{size / (1024 * 1024):.2f} MB, {duration_sec:.1f}s"
         except (ValueError, subprocess.TimeoutExpired, OSError):
-            pass
+            duration_sec = None
+
+    luma = mean_video_luma(path, sample_time=0.5)
+    if luma is not None and luma < 8.0:
+        return False, f"mostly_black (mean_luma={luma:.1f}/255)"
+
+    if duration_sec is not None:
+        return True, f"{size / (1024 * 1024):.2f} MB, {duration_sec:.1f}s"
 
     return True, f"{size / (1024 * 1024):.2f} MB"
 
@@ -879,6 +952,14 @@ def run_ffmpeg_preflight(config: EvalConfig) -> bool:
     ok, detail = validate_video_file(test_path, min_bytes=5000)
     if not ok:
         print(f"[error] ffmpeg preflight produced invalid video ({detail})")
+        if "mostly_black" in detail:
+            print(
+                "[hint] Black capture usually means:\n"
+                "       - RViz is on a different monitor ($DISPLAY mismatch) → set display: :0 or :1\n"
+                "       - RViz is minimized / behind other windows → keep it visible\n"
+                "       - Wayland session (x11grab unreliable) → use X11 session or video_capture: display\n"
+                "       - Batch terminal has no access to the GUI display → run batch on the same desktop"
+            )
         return False
 
     print(f"[info] ffmpeg preflight OK ({detail})")

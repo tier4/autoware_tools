@@ -19,6 +19,8 @@ install(PROGRAMS
   scripts/lanelet_boundary_check.py
   scripts/goal_stop_error.py
   scripts/npc_collision_check.py
+  scripts/comfort_metrics.py
+  scripts/compare_comfort.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

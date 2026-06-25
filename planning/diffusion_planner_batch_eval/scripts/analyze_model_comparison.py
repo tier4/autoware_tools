@@ -289,6 +289,7 @@ def analyze_pair_bag(
     bag_key: str,
     max_dt: float,
     goal_config: GoalStopAnalysisConfig | None = None,
+    comfort_config: ComfortAnalysisConfig | None = None,
 ) -> dict[str, float | str]:
     dir_a = output_dir / model_a / bag_key
     dir_b = output_dir / model_b / bag_key
@@ -376,6 +377,25 @@ def analyze_pair_bag(
                 )
         if status_a != "ok" or status_b != "ok":
             result["goal_stop_status"] = f"a={status_a},b={status_b}"
+
+    if comfort_config is not None:
+        from comfort_metrics import analyze_trace_comfort
+        from comfort_metrics import pairwise_comfort_diff
+
+        metrics_a, status_a = analyze_trace_comfort(dir_a, comfort_config)
+        metrics_b, status_b = analyze_trace_comfort(dir_b, comfort_config)
+        if metrics_a is not None:
+            result["rms_longitudinal_jerk_a_mps3"] = metrics_a.rms_longitudinal_jerk_mps3
+            result["harsh_decel_count_a"] = float(metrics_a.harsh_decel_count)
+            result["max_decel_a_mps2"] = metrics_a.max_decel_mps2
+        if metrics_b is not None:
+            result["rms_longitudinal_jerk_b_mps3"] = metrics_b.rms_longitudinal_jerk_mps3
+            result["harsh_decel_count_b"] = float(metrics_b.harsh_decel_count)
+            result["max_decel_b_mps2"] = metrics_b.max_decel_mps2
+        if metrics_a is not None and metrics_b is not None:
+            result.update(pairwise_comfort_diff(metrics_a, metrics_b))
+        if status_a != "ok" or status_b != "ok":
+            result["comfort_status"] = f"a={status_a},b={status_b}"
 
     return result
 
@@ -603,6 +623,121 @@ def run_npc_collision_analysis(
     return rows
 
 
+@dataclass
+class ComfortAnalysisConfig:
+    sample_dt: float
+    min_derivative_dt: float
+    max_derivative_dt: float
+    harsh_decel_threshold_mps2: float
+    harsh_decel_min_duration_sec: float
+
+
+def load_comfort_analysis_config(
+    config_path: Path | None,
+    *,
+    sample_dt: float,
+    min_derivative_dt: float,
+    max_derivative_dt: float,
+    harsh_decel_threshold_mps2: float,
+    harsh_decel_min_duration_sec: float,
+) -> ComfortAnalysisConfig:
+    raw: dict = {}
+    if config_path is not None:
+        with config_path.expanduser().open(encoding="utf-8") as file:
+            loaded = yaml.safe_load(file) or {}
+        raw = loaded.get("analysis", {}) if isinstance(loaded, dict) else {}
+
+    return ComfortAnalysisConfig(
+        sample_dt=float(raw.get("comfort_sample_dt", sample_dt)),
+        min_derivative_dt=float(raw.get("comfort_min_derivative_dt", min_derivative_dt)),
+        max_derivative_dt=float(raw.get("comfort_max_derivative_dt", max_derivative_dt)),
+        harsh_decel_threshold_mps2=float(
+            raw.get("harsh_decel_threshold_mps2", harsh_decel_threshold_mps2)
+        ),
+        harsh_decel_min_duration_sec=float(
+            raw.get("harsh_decel_min_duration_sec", harsh_decel_min_duration_sec)
+        ),
+    )
+
+
+def run_comfort_analysis(
+    output_dir: Path,
+    models: list[str],
+    comfort_config: ComfortAnalysisConfig,
+) -> list[dict[str, float | str]]:
+    from comfort_metrics import ComfortMetrics
+    from comfort_metrics import analyze_trace_comfort
+
+    empty_metrics = ComfortMetrics(
+        comfort_samples=0,
+        motion_duration_sec=float("nan"),
+        max_longitudinal_accel_mps2=float("nan"),
+        min_longitudinal_accel_mps2=float("nan"),
+        max_lateral_accel_mps2=float("nan"),
+        min_lateral_accel_mps2=float("nan"),
+        max_longitudinal_jerk_mps3=float("nan"),
+        max_lateral_jerk_mps3=float("nan"),
+        rms_longitudinal_jerk_mps3=float("nan"),
+        rms_lateral_jerk_mps3=float("nan"),
+        p95_longitudinal_jerk_mps3=float("nan"),
+        p95_lateral_jerk_mps3=float("nan"),
+        harsh_decel_count=0,
+        harsh_decel_time_sec=float("nan"),
+        harsh_decel_ratio=float("nan"),
+        max_decel_mps2=float("nan"),
+        plan_max_longitudinal_accel_mps2=float("nan"),
+        plan_max_longitudinal_jerk_mps3=float("nan"),
+    ).as_dict()
+
+    rows: list[dict[str, float | str]] = []
+    for model in models:
+        for bag_key in discover_bag_keys(output_dir, model):
+            trace_dir = output_dir / model / bag_key
+            metrics, status = analyze_trace_comfort(trace_dir, comfort_config)
+            row: dict[str, float | str] = {
+                "model": model,
+                "bag_key": bag_key,
+                "run_status": load_run_status(output_dir, model, bag_key),
+                "comfort_status": status,
+            }
+            if metrics is not None:
+                row.update(metrics.as_dict())
+            else:
+                row.update(empty_metrics)
+            rows.append(row)
+    return rows
+
+
+def aggregate_comfort_summary(
+    comfort_rows: list[dict[str, float | str]],
+) -> dict[str, dict[str, float]]:
+    summary: dict[str, dict[str, float]] = {}
+    for model in {str(row["model"]) for row in comfort_rows}:
+        ok_rows = [
+            row
+            for row in comfort_rows
+            if row["model"] == model and row.get("comfort_status") == "ok"
+        ]
+        if not ok_rows:
+            continue
+        summary[model] = {
+            "mean_rms_longitudinal_jerk_mps3": statistics.fmean(
+                float(row["rms_longitudinal_jerk_mps3"]) for row in ok_rows
+            ),
+            "mean_rms_lateral_jerk_mps3": statistics.fmean(
+                float(row["rms_lateral_jerk_mps3"]) for row in ok_rows
+            ),
+            "mean_harsh_decel_count": statistics.fmean(
+                float(row["harsh_decel_count"]) for row in ok_rows
+            ),
+            "mean_harsh_decel_ratio": statistics.fmean(
+                float(row["harsh_decel_ratio"]) for row in ok_rows
+            ),
+            "mean_max_decel_mps2": statistics.fmean(float(row["max_decel_mps2"]) for row in ok_rows),
+        }
+    return summary
+
+
 def print_pair_summary(rows: list[dict[str, float | str]]) -> None:
     if not rows:
         print("[warn] No pairwise metrics computed.")
@@ -736,6 +871,29 @@ def main() -> None:
         "--npc-labels",
         help="Comma-separated NPC labels to include (default: CAR,TRUCK,BUS,TRAILER,MOTORCYCLE,BICYCLE)",
     )
+    parser.add_argument(
+        "--skip-comfort",
+        action="store_true",
+        help="Skip longitudinal/lateral jerk and harsh deceleration analysis",
+    )
+    parser.add_argument(
+        "--comfort-sample-dt",
+        type=float,
+        default=0.1,
+        help="Downsample ego poses to this interval [s] for comfort metrics (default: 0.1)",
+    )
+    parser.add_argument(
+        "--harsh-decel-threshold-mps2",
+        type=float,
+        default=-2.5,
+        help="Longitudinal accel [m/s²] below which decel counts as harsh (default: -2.5)",
+    )
+    parser.add_argument(
+        "--harsh-decel-min-duration-sec",
+        type=float,
+        default=0.3,
+        help="Min duration [s] for a harsh decel event (default: 0.3)",
+    )
     args = parser.parse_args()
 
     output_dir = args.output_dir.expanduser()
@@ -762,7 +920,6 @@ def main() -> None:
         summary = model_run_summary(output_dir, model)
         if summary:
             per_model_rows.append({"model": model, **summary})
-    write_csv(out_dir / "per_model_run_summary.csv", per_model_rows)
 
     per_bag_rows: list[dict[str, float | str]] = []
     for model in models:
@@ -794,6 +951,16 @@ def main() -> None:
     )
     goal_stop_enabled = not args.skip_goal_stop
     npc_collision_enabled = not args.skip_npc_collision
+    comfort_enabled = not args.skip_comfort
+
+    comfort_config = load_comfort_analysis_config(
+        args.config,
+        sample_dt=args.comfort_sample_dt,
+        min_derivative_dt=0.05,
+        max_derivative_dt=0.5,
+        harsh_decel_threshold_mps2=args.harsh_decel_threshold_mps2,
+        harsh_decel_min_duration_sec=args.harsh_decel_min_duration_sec,
+    )
 
     npc_labels = (
         [name.strip() for name in args.npc_labels.split(",") if name.strip()]
@@ -823,6 +990,7 @@ def main() -> None:
                         bag_key,
                         args.align_max_dt,
                         goal_config if goal_stop_enabled else None,
+                        comfort_config if comfort_enabled else None,
                     )
                 )
     write_csv(out_dir / "pairwise_per_bag.csv", pair_rows)
@@ -885,6 +1053,42 @@ def main() -> None:
         failed = sum(1 for row in npc_rows if row.get("npc_collision_status") != "ok")
         if failed:
             print(f"[warn] NPC collision analysis failed for {failed} trace(s)")
+
+    if comfort_enabled:
+        print(
+            f"\n[info] Computing comfort metrics "
+            f"(harsh_decel<{comfort_config.harsh_decel_threshold_mps2} m/s² "
+            f"for>={comfort_config.harsh_decel_min_duration_sec}s)"
+        )
+        comfort_rows = run_comfort_analysis(output_dir, models, comfort_config)
+        write_csv(out_dir / "per_model_per_bag_comfort.csv", comfort_rows)
+        comfort_summary = aggregate_comfort_summary(comfort_rows)
+        for row in per_model_rows:
+            model_summary = comfort_summary.get(str(row["model"]))
+            if model_summary:
+                row.update(model_summary)
+        ok_rows = [row for row in comfort_rows if row.get("comfort_status") == "ok"]
+        if ok_rows:
+            print("\nComfort summary (per model):")
+            for model in models:
+                model_rows = [row for row in ok_rows if row["model"] == model]
+                if not model_rows:
+                    continue
+                mean_jerk = statistics.fmean(
+                    float(row["rms_longitudinal_jerk_mps3"]) for row in model_rows
+                )
+                mean_harsh = statistics.fmean(float(row["harsh_decel_count"]) for row in model_rows)
+                mean_decel = statistics.fmean(float(row["max_decel_mps2"]) for row in model_rows)
+                print(
+                    f"  {model}: mean_rms_long_jerk={mean_jerk:.2f} m/s³, "
+                    f"mean_harsh_decel_count={mean_harsh:.1f}, "
+                    f"mean_max_decel={mean_decel:.2f} m/s²"
+                )
+        failed = sum(1 for row in comfort_rows if row.get("comfort_status") != "ok")
+        if failed:
+            print(f"[warn] Comfort analysis failed for {failed} trace(s) (see comfort_status column)")
+
+    write_csv(out_dir / "per_model_run_summary.csv", per_model_rows)
 
     print("\nPer-model run summary:")
     for row in per_model_rows:
@@ -951,6 +1155,8 @@ def main() -> None:
         print("  per_model_per_bag_goal_stop.csv — stop pose vs route goal per bag")
     if npc_collision_enabled:
         print("  per_model_per_bag_npc_collision.csv — ego vs NPC overlap / near-miss per bag")
+    if comfort_enabled:
+        print("  per_model_per_bag_comfort.csv — jerk / harsh deceleration per bag")
     if lanelet_config.enabled:
         print("  per_model_per_bag_lanelet_boundary.csv — out-of-lane / road-border crossing per bag")
     print("\nKey pairwise metrics:")
@@ -974,6 +1180,16 @@ def main() -> None:
         print("  npc_near_miss_rate   — close approach without overlap (< threshold)")
         print("  npc_min_distance_m   — closest ego-to-NPC distance along the run")
         print("  had_npc_collision    — 1 if any overlap detected in the bag")
+    if comfort_enabled:
+        print("\nComfort metrics (per_model_per_bag_comfort.csv):")
+        print("  rms_longitudinal_jerk_mps3 — RMS of longitudinal jerk in ego frame")
+        print("  rms_lateral_jerk_mps3      — RMS of lateral jerk in ego frame")
+        print("  harsh_decel_count          — decel events below threshold long enough")
+        print("  harsh_decel_ratio          — fraction of run time in harsh decel")
+        print("  max_decel_mps2             — peak braking magnitude")
+        print("\nPairwise comfort diff (pairwise_per_bag.csv):")
+        print("  rms_longitudinal_jerk_diff_mps3 — model B − A")
+        print("  harsh_decel_count_diff          — model B − A")
 
 
 if __name__ == "__main__":

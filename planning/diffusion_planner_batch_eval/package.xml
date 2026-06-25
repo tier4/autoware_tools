@@ -11,8 +11,10 @@
   <buildtool_depend>autoware_cmake</buildtool_depend>
 
   <depend>autoware_adapi_v1_msgs</depend>
+  <depend>autoware_control_msgs</depend>
   <depend>autoware_perception_msgs</depend>
   <depend>autoware_planning_msgs</depend>
+  <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>rclpy</depend>
   <depend>tier4_localization_msgs</depend>
