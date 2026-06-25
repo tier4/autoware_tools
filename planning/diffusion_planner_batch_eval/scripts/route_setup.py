@@ -259,6 +259,53 @@ class RouteSetupNode(Node):
             "/api/operation_mode/change_to_autonomous",
             callback_group=self.callback_group,
         )
+        self.change_to_stop_client = self.create_client(
+            ChangeOperationMode,
+            "/api/operation_mode/change_to_stop",
+            callback_group=self.callback_group,
+        )
+        self.speed_mps = 0.0
+        self.ego_pose: Pose | None = None
+        sensor_qos = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT)
+        self.create_subscription(
+            Odometry,
+            "/localization/kinematic_state",
+            self._on_kinematic_state,
+            sensor_qos,
+        )
+
+    def _on_kinematic_state(self, msg: Odometry) -> None:
+        twist = msg.twist.twist.linear
+        self.speed_mps = math.hypot(twist.x, twist.y)
+        self.ego_pose = msg.pose.pose
+
+    def _wait_for_ego_near_pose(
+        self, target: Pose, timeout_sec: float, tol_m: float = 2.0
+    ) -> tuple[bool, str]:
+        """Mission planner routes from /localization/kinematic_state, not /initialpose."""
+        deadline = time.time() + timeout_sec
+        last_log = 0.0
+        while time.time() < deadline and rclpy.ok():
+            self._spin_until(time.time() + 0.5)
+            if self.ego_pose is None:
+                continue
+            dist = _distance_xy(self.ego_pose, target)
+            if dist <= tol_m:
+                return True, f"ego_at_initial_pose (dist={dist:.2f}m)"
+            now = time.time()
+            if now - last_log >= 5.0:
+                self.get_logger().info(
+                    f"Waiting for ego pose to match bag start (dist={dist:.2f}m, tol={tol_m}m)..."
+                )
+                last_log = now
+
+        if self.ego_pose is None:
+            return False, "ego_pose_timeout: no /localization/kinematic_state received"
+        dist = _distance_xy(self.ego_pose, target)
+        return False, f"ego_pose_timeout (dist={dist:.2f}m, tol={tol_m}m)"
+
+    def _format_pose_xy(self, pose: Pose) -> str:
+        return f"({pose.position.x:.2f}, {pose.position.y:.2f})"
 
     def _on_adapi_route_state(self, msg: AdapiRouteState) -> None:
         self.adapi_route_state = msg.state
@@ -288,18 +335,92 @@ class RouteSetupNode(Node):
             return self.adapi_route_state == AdapiRouteState.SET
         return self.mission_route_state == MissionRouteState.SET
 
+    def _route_is_verified(self) -> bool:
+        """Route is ready when AD API or mission planner reports SET."""
+        if self.adapi_route_state == AdapiRouteState.SET:
+            return True
+        if self.mission_route_state == MissionRouteState.SET:
+            return True
+        return False
+
+    def _route_state_summary(self) -> str:
+        return f"adapi={self.adapi_route_state}, mission={self.mission_route_state}"
+
+    def _disengage_and_wait_stopped(
+        self, timeout_sec: float, stop_speed_mps: float = 0.2
+    ) -> tuple[bool, str]:
+        """Stop Auto mode and wait until ego is nearly stopped (required before clear_route)."""
+        deadline = time.time() + timeout_sec
+        self._spin_until(time.time() + 1.0)
+
+        if self.operation_mode == OperationModeState.AUTONOMOUS:
+            ok, message = self._call_change_mode(
+                self.change_to_stop_client, "change_to_stop", timeout_sec=10.0
+            )
+            if not ok:
+                self.get_logger().warn(f"change_to_stop failed: {message}")
+            self._spin_until(time.time() + 2.0)
+
+        last_log = 0.0
+        while time.time() < deadline and rclpy.ok():
+            self._spin_until(time.time() + 0.5)
+            stopped = self.speed_mps <= stop_speed_mps
+            not_auto = self.operation_mode != OperationModeState.AUTONOMOUS
+            if stopped and not_auto:
+                return True, f"disengaged (speed={self.speed_mps:.2f} m/s, mode={self.operation_mode})"
+
+            now = time.time()
+            if now - last_log >= 5.0:
+                self.get_logger().info(
+                    "Waiting to disengage before route reset "
+                    f"(speed={self.speed_mps:.2f} m/s, mode={self.operation_mode})..."
+                )
+                last_log = now
+
+        return False, (
+            f"disengage_timeout (speed={self.speed_mps:.2f} m/s, mode={self.operation_mode})"
+        )
+
+    def _clear_route_once(self, timeout_sec: float) -> tuple[bool, str]:
+        if self.backend == RouteBackend.ADAPI:
+            client = self.adapi_clear_route_client
+            request = AdapiClearRoute.Request()
+        else:
+            client = self.mission_clear_route_client
+            request = MissionClearRoute.Request()
+
+        if not client.wait_for_service(timeout_sec=5.0):
+            return False, "clear_route_service_unavailable"
+
+        future = client.call_async(request)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=15.0)
+        if not future.done() or future.result() is None:
+            return False, "clear_route_no_response"
+        if not future.result().status.success:
+            message = future.result().status.message
+            return False, f"clear_route_failed: {message}"
+
+        deadline = time.time() + timeout_sec
+        while time.time() < deadline:
+            self._spin_until(time.time() + 0.5)
+            if self._route_is_unset():
+                return True, "route_cleared"
+        return False, "clear_route_timeout"
+
     def _wait_for_backend(self, timeout_sec: float, preference: str) -> tuple[RouteBackend | None, str]:
+        # New nodes need a moment for DDS service discovery between batch bags.
+        self._spin_until(time.time() + 3.0)
         deadline = time.time() + timeout_sec
         last_log = 0.0
         while time.time() < deadline and rclpy.ok():
             rclpy.spin_once(self, timeout_sec=0.1)
             adapi_ready = (
-                self.adapi_clear_route_client.service_is_ready()
-                and self.adapi_set_route_client.service_is_ready()
+                self.adapi_clear_route_client.wait_for_service(timeout_sec=0.0)
+                and self.adapi_set_route_client.wait_for_service(timeout_sec=0.0)
             )
             mission_ready = (
-                self.mission_clear_route_client.service_is_ready()
-                and self.mission_set_route_client.service_is_ready()
+                self.mission_clear_route_client.wait_for_service(timeout_sec=0.0)
+                and self.mission_set_route_client.wait_for_service(timeout_sec=0.0)
             )
 
             if preference in ("auto", "adapi") and adapi_ready:
@@ -323,28 +444,26 @@ class RouteSetupNode(Node):
         if self._route_is_unset():
             return True, "route_already_unset"
 
-        if self.backend == RouteBackend.ADAPI:
-            client = self.adapi_clear_route_client
-            request = AdapiClearRoute.Request()
-        else:
-            client = self.mission_clear_route_client
-            request = MissionClearRoute.Request()
+        clear_wait_sec = min(timeout_sec, 15.0)
+        disengage_wait_sec = min(timeout_sec, 15.0)
+        last_error = "clear_route_unknown"
+        for attempt in range(3):
+            if attempt > 0:
+                self.get_logger().info(f"Retrying route clear (attempt {attempt + 1}/3)...")
+                disengage_ok, disengage_msg = self._disengage_and_wait_stopped(disengage_wait_sec)
+                if not disengage_ok:
+                    last_error = f"disengage_before_clear_failed: {disengage_msg}"
+                    continue
 
-        if not client.wait_for_service(timeout_sec=5.0):
-            return False, "clear_route_service_unavailable"
+            ok, message = self._clear_route_once(clear_wait_sec)
+            if ok:
+                return True, message
+            last_error = message
+            if "cannot be cleared while it is in use" in message:
+                self._disengage_and_wait_stopped(disengage_wait_sec)
+            time.sleep(1.0)
 
-        future = client.call_async(request)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=15.0)
-        if not future.done() or future.result() is None or not future.result().status.success:
-            message = future.result().status.message if future.result() else "no_response"
-            return False, f"clear_route_failed: {message}"
-
-        deadline = time.time() + timeout_sec
-        while time.time() < deadline:
-            self._spin_until(time.time() + 0.5)
-            if self._route_is_unset():
-                return True, "route_cleared"
-        return False, "clear_route_timeout"
+        return False, last_error
 
     def _make_initial_pose_msg(self, pose: Pose) -> PoseWithCovarianceStamped:
         msg = PoseWithCovarianceStamped()
@@ -420,12 +539,46 @@ class RouteSetupNode(Node):
         if not future.result().status.success:
             return False, f"set_route_rejected: {future.result().status.message}"
 
-        deadline = time.time() + timeout_sec
+        set_wait_sec = min(timeout_sec, 20.0)
+        deadline = time.time() + set_wait_sec
         while time.time() < deadline:
             self._spin_until(time.time() + 0.5)
             if self._route_is_set():
                 return True, f"route_set_via_{self.backend.value}"
         return False, "route_set_timeout"
+
+    def _set_route_with_retry(
+        self, initial_pose: Pose, goal_pose: Pose, timeout_sec: float
+    ) -> tuple[bool, str]:
+        pose_wait_sec = min(timeout_sec, 20.0)
+        ok, pose_message = self._wait_for_ego_near_pose(initial_pose, pose_wait_sec)
+        if not ok:
+            self.get_logger().warn(
+                f"Ego pose not at bag start before routing ({pose_message}); "
+                "mission planner may reject the route."
+            )
+
+        last_error = "set_route_unknown"
+        for attempt in range(3):
+            if attempt > 0:
+                self.get_logger().info(f"Retrying set_route (attempt {attempt + 1}/3)...")
+                time.sleep(2.0)
+                self._wait_for_ego_near_pose(initial_pose, min(timeout_sec, 10.0))
+
+            ok, message = self._set_route(goal_pose, timeout_sec)
+            if ok:
+                return True, f"{pose_message}; {message}"
+            last_error = message
+            if "planned route is empty" not in message:
+                break
+
+        pose_hint = (
+            f" start={self._format_pose_xy(initial_pose)}"
+            f" goal={self._format_pose_xy(goal_pose)}"
+        )
+        if self.ego_pose is not None:
+            pose_hint += f" ego={self._format_pose_xy(self.ego_pose)}"
+        return False, f"{last_error}{pose_hint}"
 
     def _call_change_mode(
         self, client, service_name: str, timeout_sec: float
@@ -444,6 +597,11 @@ class RouteSetupNode(Node):
     def _engage_autonomous(self, timeout_sec: float) -> tuple[bool, str]:
         deadline = time.time() + timeout_sec
         self._spin_until(time.time() + 1.0)
+
+        if not self._route_is_verified():
+            return False, (
+                f"route_not_set_before_engage ({self._route_state_summary()})"
+            )
 
         if self.operation_mode == OperationModeState.AUTONOMOUS:
             return True, "already_autonomous"
@@ -489,12 +647,24 @@ class RouteSetupNode(Node):
                 time.sleep(3.0)
                 continue
 
-            confirm_deadline = time.time() + 10.0
+            confirm_deadline = time.time() + 15.0
+            held_since: float | None = None
             while time.time() < confirm_deadline:
-                self._spin_until(time.time() + 0.5)
+                self._spin_until(time.time() + 0.2)
                 if self.operation_mode == OperationModeState.AUTONOMOUS:
-                    return True, "autonomous_engaged"
-            last_failure = "autonomous_engage_timeout"
+                    if held_since is None:
+                        held_since = time.time()
+                    elif time.time() - held_since >= 2.0:
+                        return True, (
+                            f"autonomous_engaged (mode={self.operation_mode}, "
+                            f"control={self.autoware_control_enabled})"
+                        )
+                else:
+                    held_since = None
+            last_failure = (
+                f"autonomous_engage_not_held (mode={self.operation_mode}, "
+                f"control={self.autoware_control_enabled})"
+            )
             time.sleep(3.0)
 
         return False, last_failure
@@ -519,6 +689,12 @@ class RouteSetupNode(Node):
         except ValueError as error:
             return False, str(error)
 
+        disengage_ok, disengage_msg = self._disengage_and_wait_stopped(min(timeout_sec, 25.0))
+        if not disengage_ok:
+            self.get_logger().warn(
+                f"Proceeding with route reset despite disengage warning: {disengage_msg}"
+            )
+
         ok, step_message = self._clear_route_if_needed(timeout_sec)
         if not ok:
             return False, step_message
@@ -529,11 +705,23 @@ class RouteSetupNode(Node):
         if not ok:
             return False, step_message
 
-        time.sleep(2.0)
+        time.sleep(1.0)
 
-        ok, step_message = self._set_route(goal_pose, timeout_sec)
+        ok, step_message = self._set_route_with_retry(initial_pose, goal_pose, timeout_sec)
         if not ok:
             return False, step_message
+
+        verify_deadline = time.time() + min(timeout_sec, 15.0)
+        while time.time() < verify_deadline:
+            self._spin_until(time.time() + 0.5)
+            if self._route_is_verified():
+                step_message = f"{step_message}; route_verified ({self._route_state_summary()})"
+                break
+        else:
+            return False, (
+                f"route_verify_failed: goal not confirmed SET "
+                f"({self._route_state_summary()})"
+            )
 
         if auto_engage:
             ok, engage_message = self._engage_autonomous(timeout_sec)
@@ -546,6 +734,35 @@ class RouteSetupNode(Node):
             return True, f"{step_message}; {engage_message}"
 
         return True, step_message
+
+
+def verify_route_is_set(timeout_sec: float = 10.0) -> tuple[bool, str]:
+    """Wait until AD API or mission planner reports route SET."""
+    if not rclpy.ok():
+        rclpy.init()
+
+    node = RouteSetupNode()
+    try:
+        deadline = time.time() + timeout_sec
+        while time.time() < deadline and rclpy.ok():
+            node._spin_until(time.time() + 0.5)
+            if node._route_is_verified():
+                return True, f"route_verified ({node._route_state_summary()})"
+        return False, f"route_not_set ({node._route_state_summary()})"
+    finally:
+        node.destroy_node()
+
+
+def disengage_for_next_bag(timeout_sec: float = 25.0) -> tuple[bool, str]:
+    """Disengage Auto and wait for stop so the next bag can clear/set route."""
+    if not rclpy.ok():
+        rclpy.init()
+
+    node = RouteSetupNode()
+    try:
+        return node._disengage_and_wait_stopped(timeout_sec)
+    finally:
+        node.destroy_node()
 
 
 def engage_autonomous_mode(timeout_sec: float = 60.0) -> tuple[bool, str]:

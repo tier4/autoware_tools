@@ -26,8 +26,9 @@ bag_duration_margin_sec: 30.0
 
 # Perception reproducer: position-synced replay. If ego stops, perception can freeze with a
 # lead vehicle in front and diffusion planner may output no trajectory.
-# reproducer_search_radius: 0 = always publish nearest bag frame (can reduce deadlock).
-reproducer_search_radius: 1.5
+# reproducer_search_radius: 0 = always publish nearest bag frame (recommended; avoids
+# perception freeze when ego stops behind a lead vehicle).
+reproducer_search_radius: 0
 reproducer_cool_down: 80.0
 # End bag early when ego is nearly stopped for stuck_timeout_sec (after run_grace_sec).
 stuck_timeout_sec: 45.0
@@ -35,7 +36,10 @@ stuck_speed_threshold: 0.2
 run_grace_sec: 20.0
 
 skip_existing: true
-record_video: true      # ffmpeg starts after Auto is engaged (not during route setup / perception warmup)
+record_video: true
+# Engage after reproducer starts (reproducer startup drops early Auto).
+perception_ready_before_engage: false
+video_start_after_engage: false
 display: auto          # dual monitor: tool scans :0/:1 for RViz; or set display: ":1"
 video_capture: rviz    # rviz = RViz window only; display = full screen
 video_window_name: rviz

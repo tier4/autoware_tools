@@ -39,6 +39,7 @@ if str(_SCRIPT_DIR) not in sys.path:
 
 import rclpy
 import yaml
+from autoware_adapi_v1_msgs.msg import OperationModeState
 from autoware_adapi_v1_msgs.msg import RouteState as AdapiRouteState
 from autoware_perception_msgs.msg import TrackedObjects
 from nav_msgs.msg import Odometry
@@ -52,8 +53,10 @@ from rosbag_utils import bag_video_path
 from rosbag_utils import discover_rosbags
 from rosbag_utils import get_bag_duration_sec
 from rosbag_utils import trace_logs_complete
+from route_setup import disengage_for_next_bag
 from route_setup import engage_autonomous_mode
 from route_setup import setup_route_for_bag
+from route_setup import verify_route_is_set
 from route_setup import wait_for_autonomous_mode
 from tier4_planning_msgs.msg import RouteState as MissionRouteState
 
@@ -85,6 +88,7 @@ class EvalConfig:
     record_trajectories: bool
     auto_engage: bool
     auto_engage_timeout_sec: float
+    perception_ready_before_engage: bool
     perception_warmup_sec: float
     perception_ready_timeout_sec: float
     perception_ready_min_objects: int
@@ -94,6 +98,7 @@ class EvalConfig:
     stuck_timeout_sec: float
     stuck_speed_threshold: float
     run_grace_sec: float
+    video_start_after_engage: bool
     models: list[dict[str, Any]]
     param_template_path: Path | None
     diffusion_planner_param_deploy_path: Path | None
@@ -146,14 +151,43 @@ class RouteWaiter(Node):
 class EgoMonitor(Node):
     def __init__(self) -> None:
         super().__init__("diffusion_planner_batch_eval_ego_monitor")
+        durable_qos = QoSProfile(
+            depth=1,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+        )
         self.speed_mps = 0.0
+        self.operation_mode: int | None = None
+        self.autoware_control_enabled = False
         self.create_subscription(
             Odometry, "/localization/kinematic_state", self._on_odom, 10
+        )
+        self.create_subscription(
+            OperationModeState,
+            "/api/operation_mode/state",
+            self._on_operation_mode,
+            durable_qos,
         )
 
     def _on_odom(self, msg: Odometry) -> None:
         twist = msg.twist.twist.linear
         self.speed_mps = math.hypot(twist.x, twist.y)
+
+    def _on_operation_mode(self, msg: OperationModeState) -> None:
+        self.operation_mode = msg.mode
+        self.autoware_control_enabled = msg.is_autoware_control_enabled
+
+    def mode_label(self) -> str:
+        labels = {
+            OperationModeState.UNKNOWN: "UNKNOWN",
+            OperationModeState.STOP: "STOP",
+            OperationModeState.AUTONOMOUS: "AUTO",
+            OperationModeState.LOCAL: "LOCAL",
+            OperationModeState.REMOTE: "REMOTE",
+        }
+        if self.operation_mode is None:
+            return "?"
+        return labels.get(self.operation_mode, str(self.operation_mode))
 
 
 class PerceptionReadyMonitor(Node):
@@ -237,7 +271,14 @@ def wait_for_bag_run_end(config: EvalConfig, timeout_sec: float) -> tuple[str, s
     deadline = time.time() + timeout_sec
     grace_until = time.time() + config.run_grace_sec
     stuck_since: float | None = None
+    not_auto_since: float | None = None
     last_log = 0.0
+
+    # Let DDS deliver operation_mode before the first status line.
+    spin_until = time.time() + 3.0
+    while time.time() < spin_until and rclpy.ok():
+        rclpy.spin_once(route_waiter, timeout_sec=0.25)
+        rclpy.spin_once(ego_monitor, timeout_sec=0.25)
 
     try:
         while time.time() < deadline:
@@ -248,23 +289,42 @@ def wait_for_bag_run_end(config: EvalConfig, timeout_sec: float) -> tuple[str, s
                 return "success", "route_arrived"
 
             now = time.time()
-            if now > grace_until and ego_monitor.speed_mps < config.stuck_speed_threshold:
-                if stuck_since is None:
-                    stuck_since = now
-                elif now - stuck_since >= config.stuck_timeout_sec:
-                    return (
-                        "stuck",
-                        f"ego_speed_below_{config.stuck_speed_threshold}mps_for_{config.stuck_timeout_sec:.0f}s",
-                    )
+            if now > grace_until:
+                if ego_monitor.operation_mode != OperationModeState.AUTONOMOUS:
+                    if not_auto_since is None:
+                        not_auto_since = now
+                    elif now - not_auto_since >= 10.0:
+                        return (
+                            "stuck",
+                            f"operation_mode_{ego_monitor.mode_label()}_not_autonomous_for_10s",
+                        )
+                else:
+                    not_auto_since = None
+
+                if ego_monitor.speed_mps < config.stuck_speed_threshold:
+                    if stuck_since is None:
+                        stuck_since = now
+                    elif now - stuck_since >= config.stuck_timeout_sec:
+                        return (
+                            "stuck",
+                            f"ego_speed_below_{config.stuck_speed_threshold}mps_for_"
+                            f"{config.stuck_timeout_sec:.0f}s "
+                            f"(mode={ego_monitor.mode_label()})",
+                        )
+                else:
+                    stuck_since = None
             else:
                 stuck_since = None
+                not_auto_since = None
 
             if now - last_log >= 15.0:
                 elapsed = now - (deadline - timeout_sec)
                 print(
                     f"[info] Running bag... {elapsed:.0f}s / {timeout_sec:.0f}s "
                     f"speed={ego_monitor.speed_mps:.2f}m/s "
-                    f"(adapi={route_waiter.adapi_route_state}, mission={route_waiter.mission_route_state})"
+                    f"mode={ego_monitor.mode_label()} "
+                    f"(adapi={route_waiter.adapi_route_state}, "
+                    f"mission={route_waiter.mission_route_state})"
                 )
                 last_log = now
     finally:
@@ -304,15 +364,17 @@ def load_config(path: Path) -> EvalConfig:
         record_trajectories=bool(raw.get("record_trajectories", True)),
         auto_engage=bool(raw.get("auto_engage", True)),
         auto_engage_timeout_sec=float(raw.get("auto_engage_timeout_sec", 60.0)),
+        perception_ready_before_engage=bool(raw.get("perception_ready_before_engage", False)),
         perception_warmup_sec=float(raw.get("perception_warmup_sec", 5.0)),
         perception_ready_timeout_sec=float(raw.get("perception_ready_timeout_sec", 45.0)),
         perception_ready_min_objects=int(raw.get("perception_ready_min_objects", 1)),
         perception_ready_stable_sec=float(raw.get("perception_ready_stable_sec", 2.0)),
-        reproducer_search_radius=float(raw.get("reproducer_search_radius", 1.5)),
+        reproducer_search_radius=float(raw.get("reproducer_search_radius", 0.0)),
         reproducer_cool_down=float(raw.get("reproducer_cool_down", 80.0)),
         stuck_timeout_sec=float(raw.get("stuck_timeout_sec", 45.0)),
         stuck_speed_threshold=float(raw.get("stuck_speed_threshold", 0.2)),
         run_grace_sec=float(raw.get("run_grace_sec", 20.0)),
+        video_start_after_engage=bool(raw.get("video_start_after_engage", False)),
         models=list(raw.get("models", [])),
         param_template_path=(
             Path(raw["param_template_path"]).expanduser() if raw.get("param_template_path") else None
@@ -467,7 +529,8 @@ def stop_process_group(process: subprocess.Popen[Any] | None, grace_sec: float =
     if process is None or process.poll() is not None:
         return
     try:
-        os.killpg(os.getpgid(process.pid), signal.SIGINT)
+        # SIGTERM avoids rclpy double-shutdown tracebacks from SIGINT in child nodes.
+        os.killpg(os.getpgid(process.pid), signal.SIGTERM)
         process.wait(timeout=grace_sec)
     except (ProcessLookupError, subprocess.TimeoutExpired):
         try:
@@ -1057,13 +1120,14 @@ def run_single_bag(
     status = "error"
 
     try:
+        engage_in_route_setup = False  # engage after reproducer; early engage is dropped by reproducer startup
         route_ok, route_message = setup_route_for_bag(
             bag_path,
             timeout_sec=config.route_setup_timeout_sec,
             min_move_m=config.goal_min_move_m,
             service_wait_sec=config.route_service_wait_sec,
             backend_preference=config.route_backend,
-            auto_engage=False,
+            auto_engage=engage_in_route_setup,
         )
         if not route_ok:
             return BagRunResult(
@@ -1080,6 +1144,9 @@ def run_single_bag(
             trace_logger = start_trajectory_logger(trace_dir, model_name, bag_path)
 
         reproducer = start_perception_reproducer(bag_path, config)
+
+        if config.record_video and not config.video_start_after_engage:
+            recorder = start_video_recording(config, video_path)
 
         autonomous_ready = False
         if config.auto_engage:
@@ -1099,21 +1166,30 @@ def run_single_bag(
             print(
                 f"[info] Engaging Auto (up to {config.auto_engage_timeout_sec:.0f}s)..."
             )
-            engage_ok, engage_message = engage_autonomous_mode(config.auto_engage_timeout_sec)
-            if engage_ok:
-                autonomous_ready = True
-                route_message = f"{route_message}; {engage_message}"
-                print(f"[info] Auto mode engaged: {engage_message}")
-            else:
+            route_ok, route_verify_message = verify_route_is_set(
+                min(config.route_setup_timeout_sec, 15.0)
+            )
+            if not route_ok:
                 print(
-                    f"[warn] Auto engage failed ({engage_message}). "
-                    "Click Auto in RViz if the vehicle does not move."
+                    f"[warn] Skipping Auto engage — route is not SET ({route_verify_message}). "
+                    "Check RViz goal marker and route_setup logs."
                 )
-                route_message = f"{route_message}; engage_warn: {engage_message}"
-        else:
+                route_message = f"{route_message}; engage_skipped: {route_verify_message}"
+            else:
+                engage_ok, engage_message = engage_autonomous_mode(config.auto_engage_timeout_sec)
+                if engage_ok:
+                    autonomous_ready = True
+                    route_message = f"{route_message}; {route_verify_message}; {engage_message}"
+                    print(f"[info] Auto mode engaged: {engage_message}")
+                else:
+                    print(
+                        f"[warn] Auto engage failed ({engage_message}). "
+                        "Click Auto in RViz if the vehicle does not move."
+                    )
+                    route_message = f"{route_message}; engage_warn: {engage_message}"
+        elif not config.auto_engage:
             print(
-                f"[info] Waiting for Auto mode (up to {config.auto_engage_timeout_sec:.0f}s) "
-                "before starting video..."
+                f"[info] Waiting for Auto mode (up to {config.auto_engage_timeout_sec:.0f}s)..."
             )
             wait_ok, wait_message = wait_for_autonomous_mode(config.auto_engage_timeout_sec)
             if wait_ok:
@@ -1127,11 +1203,17 @@ def run_single_bag(
                 )
                 route_message = f"{route_message}; engage_warn: {wait_message}"
 
-        if config.record_video:
+        if config.record_video and config.video_start_after_engage:
             if autonomous_ready:
                 recorder = start_video_recording(config, video_path)
             else:
                 print("[warn] Skipping video — Auto was not engaged.")
+
+        if config.auto_engage and not autonomous_ready:
+            print(
+                "[warn] Run continues without Auto — ego will likely stay at speed=0. "
+                "Check engage_warn in setup message above."
+            )
 
         bag_duration = get_bag_duration_sec(bag_path)
         timeout = config.route_timeout_sec
@@ -1145,8 +1227,8 @@ def run_single_bag(
             time.sleep(config.post_arrival_sec)
         elif status == "stuck":
             print(
-                "[warn] Ego stuck (often: reproducer freezes perception while a lead vehicle "
-                "blocks diffusion planner). Logged as stuck; moving to next bag."
+                "[warn] Ego stuck — check run logs for mode=STOP (engage failed) vs mode=AUTO "
+                "(perception/planner blockage). Try reproducer_search_radius: 0."
             )
 
     except Exception as error:  # noqa: BLE001
@@ -1158,6 +1240,16 @@ def run_single_bag(
         stop_process_group(trace_logger)
         if recorder is not None:
             time.sleep(0.5)
+        disengage_ok, disengage_message = disengage_for_next_bag(
+            min(config.route_setup_timeout_sec, 25.0)
+        )
+        if disengage_ok:
+            print(f"[info] Disengaged for next bag: {disengage_message}")
+        else:
+            print(
+                f"[warn] Could not fully disengage before next bag ({disengage_message}). "
+                "Next route setup may fail — stop the vehicle manually if needed."
+            )
 
     duration = time.time() - start
     video_result = ""

@@ -166,11 +166,11 @@ cp src/tools/planning/diffusion_planner_batch_eval/config/example_config.yaml \
 | `sensor_model` | `aip_x2_gen2` | Sensor kit for psim launch |
 | `manage_psim` | `false` | `true` = batch tool launches psim; `false` = you launch psim manually |
 | `skip_existing` | `true` | Skip bags that already have valid video + trace outputs |
-| `record_video` | `true` | ffmpeg capture (starts **after Auto engage**) |
+| `record_video` | `true` | ffmpeg capture (default: starts **with reproducer**) |
 | `record_trajectories` | `true` | CSV logging via `trajectory_logger.py` |
-| `auto_engage` | `true` | Enable Autoware Control + Auto via AD API |
-| `perception_warmup_sec` | `5.0` | Wait before engaging Auto |
-| `perception_ready_stable_sec` | `2.0` | Tracked-object count must be stable this long |
+| `auto_engage` | `true` | Engage Auto via AD API **after** reproducer publishes objects |
+| `perception_ready_before_engage` | `false` | Reserved (engage always waits for perception when `auto_engage: true`) |
+| `video_start_after_engage` | `false` | `true` = ffmpeg starts only after Auto is confirmed |
 | `stuck_timeout_sec` | `45.0` | End run if ego speed stays low after `run_grace_sec` |
 | `route_timeout_sec` | `120` | Max wait for route ARRIVED |
 
@@ -298,20 +298,22 @@ ros2 run diffusion_planner_batch_eval trajectory_logger.py \
 
 ## Per-bag workflow
 
-For each `(model, rosbag)` pair the batch tool executes:
+**Default workflow:**
 
 ```
-1. Clear route → set initial pose → set goal (from rosbag)
-2. Start trajectory_logger (if record_trajectories)
-3. Start perception_reproducer (-p -t)
-4. Wait for perception warmup + stable tracked objects
-5. Engage Auto (AD API) OR wait for manual Auto
-6. Start ffmpeg video recording (only after Auto is confirmed)
-7. Wait until:
-   - route state ARRIVED (+ post_arrival_sec), OR
-   - stuck (low speed for stuck_timeout_sec), OR
-   - timeout
-8. Stop reproducer, ffmpeg, logger
+1. Clear route → set initial pose → set goal (from rosbag) — no engage yet
+2. Start trajectory_logger + perception_reproducer (+ ffmpeg unless deferred video)
+3. Wait for perception objects → engage Auto
+4. Wait until ARRIVED / stuck / timeout
+5. Stop reproducer, ffmpeg, logger; disengage for next bag
+```
+
+Engage happens **after** the reproducer is publishing. Engaging during route setup was dropped back to STOP when the reproducer started (`mode=STOP` in run logs).
+
+**Optional:** skip idle video at the start of each clip:
+
+```yaml
+video_start_after_engage: true
 ```
 
 **Run status** values in `batch_eval_log.csv`:
@@ -625,15 +627,63 @@ Launch psim in another terminal or set `manage_psim: true`.
 - Check reproducer is publishing `/perception/object_recognition/tracking/objects`
 - Try `reproducer_search_radius: 0` if perception freezes when ego stops
 
-### Ego stuck / `status=stuck`
+### Goal not set but vehicle engages / route cannot be cleared
 
-Common with position-synced perception reproducer: when ego stops behind a lead vehicle, perception stops advancing and diffusion planner may output no trajectory.
+Autoware refuses `clear_route` while the vehicle is in **Auto** and moving (`The route cannot be cleared while it is in use`). Between batch bags the previous run may still be engaged, so the next bag cannot reset the goal.
 
-Mitigations:
+The batch tool now:
 
-- `reproducer_search_radius: 0` (always publish nearest bag frame)
-- Lower `stuck_timeout_sec` to fail faster
-- Check videos for planner stopping while NPC is directly ahead
+1. **Disengages** (change to Stop) and waits for low speed after each bag
+2. **Disengages before route clear** when setting up the next bag
+3. **Verifies route SET** before calling Auto engage
+4. **Skips engage** if the goal was not confirmed
+
+If route setup still fails:
+
+- Stop the vehicle manually (Stop mode in RViz) before the next bag
+- Run standalone route debug: `ros2 run diffusion_planner_batch_eval route_setup.py -b /path/to/bag.db3`
+- Try `route_backend: mission_planner` if AD API route does not show the goal in RViz
+- Ensure `initial_engage_state: false` in planning simulator launch so psim does not auto-engage without a route
+
+### `set_route_rejected: The planned route is empty`
+
+Mission planner could not find a drivable lanelet path between ego and the bag goal. Common causes:
+
+1. **Ego pose lag** — routing uses `/localization/kinematic_state`, not `/initialpose`. The tool now waits for ego to reach the bag start before `set_route` and retries up to 3×.
+2. **Wrong map** — Hiratsuka bags need the matching lanelet map in planning simulator.
+3. **Goal off drivable area** — bag end pose is not on a routable lane (parking lot, shoulder, etc.). Try another bag or adjust `goal_min_move_m`.
+4. **Backend** — try `route_backend: adapi` if `mission_planner` keeps failing.
+
+On failure the log now includes `start=(x,y) goal=(x,y) ego=(x,y)` for debugging. Test one bag manually:
+
+```bash
+ros2 run diffusion_planner_batch_eval route_setup.py \
+  -b /path/to/bag.db3 --backend mission_planner
+```
+
+If manual route setup also fails in RViz for that bag, the bag or map is the issue — not the batch tool.
+
+### Routing services not ready between bags
+
+After a failed bag you may see `Waiting for routing services (adapi=False, mission_planner=False)`. Usually DDS rediscovery on a new node (waits up to `route_service_wait_sec`). If it persists past 2 minutes, restart planning simulator — mission planner may have wedged.
+
+### Ego stuck / `status=stuck` (route OK but speed stays 0)
+
+If setup shows `route_set_via_adapi` / `autonomous_engaged` but the run logs `speed=0.00m/s`:
+
+1. **Check `mode=` in run logs** — must be `AUTO`. If `STOP`, engage did not hold; click Auto in RViz or check `initial_engage_state` in psim launch.
+2. **Perception reproducer freeze** — with `reproducer_search_radius: 1.5`, when ego stops, perception repeats the same frame and a lead vehicle can block diffusion planner forever. **Set `reproducer_search_radius: 0`** in your config.
+3. **Perception not stable** — if you see `perception_ready_timeout`, increase `perception_ready_timeout_sec` or lower `perception_ready_stable_sec`.
+4. Planner may still publish trajectories while ego is stuck — check the video and `planned_trajectory.csv`.
+
+```yaml
+reproducer_search_radius: 0
+perception_ready_timeout_sec: 60.0
+perception_ready_stable_sec: 1.0
+run_grace_sec: 30.0
+```
+
+When ego moves briefly then stops (e.g. `speed=4.25` then `0.00`), that is the classic reproducer freeze — `reproducer_search_radius: 0` is the main fix. Lower `stuck_timeout_sec` only if you want faster skip to the next bag.
 
 ### Video is black (file exists but empty/black content)
 
@@ -672,7 +722,8 @@ Ensure RViz fills most of that display. The tool now uses **ffmpeg `-window_id`*
 
 - Run `--test-ffmpeg` first
 - Set `display: ":1"` if RViz is on external monitor
-- Video only starts **after Auto engage** — if engage fails, video is skipped
+- Video starts **with reproducer** by default (`video_start_after_engage: false`)
+- With `video_start_after_engage: true`, video only starts after Auto engage — if engage fails, video is skipped
 - Check `video_capture: rviz` and `video_window_name: rviz`
 
 ### Video shifted / tiled
