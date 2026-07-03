@@ -20,10 +20,12 @@
 #include <rclcpp/typesupport_helpers.hpp>
 #include <rosbag2_cpp/reader.hpp>
 #include <rosbag2_cpp/readers/sequential_reader.hpp>
+#include <rosbag2_storage/metadata_io.hpp>
 #include <rosbag2_storage/storage_filter.hpp>
 #include <rosbag2_storage/storage_options.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <filesystem>
 #include <iostream>
@@ -32,6 +34,73 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+namespace
+{
+
+int compare_natural(const std::string & a, const std::string & b)
+{
+  size_t i = 0;
+  size_t j = 0;
+  while (i < a.size() && j < b.size()) {
+    const auto is_digit_a = std::isdigit(static_cast<unsigned char>(a[i])) != 0;
+    const auto is_digit_b = std::isdigit(static_cast<unsigned char>(b[j])) != 0;
+    if (is_digit_a && is_digit_b) {
+      while (i < a.size() && a[i] == '0') {
+        ++i;
+      }
+      while (j < b.size() && b[j] == '0') {
+        ++j;
+      }
+
+      const size_t start_i = i;
+      const size_t start_j = j;
+
+      while (i < a.size() && std::isdigit(static_cast<unsigned char>(a[i])) != 0) {
+        ++i;
+      }
+      while (j < b.size() && std::isdigit(static_cast<unsigned char>(b[j])) != 0) {
+        ++j;
+      }
+
+      const size_t len_a = i - start_i;
+      const size_t len_b = j - start_j;
+      if (len_a != len_b) {
+        return (len_a < len_b) ? -1 : 1;
+      }
+
+      const int cmp = a.compare(start_i, len_a, b, start_j, len_b);
+      if (cmp != 0) {
+        return cmp;
+      }
+      continue;
+    }
+
+    if (a[i] != b[j]) {
+      return (a[i] < b[j]) ? -1 : 1;
+    }
+    ++i;
+    ++j;
+  }
+
+  if (i < a.size()) {
+    return 1;
+  }
+  if (j < b.size()) {
+    return -1;
+  }
+  return 0;
+}
+
+bool natural_path_less(const std::string & a, const std::string & b)
+{
+  const auto basename = [](const std::string & path) {
+    return std::filesystem::path(path).filename().string();
+  };
+  return compare_natural(basename(a), basename(b)) < 0;
+}
+
+}  // namespace
 
 namespace autoware::planning_debug_tools
 {
@@ -42,14 +111,27 @@ std::vector<std::string> PerceptionReplayerCommon::find_rosbag_files(
   const std::string extension = (rosbag_format == "mcap") ? ".mcap" : ".db3";
   std::vector<std::string> rosbag_files;
 
+  rosbag2_storage::MetadataIo metadata_io;
+  if (metadata_io.metadata_file_exists(directory_path)) {
+    const auto metadata = metadata_io.read_metadata(directory_path);
+    for (const auto & relative_path : metadata.relative_file_paths) {
+      const std::filesystem::path full_path = std::filesystem::path(directory_path) / relative_path;
+      if (std::filesystem::is_regular_file(full_path) && full_path.extension() == extension) {
+        rosbag_files.push_back(full_path.string());
+      }
+    }
+    if (!rosbag_files.empty()) {
+      return rosbag_files;
+    }
+  }
+
   for (const auto & entry : std::filesystem::directory_iterator(directory_path)) {
     if (entry.is_regular_file() && entry.path().extension() == extension) {
       rosbag_files.push_back(entry.path().string());
     }
   }
 
-  // sort by modification time (or filename if you prefer)
-  std::sort(rosbag_files.begin(), rosbag_files.end());
+  std::sort(rosbag_files.begin(), rosbag_files.end(), natural_path_less);
 
   return rosbag_files;
 }
