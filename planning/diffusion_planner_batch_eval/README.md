@@ -32,6 +32,7 @@ Run many rosbags × many models, collect videos + CSV traces, then compare model
 | Log ego pose, planned trajectory, tracked objects | `trajectory_logger.py` |
 | Interactive multi-model trajectory plot | `compare_trajectories.py` |
 | Interactive comfort / control time-series plots | `compare_comfort.py` |
+| Goal-stop accuracy comparison across models | `compare_goal_stop.py` |
 | Quantitative model comparison + safety metrics | `analyze_model_comparison.py` |
 | Jerk / harsh deceleration from ego traces | `comfort_metrics.py` |
 
@@ -173,6 +174,10 @@ cp src/tools/planning/diffusion_planner_batch_eval/config/example_config.yaml \
 | `video_start_after_engage` | `false` | `true` = ffmpeg starts only after Auto is confirmed |
 | `stuck_timeout_sec` | `45.0` | End run if ego speed stays low after `run_grace_sec` |
 | `route_timeout_sec` | `120` | Max wait for route ARRIVED |
+| `start_pose_offset_m` | `0.0` | Shift spawn along bag-start heading (`-2.0` = 2 m backward) |
+| `stop_point_goal_fallback` | `true` | Retry route with nearest `{map_path}/stop_points.csv` stop if bag goal fails |
+| `start_pose_stop_fallback` | `true` | Re-localize at nearest map stop to bag **start** if routing still fails (ID5) |
+| `stop_points_csv` | `stop_points.csv` | Stop points file name inside `map_path` |
 
 ### RViz — ego-centered view (`base_link`)
 
@@ -489,6 +494,51 @@ ros2 run diffusion_planner_batch_eval compare_comfort.py \
 
 ---
 
+### Goal-stop comparison — `compare_goal_stop.py`
+
+Compare how accurately each model stops at the goal, across all bags. Reads `per_model_per_bag_goal_stop.csv` (produced by `analyze_model_comparison.py`).
+
+```bash
+# Per-model summary table (default: all runs with goal_stop_status=ok)
+ros2 run diffusion_planner_batch_eval compare_goal_stop.py -o $RESULTS
+
+# Pick specific models
+ros2 run diffusion_planner_batch_eval compare_goal_stop.py \
+  -o $RESULTS --models model_a,model_b,model_c
+
+# Scatter (stop pose in goal frame) + mean/p95 bar chart
+ros2 run diffusion_planner_batch_eval compare_goal_stop.py -o $RESULTS --plot
+
+# Save PNG
+ros2 run diffusion_planner_batch_eval compare_goal_stop.py \
+  -o $RESULTS --save $RESULTS/comparisons/goal_stop.png
+
+# Include stuck/timeout runs too (still need goal_stop_status=ok)
+ros2 run diffusion_planner_batch_eval compare_goal_stop.py -o $RESULTS --plot
+
+# Only runs that reached ARRIVED
+ros2 run diffusion_planner_batch_eval compare_goal_stop.py -o $RESULTS --success-only
+```
+
+| Column | Meaning |
+|--------|---------|
+| `position` / `median` / `p95` | Euclidean distance to goal (accuracy) |
+| `|lat|` / `|head|` | Mean **magnitude** of lateral / heading error |
+| `lat_bias` / `long_bias` / `head_bias` | Mean **signed** offset (+ left/ahead, − right/behind) |
+| `speed` | Mean speed at detected stop pose [m/s] |
+| `time` | Mean time from run start to stop [s] |
+
+Use **position** and **|lat|** / **|head|** to rank accuracy. Use **bias** columns to see consistent direction of error.
+
+| Flag | Description |
+|------|-------------|
+| `--models a,b,c` | Limit to specific models |
+| `--success-only` | Only `run_status == success` (default: all runs with valid goal-stop metrics) |
+| `--plot` / `--save PNG` | Scatter of stop offsets + mean/p95 bar chart |
+| `--csv PATH` | Read a goal-stop CSV directly instead of `-o` |
+
+---
+
 ### Quantitative analysis — `analyze_model_comparison.py`
 
 ```bash
@@ -654,11 +704,29 @@ Mission planner could not find a drivable lanelet path between ego and the bag g
 3. **Goal off drivable area** — bag end pose is not on a routable lane (parking lot, shoulder, etc.). Try another bag or adjust `goal_min_move_m`.
 4. **Backend** — try `route_backend: adapi` if `mission_planner` keeps failing.
 
-On failure the log now includes `start=(x,y) goal=(x,y) ego=(x,y)` for debugging. Test one bag manually:
+**Stop point fallback (Hiratsuka):** tries the **bag last pose** first, then retries with the **nearest stop** in `{map_path}/stop_points.csv`:
+
+```yaml
+map_path: /opt/autoware/maps
+stop_point_goal_fallback: true
+stop_points_csv: stop_points.csv
+```
+
+Logs show `goal_from_bag` or `goal_fallback=教会前（西側）`. If the bag goal is already at a stop (within 0.5 m) but routing still fails, enable **`start_pose_stop_fallback: true`** — the bag **start** is off-lane (ID5 starts ~84 m from なぎさプロムナード).
+
+```yaml
+start_pose_stop_fallback: true
+start_pose_stop_min_dist_m: 1.0
+```
+
+Logs show `start_fallback=なぎさプロムナード(84.0m)` when spawn is snapped to a map stop.
+
+On failure the log includes `start=(x,y) goal=(x,y) ego=(x,y)`. Test one bag manually:
 
 ```bash
 ros2 run diffusion_planner_batch_eval route_setup.py \
-  -b /path/to/bag.db3 --backend mission_planner
+  -b /path/to/bag.db3 --no-auto-engage \
+  --map-path /opt/autoware/maps --stop-point-fallback
 ```
 
 If manual route setup also fails in RViz for that bag, the bag or map is the issue — not the batch tool.
@@ -684,6 +752,24 @@ run_grace_sec: 30.0
 ```
 
 When ego moves briefly then stops (e.g. `speed=4.25` then `0.00`), that is the classic reproducer freeze — `reproducer_search_radius: 0` is the main fix. Lower `stuck_timeout_sec` only if you want faster skip to the next bag.
+
+### Engage fails or planner blocked at bag start
+
+If a bag fails only at t=0 (lead vehicle, bad perception frame) but works when you manually spawn slightly behind the bag start:
+
+```yaml
+start_pose_offset_m: -2.0   # spawn 2 m backward along bag-start heading
+reproducer_search_radius: 0  # reproducer picks nearest earlier bag frame
+```
+
+Test one bag manually:
+
+```bash
+ros2 run diffusion_planner_batch_eval route_setup.py \
+  -b /path/to/bag.db3 --no-auto-engage --start-offset-m -2.0
+```
+
+Goal is unchanged (bag end pose). Avoid large offsets at intersections or very short bags.
 
 ### Video is black (file exists but empty/black content)
 

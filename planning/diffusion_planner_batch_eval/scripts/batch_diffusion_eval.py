@@ -75,6 +75,15 @@ class EvalConfig:
     route_service_wait_sec: float
     route_backend: str
     goal_min_move_m: float
+    start_pose_offset_m: float
+    stop_point_goal_fallback: bool
+    stop_points_csv: str
+    stop_point_goal_min_dist_m: float
+    stop_point_snap_goal_m: float
+    stop_point_waypoint_fallback: bool
+    route_stop_order: list[str] | None
+    start_pose_stop_fallback: bool
+    start_pose_stop_min_dist_m: float
     post_arrival_sec: float
     bag_duration_margin_sec: float
     skip_existing: bool
@@ -351,6 +360,15 @@ def load_config(path: Path) -> EvalConfig:
         route_service_wait_sec=float(raw.get("route_service_wait_sec", 120.0)),
         route_backend=str(raw.get("route_backend", "auto")),
         goal_min_move_m=float(raw.get("goal_min_move_m", 0.1)),
+        start_pose_offset_m=float(raw.get("start_pose_offset_m", 0.0)),
+        stop_point_goal_fallback=bool(raw.get("stop_point_goal_fallback", True)),
+        stop_points_csv=str(raw.get("stop_points_csv", "stop_points.csv")),
+        stop_point_goal_min_dist_m=float(raw.get("stop_point_goal_min_dist_m", 0.5)),
+        stop_point_snap_goal_m=float(raw.get("stop_point_snap_goal_m", 2.0)),
+        stop_point_waypoint_fallback=bool(raw.get("stop_point_waypoint_fallback", True)),
+        route_stop_order=list(raw["route_stop_order"]) if raw.get("route_stop_order") else None,
+        start_pose_stop_fallback=bool(raw.get("start_pose_stop_fallback", True)),
+        start_pose_stop_min_dist_m=float(raw.get("start_pose_stop_min_dist_m", 1.0)),
         post_arrival_sec=float(raw.get("post_arrival_sec", 5.0)),
         bag_duration_margin_sec=float(raw.get("bag_duration_margin_sec", 30.0)),
         skip_existing=bool(raw.get("skip_existing", True)),
@@ -464,12 +482,25 @@ def restore_param_file(deploy_path: Path, backup_path: Path | None) -> None:
 
 
 def wait_for_psim_services(timeout_sec: float) -> bool:
-    required = {"/localization/initialize", "/api/routing/set_route_points"}
+    required_services = {"/localization/initialize", "/api/routing/set_route_points"}
+    required_topics = {"/localization/kinematic_state", "/tf"}
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
         try:
-            output = subprocess.check_output(["ros2", "service", "list"], text=True, stderr=subprocess.DEVNULL)
-            if required.issubset(set(output.splitlines())):
+            service_output = subprocess.check_output(
+                ["ros2", "service", "list"], text=True, stderr=subprocess.DEVNULL
+            )
+            services = set(service_output.splitlines())
+            if not required_services.issubset(services):
+                time.sleep(2.0)
+                continue
+
+            topic_output = subprocess.check_output(
+                ["ros2", "topic", "list"], text=True, stderr=subprocess.DEVNULL
+            )
+            topics = set(topic_output.splitlines())
+            if required_topics.issubset(topics):
+                time.sleep(5.0)
                 return True
         except subprocess.CalledProcessError:
             pass
@@ -1128,6 +1159,16 @@ def run_single_bag(
             service_wait_sec=config.route_service_wait_sec,
             backend_preference=config.route_backend,
             auto_engage=engage_in_route_setup,
+            start_pose_offset_m=config.start_pose_offset_m,
+            map_path=Path(config.map_path),
+            stop_point_goal_fallback=config.stop_point_goal_fallback,
+            stop_points_csv=config.stop_points_csv,
+            stop_point_goal_min_dist_m=config.stop_point_goal_min_dist_m,
+            stop_point_snap_goal_m=config.stop_point_snap_goal_m,
+            stop_point_waypoint_fallback=config.stop_point_waypoint_fallback,
+            route_stop_order=config.route_stop_order,
+            start_pose_stop_fallback=config.start_pose_stop_fallback,
+            start_pose_stop_min_dist_m=config.start_pose_stop_min_dist_m,
         )
         if not route_ok:
             return BagRunResult(

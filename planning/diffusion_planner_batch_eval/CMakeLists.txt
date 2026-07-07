@@ -13,6 +13,7 @@ install(PROGRAMS
   scripts/batch_diffusion_eval.py
   scripts/route_setup.py
   scripts/rosbag_utils.py
+  scripts/stop_points.py
   scripts/trajectory_logger.py
   scripts/compare_trajectories.py
   scripts/analyze_model_comparison.py
@@ -21,6 +22,7 @@ install(PROGRAMS
   scripts/npc_collision_check.py
   scripts/comfort_metrics.py
   scripts/compare_comfort.py
+  scripts/compare_goal_stop.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -6,6 +6,14 @@ rosbag_dir: /path/to/rosbags
 output_dir: /path/to/results
 
 map_path: /opt/autoware/maps
+# If bag goal routing fails, retry with nearest stop in {map_path}/stop_points.csv
+stop_point_goal_fallback: true
+stop_points_csv: stop_points.csv
+stop_point_goal_min_dist_m: 0.5
+stop_point_snap_goal_m: 2.0          # use map stop pose for routing when bag goal is this close
+stop_point_waypoint_fallback: true    # route via intermediate bus stops when direct path is empty
+start_pose_stop_fallback: true
+start_pose_stop_min_dist_m: 1.0
 vehicle_model: lv828l
 sensor_model: aip_x2_gen2
 
@@ -20,6 +28,9 @@ route_setup_timeout_sec: 60
 route_service_wait_sec: 120
 route_backend: auto   # auto | adapi | mission_planner
 goal_min_move_m: 0.1
+# Spawn offset along bag-start heading. Negative = backward (e.g. -2.0 skips t=0 obstacles).
+# With reproducer_search_radius: 0, perception replays the nearest earlier bag frame.
+start_pose_offset_m: 0.0
 post_arrival_sec: 5.0
 # Extra timeout margin based on rosbag duration when route never arrives.
 bag_duration_margin_sec: 30.0
