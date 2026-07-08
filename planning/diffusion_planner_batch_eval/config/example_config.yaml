@@ -59,6 +59,10 @@ video_size: auto       # auto = native size; wrong size (e.g. 1920x1080) causes 
 video_capture_offset_x: 0
 video_capture_offset_y: 0
 record_trajectories: true   # CSV logs for ego, planned trajectory, NPC objects
+# Record video even for stuck/timeout/route_setup_failed runs (default true).
+record_video_on_failure: true
+# Keep ffmpeg running this many seconds after a non-success run before stopping.
+video_post_failure_sec: 5.0
 # Videos: output_dir/<model_name>/<bag_folder>/<bag_name>.mp4
 # Verify ffmpeg before batch: ros2 run diffusion_planner_batch_eval batch_diffusion_eval.py -c config.yaml --test-ffmpeg
 auto_engage: true      # calls Enable Autoware Control + Auto (no manual RViz click)

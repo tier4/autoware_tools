@@ -108,6 +108,8 @@ class EvalConfig:
     stuck_speed_threshold: float
     run_grace_sec: float
     video_start_after_engage: bool
+    record_video_on_failure: bool
+    video_post_failure_sec: float
     models: list[dict[str, Any]]
     param_template_path: Path | None
     diffusion_planner_param_deploy_path: Path | None
@@ -393,6 +395,8 @@ def load_config(path: Path) -> EvalConfig:
         stuck_speed_threshold=float(raw.get("stuck_speed_threshold", 0.2)),
         run_grace_sec=float(raw.get("run_grace_sec", 20.0)),
         video_start_after_engage=bool(raw.get("video_start_after_engage", False)),
+        record_video_on_failure=bool(raw.get("record_video_on_failure", True)),
+        video_post_failure_sec=float(raw.get("video_post_failure_sec", 5.0)),
         models=list(raw.get("models", [])),
         param_template_path=(
             Path(raw["param_template_path"]).expanduser() if raw.get("param_template_path") else None
@@ -957,6 +961,28 @@ def mean_video_luma(path: Path, sample_time: float = 0.5) -> float | None:
     return sum(data) / len(data)
 
 
+def sleep_video_post_failure(config: EvalConfig) -> None:
+    """Keep ffmpeg running briefly after a failed/stuck run so RViz shows the final state."""
+    if config.record_video and config.video_post_failure_sec > 0:
+        print(
+            f"[info] Recording {config.video_post_failure_sec:.0f}s more after failure "
+            "so the stuck/error state is visible in the video..."
+        )
+        time.sleep(config.video_post_failure_sec)
+
+
+def accept_video_path(path: Path, *, relaxed: bool) -> tuple[bool, str]:
+    """Relaxed validation keeps short/debug videos for failed or stuck runs."""
+    if relaxed:
+        if not path.exists():
+            return False, "file_missing"
+        size = path.stat().st_size
+        if size < 512:
+            return False, f"too_small ({size} bytes)"
+        return True, f"{size / (1024 * 1024):.2f} MB (failure run)"
+    return validate_video_file(path)
+
+
 def validate_video_file(path: Path, min_bytes: int = 4096) -> tuple[bool, str]:
     if not path.exists():
         return False, "file_missing"
@@ -1151,6 +1177,9 @@ def run_single_bag(
     status = "error"
 
     try:
+        if config.record_video and not config.video_start_after_engage:
+            recorder = start_video_recording(config, video_path)
+
         engage_in_route_setup = False  # engage after reproducer; early engage is dropped by reproducer startup
         route_ok, route_message = setup_route_for_bag(
             bag_path,
@@ -1171,110 +1200,109 @@ def run_single_bag(
             start_pose_stop_min_dist_m=config.start_pose_stop_min_dist_m,
         )
         if not route_ok:
-            return BagRunResult(
-                model_name,
-                bag_path,
-                "route_setup_failed",
-                time.time() - start,
-                "",
-                "",
-                route_message,
-            )
+            status = "route_setup_failed"
+            message = route_message
+            sleep_video_post_failure(config)
+        else:
+            if config.record_trajectories:
+                trace_logger = start_trajectory_logger(trace_dir, model_name, bag_path)
 
-        if config.record_trajectories:
-            trace_logger = start_trajectory_logger(trace_dir, model_name, bag_path)
+            reproducer = start_perception_reproducer(bag_path, config)
 
-        reproducer = start_perception_reproducer(bag_path, config)
-
-        if config.record_video and not config.video_start_after_engage:
-            recorder = start_video_recording(config, video_path)
-
-        autonomous_ready = False
-        if config.auto_engage:
-            print(
-                f"[info] Waiting for perception (warmup {config.perception_warmup_sec:.0f}s, "
-                f"stable {config.perception_ready_stable_sec:.0f}s) before Auto..."
-            )
-            ready_ok, ready_message = wait_for_perception_ready(config)
-            if ready_ok:
-                print(f"[info] {ready_message}")
-            else:
+            autonomous_ready = False
+            if config.auto_engage:
                 print(
-                    f"[warn] {ready_message} — engaging Auto anyway; "
-                    "increase perception_ready_timeout_sec if objects are still missing."
+                    f"[info] Waiting for perception (warmup {config.perception_warmup_sec:.0f}s, "
+                    f"stable {config.perception_ready_stable_sec:.0f}s) before Auto..."
                 )
-
-            print(
-                f"[info] Engaging Auto (up to {config.auto_engage_timeout_sec:.0f}s)..."
-            )
-            route_ok, route_verify_message = verify_route_is_set(
-                min(config.route_setup_timeout_sec, 15.0)
-            )
-            if not route_ok:
-                print(
-                    f"[warn] Skipping Auto engage — route is not SET ({route_verify_message}). "
-                    "Check RViz goal marker and route_setup logs."
-                )
-                route_message = f"{route_message}; engage_skipped: {route_verify_message}"
-            else:
-                engage_ok, engage_message = engage_autonomous_mode(config.auto_engage_timeout_sec)
-                if engage_ok:
-                    autonomous_ready = True
-                    route_message = f"{route_message}; {route_verify_message}; {engage_message}"
-                    print(f"[info] Auto mode engaged: {engage_message}")
+                ready_ok, ready_message = wait_for_perception_ready(config)
+                if ready_ok:
+                    print(f"[info] {ready_message}")
                 else:
                     print(
-                        f"[warn] Auto engage failed ({engage_message}). "
-                        "Click Auto in RViz if the vehicle does not move."
+                        f"[warn] {ready_message} — engaging Auto anyway; "
+                        "increase perception_ready_timeout_sec if objects are still missing."
                     )
-                    route_message = f"{route_message}; engage_warn: {engage_message}"
-        elif not config.auto_engage:
-            print(
-                f"[info] Waiting for Auto mode (up to {config.auto_engage_timeout_sec:.0f}s)..."
-            )
-            wait_ok, wait_message = wait_for_autonomous_mode(config.auto_engage_timeout_sec)
-            if wait_ok:
-                autonomous_ready = True
-                route_message = f"{route_message}; {wait_message}"
-                print(f"[info] Auto mode detected: {wait_message}")
-            else:
+
                 print(
-                    f"[warn] Auto mode not detected ({wait_message}). "
-                    "Engage Auto in RViz to start driving."
+                    f"[info] Engaging Auto (up to {config.auto_engage_timeout_sec:.0f}s)..."
                 )
-                route_message = f"{route_message}; engage_warn: {wait_message}"
+                route_ok, route_verify_message = verify_route_is_set(
+                    min(config.route_setup_timeout_sec, 15.0)
+                )
+                if not route_ok:
+                    print(
+                        f"[warn] Skipping Auto engage — route is not SET ({route_verify_message}). "
+                        "Check RViz goal marker and route_setup logs."
+                    )
+                    route_message = f"{route_message}; engage_skipped: {route_verify_message}"
+                else:
+                    engage_ok, engage_message = engage_autonomous_mode(config.auto_engage_timeout_sec)
+                    if engage_ok:
+                        autonomous_ready = True
+                        route_message = f"{route_message}; {route_verify_message}; {engage_message}"
+                        print(f"[info] Auto mode engaged: {engage_message}")
+                    else:
+                        print(
+                            f"[warn] Auto engage failed ({engage_message}). "
+                            "Click Auto in RViz if the vehicle does not move."
+                        )
+                        route_message = f"{route_message}; engage_warn: {engage_message}"
+            elif not config.auto_engage:
+                print(
+                    f"[info] Waiting for Auto mode (up to {config.auto_engage_timeout_sec:.0f}s)..."
+                )
+                wait_ok, wait_message = wait_for_autonomous_mode(config.auto_engage_timeout_sec)
+                if wait_ok:
+                    autonomous_ready = True
+                    route_message = f"{route_message}; {wait_message}"
+                    print(f"[info] Auto mode detected: {wait_message}")
+                else:
+                    print(
+                        f"[warn] Auto mode not detected ({wait_message}). "
+                        "Engage Auto in RViz to start driving."
+                    )
+                    route_message = f"{route_message}; engage_warn: {wait_message}"
 
-        if config.record_video and config.video_start_after_engage:
-            if autonomous_ready:
-                recorder = start_video_recording(config, video_path)
+            if config.record_video and config.video_start_after_engage:
+                if autonomous_ready:
+                    recorder = start_video_recording(config, video_path)
+                elif config.record_video_on_failure:
+                    print(
+                        "[info] Auto was not engaged — recording anyway to capture failure state."
+                    )
+                    recorder = start_video_recording(config, video_path)
+                else:
+                    print("[warn] Skipping video — Auto was not engaged.")
+
+            if config.auto_engage and not autonomous_ready:
+                print(
+                    "[warn] Run continues without Auto — ego will likely stay at speed=0. "
+                    "Check engage_warn in setup message above."
+                )
+
+            bag_duration = get_bag_duration_sec(bag_path)
+            timeout = config.route_timeout_sec
+            if bag_duration is not None:
+                timeout = min(timeout, bag_duration + config.bag_duration_margin_sec)
+                print(f"[info] Run timeout: {timeout:.0f}s (bag duration {bag_duration:.0f}s)")
+
+            status, run_detail = wait_for_bag_run_end(config, timeout)
+            message = f"{run_detail} (setup: {route_message})"
+            if status == "success":
+                time.sleep(config.post_arrival_sec)
             else:
-                print("[warn] Skipping video — Auto was not engaged.")
-
-        if config.auto_engage and not autonomous_ready:
-            print(
-                "[warn] Run continues without Auto — ego will likely stay at speed=0. "
-                "Check engage_warn in setup message above."
-            )
-
-        bag_duration = get_bag_duration_sec(bag_path)
-        timeout = config.route_timeout_sec
-        if bag_duration is not None:
-            timeout = min(timeout, bag_duration + config.bag_duration_margin_sec)
-            print(f"[info] Run timeout: {timeout:.0f}s (bag duration {bag_duration:.0f}s)")
-
-        status, run_detail = wait_for_bag_run_end(config, timeout)
-        message = f"{run_detail} (setup: {route_message})"
-        if status == "success":
-            time.sleep(config.post_arrival_sec)
-        elif status == "stuck":
-            print(
-                "[warn] Ego stuck — check run logs for mode=STOP (engage failed) vs mode=AUTO "
-                "(perception/planner blockage). Try reproducer_search_radius: 0."
-            )
+                if status == "stuck":
+                    print(
+                        "[warn] Ego stuck — check run logs for mode=STOP (engage failed) vs mode=AUTO "
+                        "(perception/planner blockage). Try reproducer_search_radius: 0."
+                    )
+                sleep_video_post_failure(config)
 
     except Exception as error:  # noqa: BLE001
         status = "error"
         message = str(error)
+        sleep_video_post_failure(config)
     finally:
         stop_process_group(reproducer)
         stop_video_recording(recorder)
@@ -1296,8 +1324,9 @@ def run_single_bag(
     video_result = ""
     trace_result = ""
     if config.record_video:
+        relaxed_video = status != "success"
         if video_path.exists():
-            ok, detail = validate_video_file(video_path)
+            ok, detail = accept_video_path(video_path, relaxed=relaxed_video)
             if ok:
                 video_result = str(video_path)
                 print(f"[info] Video saved: {video_path} ({detail})")
