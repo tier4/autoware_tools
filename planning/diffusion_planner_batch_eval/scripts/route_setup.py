@@ -20,9 +20,12 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import subprocess
 import sys
+import threading
 import time
+import yaml
 from enum import Enum
 from pathlib import Path
 
@@ -33,12 +36,14 @@ from autoware_adapi_v1_msgs.msg import OperationModeState
 from autoware_adapi_v1_msgs.msg import RouteState as AdapiRouteState
 from autoware_adapi_v1_msgs.srv import ChangeOperationMode
 from autoware_adapi_v1_msgs.srv import ClearRoute as AdapiClearRoute
+from autoware_adapi_v1_msgs.srv import InitializeLocalization as AdapiInitializeLocalization
 from autoware_adapi_v1_msgs.srv import SetRoutePoints
 from geometry_msgs.msg import Pose
 from geometry_msgs.msg import PoseWithCovariance
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
 from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy
 from rclpy.qos import QoSProfile
@@ -79,6 +84,9 @@ ADAPI_ROUTE_STATE = "/api/routing/state"
 MISSION_CLEAR_ROUTE = "/planning/mission_planning/route_selector/main/clear_route"
 MISSION_SET_ROUTE = "/planning/mission_planning/route_selector/main/set_waypoint_route"
 MISSION_ROUTE_STATE = "/planning/mission_planning/route_selector/main/state"
+
+LOCALIZATION_INITIALIZE = "/localization/initialize"
+ADAPI_LOCALIZATION_INITIALIZE = "/api/localization/initialize"
 
 
 def _distance_xy(p0: Pose, p1: Pose) -> float:
@@ -178,13 +186,176 @@ def get_poses_from_bag(bag_path: Path, min_move_m: float = 0.1) -> tuple[Pose, P
 
 
 def list_ros_services() -> list[str]:
+    env = os.environ.copy()
+    env.setdefault("ROS2_DISABLE_DAEMON", "1")
     try:
         output = subprocess.check_output(
-            ["ros2", "service", "list"], text=True, stderr=subprocess.DEVNULL, timeout=10.0
+            ["ros2", "service", "list"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=10.0,
+            env=env,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
         return []
     return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+def _pose_to_dict(pose: Pose) -> dict:
+    return {
+        "position": {
+            "x": float(pose.position.x),
+            "y": float(pose.position.y),
+            "z": float(pose.position.z),
+        },
+        "orientation": {
+            "x": float(pose.orientation.x),
+            "y": float(pose.orientation.y),
+            "z": float(pose.orientation.z),
+            "w": float(pose.orientation.w),
+        },
+    }
+
+
+def _service_request_yaml(data: dict) -> str:
+    """Serialize a service request for ros2 CLI (block YAML avoids y/z boolean quirks)."""
+    return yaml.dump(data, default_flow_style=False, sort_keys=False).strip()
+
+
+def _build_adapi_set_route_yaml(
+    stamp_sec: int, stamp_nanosec: int, goal_pose: Pose, waypoints: list[Pose]
+) -> str:
+    return _service_request_yaml(
+        {
+            "header": {
+                "stamp": {"sec": int(stamp_sec), "nanosec": int(stamp_nanosec)},
+                "frame_id": "map",
+            },
+            "option": {"allow_goal_modification": False},
+            "goal": _pose_to_dict(goal_pose),
+            "waypoints": [_pose_to_dict(wp) for wp in waypoints],
+        }
+    )
+
+
+def _build_mission_set_route_yaml(
+    stamp_sec: int, stamp_nanosec: int, goal_pose: Pose, waypoints: list[Pose]
+) -> str:
+    return _service_request_yaml(
+        {
+            "header": {
+                "stamp": {"sec": int(stamp_sec), "nanosec": int(stamp_nanosec)},
+                "frame_id": "map",
+            },
+            "goal_pose": _pose_to_dict(goal_pose),
+            "waypoints": [_pose_to_dict(wp) for wp in waypoints],
+            "uuid": {"uuid": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]},
+            "allow_modification": True,
+        }
+    )
+
+
+def call_ros2_service_cli(
+    service: str, srv_type: str, request_yaml: str, timeout_sec: float
+) -> tuple[bool, str]:
+    """Invoke a ROS service via ros2 CLI (works when rclpy client discovery lags)."""
+    env = os.environ.copy()
+    env.setdefault("ROS2_DISABLE_DAEMON", "1")
+    try:
+        # Pass block YAML as a single argv element (no shell; avoids arg splitting).
+        completed = subprocess.run(
+            ["ros2", "service", "call", service, srv_type, request_yaml],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"cli_service_timeout after {timeout_sec:.0f}s"
+    except FileNotFoundError:
+        return False, "ros2_cli_not_found"
+
+    output = (completed.stdout or "") + (completed.stderr or "")
+    if completed.returncode != 0:
+        snippet = output.strip().replace("\n", " ")[:800]
+        return False, (
+            f"cli_service_failed(rc={completed.returncode}): {snippet} "
+            f"| request={request_yaml[:300]}"
+        )
+
+    lowered = output.lower()
+    if "success: false" in lowered or "success:false" in lowered:
+        snippet = output.strip().replace("\n", " ")[:400]
+        return False, f"cli_service_rejected: {snippet}"
+    return True, output.strip().replace("\n", " ")[:200] or "cli_service_ok"
+
+
+def _parse_topic_echo_uint_field(output: str, field: str) -> int | None:
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(f"{field}:"):
+            try:
+                return int(stripped.split(":", 1)[1].strip())
+            except ValueError:
+                return None
+    return None
+
+
+def read_route_state_cli() -> tuple[int | None, int | None]:
+    """Read route state via ros2 topic echo (works when rclpy subscriptions lag)."""
+    env = os.environ.copy()
+    env.setdefault("ROS2_DISABLE_DAEMON", "1")
+    qos_flags = [
+        "--qos-reliability",
+        "reliable",
+        "--qos-durability",
+        "transient_local",
+    ]
+    adapi_state: int | None = None
+    mission_state: int | None = None
+
+    try:
+        output = subprocess.check_output(
+            [
+                "ros2",
+                "topic",
+                "echo",
+                "--once",
+                ADAPI_ROUTE_STATE,
+                "autoware_adapi_v1_msgs/msg/RouteState",
+                *qos_flags,
+            ],
+            env=env,
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=8.0,
+        )
+        adapi_state = _parse_topic_echo_uint_field(output, "state")
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    try:
+        output = subprocess.check_output(
+            [
+                "ros2",
+                "topic",
+                "echo",
+                "--once",
+                MISSION_ROUTE_STATE,
+                "tier4_planning_msgs/msg/RouteState",
+                *qos_flags,
+            ],
+            env=env,
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=8.0,
+        )
+        mission_state = _parse_topic_echo_uint_field(output, "state")
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    return adapi_state, mission_state
 
 
 def format_service_diagnosis() -> str:
@@ -231,6 +402,9 @@ class RouteSetupNode(Node):
         )
         self.callback_group = ReentrantCallbackGroup()
         self.backend: RouteBackend | None = None
+        self._executor: MultiThreadedExecutor | None = None
+        self._executor_spinning = False
+        self._executor_pause = threading.Event()
         self.adapi_route_state: int | None = None
         self.mission_route_state: int | None = None
         self.localization_state: int | None = None
@@ -275,7 +449,12 @@ class RouteSetupNode(Node):
         )
         self.localization_client = self.create_client(
             InitializeLocalization,
-            "/localization/initialize",
+            LOCALIZATION_INITIALIZE,
+            callback_group=self.callback_group,
+        )
+        self.adapi_localization_client = self.create_client(
+            AdapiInitializeLocalization,
+            ADAPI_LOCALIZATION_INITIALIZE,
             callback_group=self.callback_group,
         )
         self.enable_autoware_control_client = self.create_client(
@@ -295,12 +474,12 @@ class RouteSetupNode(Node):
         )
         self.speed_mps = 0.0
         self.ego_pose: Pose | None = None
-        sensor_qos = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT)
+        # Planning simulator publishes odometry with reliable QoS{1}; BEST_EFFORT won't match.
         self.create_subscription(
             Odometry,
             "/localization/kinematic_state",
             self._on_kinematic_state,
-            sensor_qos,
+            10,
         )
 
     def _on_kinematic_state(self, msg: Odometry) -> None:
@@ -352,7 +531,30 @@ class RouteSetupNode(Node):
 
     def _spin_until(self, deadline: float) -> None:
         while time.time() < deadline and rclpy.ok():
-            rclpy.spin_once(self, timeout_sec=0.1)
+            if self._executor_spinning:
+                time.sleep(0.1)
+            else:
+                rclpy.spin_once(self, timeout_sec=0.1)
+
+    def _wait_future(self, future, timeout_sec: float) -> bool:
+        """Wait for a service future without fighting the background executor."""
+        deadline = time.time() + timeout_sec
+        paused_executor = False
+        if self._executor_spinning and self._executor is not None:
+            self._executor_pause.set()
+            paused_executor = True
+            time.sleep(0.15)
+
+        try:
+            while not future.done() and time.time() < deadline and rclpy.ok():
+                if self._executor is not None:
+                    self._executor.spin_once(timeout_sec=0.1)
+                else:
+                    rclpy.spin_once(self, timeout_sec=0.1)
+        finally:
+            if paused_executor:
+                self._executor_pause.clear()
+        return future.done()
 
     def _route_is_unset(self) -> bool:
         if self.backend == RouteBackend.ADAPI:
@@ -384,7 +586,10 @@ class RouteSetupNode(Node):
 
         if self.operation_mode == OperationModeState.AUTONOMOUS:
             ok, message = self._call_change_mode(
-                self.change_to_stop_client, "change_to_stop", timeout_sec=10.0
+                self.change_to_stop_client,
+                "change_to_stop",
+                timeout_sec=10.0,
+                service_path="/api/operation_mode/change_to_stop",
             )
             if not ok:
                 self.get_logger().warn(f"change_to_stop failed: {message}")
@@ -410,6 +615,74 @@ class RouteSetupNode(Node):
             f"disengage_timeout (speed={self.speed_mps:.2f} m/s, mode={self.operation_mode})"
         )
 
+    def _rclpy_client_ready(self, client) -> bool:
+        try:
+            return client.service_is_ready()
+        except AttributeError:
+            return client.wait_for_service(timeout_sec=0.0)
+
+    def _wait_rclpy_client(self, client, label: str, timeout_sec: float = 90.0) -> bool:
+        deadline = time.time() + timeout_sec
+        last_log = 0.0
+        while time.time() < deadline and rclpy.ok():
+            if self._rclpy_client_ready(client):
+                return True
+            if client.wait_for_service(timeout_sec=2.0):
+                return True
+            now = time.time()
+            if now - last_log >= 10.0:
+                self.get_logger().info(f"Waiting for rclpy client {label}...")
+                last_log = now
+            self._spin_until(time.time() + 0.5)
+        return self._rclpy_client_ready(client)
+
+    def _clear_route_cli(self) -> tuple[bool, str]:
+        if self.backend == RouteBackend.ADAPI:
+            return call_ros2_service_cli(
+                ADAPI_CLEAR_ROUTE,
+                "autoware_adapi_v1_msgs/srv/ClearRoute",
+                "{}",
+                30.0,
+            )
+        return call_ros2_service_cli(
+            MISSION_CLEAR_ROUTE,
+            "tier4_planning_msgs/srv/ClearRoute",
+            "{}",
+            30.0,
+        )
+
+    def _set_route_cli(
+        self, goal_pose: Pose, waypoints: list[Pose]
+    ) -> tuple[bool, str]:
+        stamp = self.get_clock().now().to_msg()
+        cli_timeout = 120.0
+        if self.backend == RouteBackend.ADAPI:
+            request_yaml = _build_adapi_set_route_yaml(
+                stamp.sec, stamp.nanosec, goal_pose, waypoints
+            )
+            self.get_logger().info(
+                f"Invoking ros2 service call {ADAPI_SET_ROUTE} (timeout {cli_timeout:.0f}s)..."
+            )
+            return call_ros2_service_cli(
+                ADAPI_SET_ROUTE,
+                "autoware_adapi_v1_msgs/srv/SetRoutePoints",
+                request_yaml,
+                cli_timeout,
+            )
+
+        request_yaml = _build_mission_set_route_yaml(
+            stamp.sec, stamp.nanosec, goal_pose, waypoints
+        )
+        self.get_logger().info(
+            f"Invoking ros2 service call {MISSION_SET_ROUTE} (timeout {cli_timeout:.0f}s)..."
+        )
+        return call_ros2_service_cli(
+            MISSION_SET_ROUTE,
+            "tier4_planning_msgs/srv/SetWaypointRoute",
+            request_yaml,
+            cli_timeout,
+        )
+
     def _clear_route_once(self, timeout_sec: float) -> tuple[bool, str]:
         if self.backend == RouteBackend.ADAPI:
             client = self.adapi_clear_route_client
@@ -418,16 +691,34 @@ class RouteSetupNode(Node):
             client = self.mission_clear_route_client
             request = MissionClearRoute.Request()
 
-        if not client.wait_for_service(timeout_sec=5.0):
+        service_name = (
+            ADAPI_CLEAR_ROUTE
+            if self.backend == RouteBackend.ADAPI
+            else MISSION_CLEAR_ROUTE
+        )
+        if service_name not in set(list_ros_services()):
             return False, "clear_route_service_unavailable"
 
-        future = client.call_async(request)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=15.0)
-        if not future.done() or future.result() is None:
-            return False, "clear_route_no_response"
-        if not future.result().status.success:
-            message = future.result().status.message
-            return False, f"clear_route_failed: {message}"
+        got_response = False
+        if self._rclpy_client_ready(client):
+            future = client.call_async(request)
+            got_response = self._wait_future(future, 15.0) and future.result() is not None
+            if got_response and not future.result().status.success:
+                message = future.result().status.message
+                return False, f"clear_route_failed: {message}"
+        else:
+            self.get_logger().info(
+                f"rclpy client not ready for {service_name}; using ros2 service call"
+            )
+
+        if not got_response:
+            ok, message = self._clear_route_cli()
+            if not ok:
+                if self._wait_for_route_state(
+                    self._route_is_unset, timeout_sec=10.0, poll_label="clear"
+                ):
+                    return True, "route_cleared (verified_by_state_topic)"
+                return False, f"clear_route_no_response: {message}"
 
         deadline = time.time() + timeout_sec
         while time.time() < deadline:
@@ -437,34 +728,69 @@ class RouteSetupNode(Node):
         return False, "clear_route_timeout"
 
     def _wait_for_backend(self, timeout_sec: float, preference: str) -> tuple[RouteBackend | None, str]:
-        # New nodes need a moment for DDS service discovery between batch bags.
-        self._spin_until(time.time() + 3.0)
         deadline = time.time() + timeout_sec
         last_log = 0.0
+        cli_adapi_streak = 0
+        cli_mission_streak = 0
         while time.time() < deadline and rclpy.ok():
-            rclpy.spin_once(self, timeout_sec=0.1)
             adapi_ready = (
-                self.adapi_clear_route_client.wait_for_service(timeout_sec=0.0)
-                and self.adapi_set_route_client.wait_for_service(timeout_sec=0.0)
+                self.adapi_clear_route_client.wait_for_service(timeout_sec=5.0)
+                and self.adapi_set_route_client.wait_for_service(timeout_sec=5.0)
             )
             mission_ready = (
-                self.mission_clear_route_client.wait_for_service(timeout_sec=0.0)
-                and self.mission_set_route_client.wait_for_service(timeout_sec=0.0)
+                self.mission_clear_route_client.wait_for_service(timeout_sec=5.0)
+                and self.mission_set_route_client.wait_for_service(timeout_sec=5.0)
             )
 
-            if preference in ("auto", "adapi") and adapi_ready:
-                return RouteBackend.ADAPI, "adapi services ready"
-            if preference in ("auto", "mission_planner") and mission_ready:
+            if preference == "mission_planner" and mission_ready:
                 return RouteBackend.MISSION_PLANNER, "mission planner services ready"
+            if preference == "adapi" and adapi_ready:
+                return RouteBackend.ADAPI, "adapi services ready"
+            if preference == "auto":
+                if mission_ready:
+                    return RouteBackend.MISSION_PLANNER, "mission planner services ready"
+                if adapi_ready:
+                    return RouteBackend.ADAPI, "adapi services ready"
 
             now = time.time()
             if now - last_log >= 10.0:
+                cli_services = set(list_ros_services())
+                cli_adapi = ADAPI_CLEAR_ROUTE in cli_services and ADAPI_SET_ROUTE in cli_services
+                cli_mission = (
+                    MISSION_CLEAR_ROUTE in cli_services
+                    and MISSION_SET_ROUTE in cli_services
+                )
+                if cli_adapi:
+                    cli_adapi_streak += 1
+                else:
+                    cli_adapi_streak = 0
+                if cli_mission:
+                    cli_mission_streak += 1
+                else:
+                    cli_mission_streak = 0
+
                 self.get_logger().info(
                     "Waiting for routing services "
-                    f"(adapi={adapi_ready}, mission_planner={mission_ready})..."
+                    f"(adapi={adapi_ready}, mission_planner={mission_ready}, "
+                    f"cli_adapi={cli_adapi}, cli_mission={cli_mission}, "
+                    f"domain={os.environ.get('ROS_DOMAIN_ID', '0')})..."
                 )
                 last_log = now
-            time.sleep(0.2)
+
+                if cli_mission_streak >= 2 and preference in ("auto", "mission_planner"):
+                    self.get_logger().warn(
+                        "ROS graph lists mission planner routing services; proceeding despite "
+                        "rclpy client discovery lag"
+                    )
+                    return RouteBackend.MISSION_PLANNER, "mission planner services ready (cli graph)"
+                if cli_adapi_streak >= 2 and preference in ("auto", "adapi"):
+                    self.get_logger().warn(
+                        "ROS graph lists ADAPI routing services; proceeding despite "
+                        "rclpy client discovery lag"
+                    )
+                    return RouteBackend.ADAPI, "adapi services ready (cli graph)"
+
+            self._spin_until(time.time() + 0.5)
 
         return None, format_service_diagnosis()
 
@@ -510,23 +836,103 @@ class RouteSetupNode(Node):
         msg.pose = pose_with_cov
         return msg
 
+    def _service_ready(
+        self, client, service_name: str, timeout_sec: float = 8.0, allow_cli_proceed: bool = True
+    ) -> bool:
+        """Brief rclpy discovery attempt; proceed on CLI visibility when discovery lags."""
+        deadline = time.time() + timeout_sec
+        cli_visible = service_name in set(list_ros_services())
+        while time.time() < deadline and rclpy.ok():
+            if client.wait_for_service(timeout_sec=1.0):
+                return True
+            if service_name in set(list_ros_services()):
+                cli_visible = True
+            self._spin_until(time.time() + 0.25)
+
+        if allow_cli_proceed and cli_visible:
+            self.get_logger().warn(
+                f"{service_name} visible in ROS graph; proceeding despite "
+                "rclpy client discovery lag"
+            )
+            return True
+        if cli_visible:
+            self.get_logger().error(
+                f"{service_name} is in the ROS graph but rclpy client did not connect "
+                f"within {timeout_sec:.0f}s"
+            )
+        return False
+
+    def _refresh_route_state_cli(self) -> None:
+        adapi_state, mission_state = read_route_state_cli()
+        if adapi_state is not None:
+            self.adapi_route_state = adapi_state
+        if mission_state is not None:
+            self.mission_route_state = mission_state
+
+    def _wait_for_route_state(
+        self, predicate, timeout_sec: float, poll_label: str
+    ) -> bool:
+        deadline = time.time() + timeout_sec
+        while time.time() < deadline and rclpy.ok():
+            self._spin_until(time.time() + 0.5)
+            if predicate():
+                return True
+            self._refresh_route_state_cli()
+            if predicate():
+                return True
+        self.get_logger().debug(f"Route state wait timed out: {poll_label}")
+        return False
+
+    def _warmup_route_subscriptions(self, timeout_sec: float = 5.0) -> None:
+        """Spin briefly so route-state subscriptions receive initial messages."""
+        self._wait_for_route_state(
+            lambda: self.mission_route_state is not None or self.adapi_route_state is not None,
+            timeout_sec=timeout_sec,
+            poll_label="route_state_initial",
+        )
+
+    def _call_localization_initialize(
+        self, initial_pose_msg: PoseWithCovarianceStamped
+    ) -> tuple[bool, str]:
+        if self._service_ready(self.localization_client, LOCALIZATION_INITIALIZE):
+            request = InitializeLocalization.Request()
+            request.pose_with_covariance = [initial_pose_msg]
+            request.method = InitializeLocalization.Request.DIRECT
+            future = self.localization_client.call_async(request)
+            if self._wait_future(future, 15.0) and future.result() is not None:
+                if future.result().status.success:
+                    return True, "tier4_localization_initialize"
+                return False, f"tier4_localization_initialize_failed: {future.result().status.message}"
+            self.get_logger().warn(
+                f"{LOCALIZATION_INITIALIZE} had no response; trying AD API fallback"
+            )
+
+        if self._service_ready(
+            self.adapi_localization_client, ADAPI_LOCALIZATION_INITIALIZE
+        ):
+            request = AdapiInitializeLocalization.Request()
+            request.pose = [initial_pose_msg]
+            future = self.adapi_localization_client.call_async(request)
+            if self._wait_future(future, 15.0) and future.result() is not None:
+                if future.result().status.success:
+                    return True, "adapi_localization_initialize"
+                return False, f"adapi_localization_initialize_failed: {future.result().status.message}"
+            self.get_logger().warn(
+                f"{ADAPI_LOCALIZATION_INITIALIZE} had no response; falling back to /initialpose3d"
+            )
+
+        return False, "localization_initialize_service_unavailable"
+
     def _initialize_localization(self, pose: Pose, timeout_sec: float) -> tuple[bool, str]:
         deadline = time.time() + timeout_sec
         initial_pose_msg = self._make_initial_pose_msg(pose)
 
-        if self.localization_client.wait_for_service(timeout_sec=5.0):
-            request = InitializeLocalization.Request()
-            request.pose_with_covariance = [initial_pose_msg]
-            request.method = 1
-            future = self.localization_client.call_async(request)
-            rclpy.spin_until_future_complete(self, future, timeout_sec=15.0)
-            if not future.done() or future.result() is None:
-                self.get_logger().warn(
-                    "localization initialize service had no response; retrying with /initialpose3d"
-                )
+        called, init_message = self._call_localization_initialize(initial_pose_msg)
+        if called:
+            self.get_logger().info(f"Localization initialized via {init_message}")
         else:
             self.get_logger().warn(
-                "localization initialize service unavailable; publishing /initialpose3d only"
+                f"{init_message}; publishing /initialpose3d only"
             )
 
         last_log = 0.0
@@ -560,11 +966,15 @@ class RouteSetupNode(Node):
     def _set_route(
         self, goal_pose: Pose, timeout_sec: float, waypoints: list[Pose] | None = None
     ) -> tuple[bool, str]:
+        self._refresh_route_state_cli()
         if not self._route_is_unset():
-            return False, (
-                f"route_not_unset_before_set: "
-                f"adapi={self.adapi_route_state}, mission={self.mission_route_state}"
+            self.get_logger().warn(
+                f"Route not unset before set ({self._route_state_summary()}); clearing"
             )
+            clear_ok, clear_message = self._clear_route_once(min(timeout_sec, 15.0))
+            if not clear_ok:
+                return False, f"clear_before_set_failed: {clear_message}"
+            self._refresh_route_state_cli()
 
         route_waypoints = waypoints or []
 
@@ -584,26 +994,67 @@ class RouteSetupNode(Node):
             request.waypoints = route_waypoints
             request.allow_modification = True
 
-        if not client.wait_for_service(timeout_sec=5.0):
+        service_name = (
+            ADAPI_SET_ROUTE if self.backend == RouteBackend.ADAPI else MISSION_SET_ROUTE
+        )
+        if service_name not in set(list_ros_services()):
             return False, "set_route_service_unavailable"
 
-        future = client.call_async(request)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=20.0)
-        if not future.done() or future.result() is None:
-            return False, "set_route_no_response"
-        if not future.result().status.success:
-            return False, f"set_route_rejected: {future.result().status.message}"
+        got_response = False
+        used_cli = False
+        if self._service_ready(client, service_name, timeout_sec=15.0):
+            future = client.call_async(request)
+            got_response = (
+                self._wait_future(future, min(timeout_sec, 180.0))
+                and future.result() is not None
+            )
+            if got_response and not future.result().status.success:
+                return False, f"set_route_rejected: {future.result().status.message}"
+        else:
+            self.get_logger().warn(
+                f"rclpy client not ready for {service_name}; trying ros2 CLI"
+            )
+
+        if not got_response:
+            ok, cli_message = self._set_route_cli(goal_pose, route_waypoints)
+            used_cli = True
+            self.get_logger().info(f"ros2 set_route result: {cli_message[:300]}")
+            if not ok and self.backend == RouteBackend.ADAPI:
+                self.get_logger().warn(
+                    f"ADAPI CLI set_route failed; trying mission planner CLI ({cli_message[:200]})"
+                )
+                saved_backend = self.backend
+                self.backend = RouteBackend.MISSION_PLANNER
+                ok, cli_message = self._set_route_cli(goal_pose, route_waypoints)
+                self.backend = saved_backend
+                self.get_logger().info(f"ros2 mission set_route result: {cli_message[:300]}")
+            if not ok:
+                self._refresh_route_state_cli()
+                if self._route_is_set():
+                    waypoint_note = (
+                        f" with_{len(route_waypoints)}_waypoints" if route_waypoints else ""
+                    )
+                    return True, (
+                        f"route_set_via_{self.backend.value}{waypoint_note} "
+                        "(verified_by_state_cli)"
+                    )
+                return False, f"set_route_no_response: {cli_message}"
 
         set_wait_sec = min(timeout_sec, 20.0)
-        deadline = time.time() + set_wait_sec
-        while time.time() < deadline:
-            self._spin_until(time.time() + 0.5)
-            if self._route_is_set():
-                waypoint_note = (
-                    f" with_{len(route_waypoints)}_waypoints" if route_waypoints else ""
-                )
-                return True, f"route_set_via_{self.backend.value}{waypoint_note}"
-        return False, "route_set_timeout"
+        if self._wait_for_route_state(self._route_is_set, timeout_sec=set_wait_sec, poll_label="set"):
+            waypoint_note = (
+                f" with_{len(route_waypoints)}_waypoints" if route_waypoints else ""
+            )
+            via = f"{self.backend.value}_cli" if used_cli else self.backend.value
+            return True, f"route_set_via_{via}{waypoint_note}"
+        self._refresh_route_state_cli()
+        if self._route_is_set():
+            waypoint_note = (
+                f" with_{len(route_waypoints)}_waypoints" if route_waypoints else ""
+            )
+            via = f"{self.backend.value}_cli" if used_cli else self.backend.value
+            return True, f"route_set_via_{via}{waypoint_note} (verified_by_state_cli)"
+        return False, f"route_set_timeout ({self._route_state_summary()})"
 
     def _set_route_with_retry(
         self,
@@ -611,6 +1062,7 @@ class RouteSetupNode(Node):
         goal_pose: Pose,
         timeout_sec: float,
         waypoints: list[Pose] | None = None,
+        allow_backend_switch: bool = True,
     ) -> tuple[bool, str]:
         pose_wait_sec = min(timeout_sec, 20.0)
         ok, pose_message = self._wait_for_ego_near_pose(initial_pose, pose_wait_sec)
@@ -620,10 +1072,18 @@ class RouteSetupNode(Node):
                 "mission planner may reject the route."
             )
 
+        retriable_errors = (
+            "planned route is empty",
+            "set_route_no_response",
+            "set_route_service_unavailable",
+            "route_set_timeout",
+            "route_not_unset_before_set",
+        )
         last_error = "set_route_unknown"
         for attempt in range(3):
             if attempt > 0:
                 self.get_logger().info(f"Retrying set_route (attempt {attempt + 1}/3)...")
+                self._clear_route_if_needed(timeout_sec)
                 time.sleep(2.0)
                 self._wait_for_ego_near_pose(initial_pose, min(timeout_sec, 10.0))
 
@@ -631,8 +1091,30 @@ class RouteSetupNode(Node):
             if ok:
                 return True, f"{pose_message}; {message}"
             last_error = message
-            if "planned route is empty" not in message:
+            if not any(err in message for err in retriable_errors):
                 break
+
+        if (
+            allow_backend_switch
+            and self.backend == RouteBackend.ADAPI
+            and MISSION_SET_ROUTE in set(list_ros_services())
+        ):
+            self.get_logger().warn(
+                f"ADAPI set_route failed ({last_error}); retrying with mission planner backend"
+            )
+            self.backend = RouteBackend.MISSION_PLANNER
+            self._clear_route_if_needed(timeout_sec)
+            time.sleep(1.0)
+            ok, message = self._set_route_with_retry(
+                initial_pose,
+                goal_pose,
+                timeout_sec,
+                waypoints=waypoints,
+                allow_backend_switch=False,
+            )
+            if ok:
+                return True, message
+            last_error = message
 
         pose_hint = (
             f" start={self._format_pose_xy(initial_pose)}"
@@ -831,6 +1313,15 @@ class RouteSetupNode(Node):
                 f"start_stop_skipped: bag_start_already_at_{start_stop.name}({start_dist:.1f}m)"
             )
 
+        _, goal_stop, _, goal_snapped = resolve_routing_goal(
+            bag_goal_pose, stops, stop_point_snap_goal_m
+        )
+        if goal_snapped and goal_stop is not None and start_stop.name == goal_stop.name:
+            return False, (
+                f"{route_failure_message}; "
+                f"start_stop_skipped: nearest_stop_equals_goal ({start_stop.name})"
+            )
+
         self.get_logger().warn(
             f"Bag start route failed; re-localizing at map stop '{start_stop.name}' "
             f"({start_dist:.1f}m from bag start)"
@@ -873,14 +1364,13 @@ class RouteSetupNode(Node):
         )
 
     def _call_change_mode(
-        self, client, service_name: str, timeout_sec: float
+        self, client, service_name: str, timeout_sec: float, service_path: str
     ) -> tuple[bool, str]:
-        if not client.wait_for_service(timeout_sec=5.0):
+        if not self._service_ready(client, service_path, timeout_sec):
             return False, f"{service_name}_unavailable"
 
         future = client.call_async(ChangeOperationMode.Request())
-        rclpy.spin_until_future_complete(self, future, timeout_sec=timeout_sec)
-        if not future.done() or future.result() is None:
+        if not self._wait_future(future, timeout_sec) or future.result() is None:
             return False, f"{service_name}_no_response"
         if not future.result().status.success:
             return False, f"{service_name}_rejected: {future.result().status.message}"
@@ -924,6 +1414,7 @@ class RouteSetupNode(Node):
                     self.enable_autoware_control_client,
                     "enable_autoware_control",
                     timeout_sec=10.0,
+                    service_path="/api/operation_mode/enable_autoware_control",
                 )
                 if not ok:
                     last_failure = message
@@ -932,7 +1423,10 @@ class RouteSetupNode(Node):
                 self._spin_until(time.time() + 1.0)
 
             ok, message = self._call_change_mode(
-                self.change_to_autonomous_client, "change_to_autonomous", timeout_sec=10.0
+                self.change_to_autonomous_client,
+                "change_to_autonomous",
+                timeout_sec=10.0,
+                service_path="/api/operation_mode/change_to_autonomous",
             )
             if not ok:
                 last_failure = message
@@ -981,27 +1475,92 @@ class RouteSetupNode(Node):
         start_pose_stop_min_dist_m: float = 1.0,
     ) -> tuple[bool, str]:
         route_order = route_stop_order or DEFAULT_HIRATSUKA_ROUTE_ORDER
-        backend, message = self._wait_for_backend(service_wait_sec, backend_preference)
-        if backend is None:
-            return False, message
-        self.backend = backend
-        self.get_logger().info(f"Using route backend: {backend.value}")
+
+        executor = MultiThreadedExecutor(num_threads=4)
+        executor.add_node(self)
+        stop_spin = threading.Event()
+
+        def _spin_executor() -> None:
+            while not stop_spin.is_set() and rclpy.ok():
+                if self._executor_pause.is_set():
+                    time.sleep(0.05)
+                    continue
+                executor.spin_once(timeout_sec=0.1)
+
+        spin_thread = threading.Thread(target=_spin_executor, daemon=True)
+        spin_thread.start()
+        self._executor = executor
+        self._executor_spinning = True
+        time.sleep(5.0)
 
         try:
-            bag_start_pose, goal_pose = get_poses_from_bag(bag_path, min_move_m=min_move_m)
-        except ValueError as error:
-            return False, str(error)
+            backend, message = self._wait_for_backend(service_wait_sec, backend_preference)
+            if backend is None:
+                return False, message
+            self.backend = backend
+            self.get_logger().info(f"Using route backend: {backend.value}")
 
-        initial_pose = bag_start_pose
-        offset_note = ""
-        if abs(start_pose_offset_m) > 1e-6:
-            initial_pose = offset_pose_longitudinal(bag_start_pose, start_pose_offset_m)
-            offset_note = (
-                f"start_offset={start_pose_offset_m:+.2f}m "
-                f"bag_start={self._format_pose_xy(bag_start_pose)} "
-                f"spawn={self._format_pose_xy(initial_pose)}"
+            self._warmup_route_subscriptions(timeout_sec=5.0)
+
+            try:
+                bag_start_pose, goal_pose = get_poses_from_bag(bag_path, min_move_m=min_move_m)
+            except ValueError as error:
+                return False, str(error)
+
+            initial_pose = bag_start_pose
+            offset_note = ""
+            if abs(start_pose_offset_m) > 1e-6:
+                initial_pose = offset_pose_longitudinal(bag_start_pose, start_pose_offset_m)
+                offset_note = (
+                    f"start_offset={start_pose_offset_m:+.2f}m "
+                    f"bag_start={self._format_pose_xy(bag_start_pose)} "
+                    f"spawn={self._format_pose_xy(initial_pose)}"
+                )
+                self.get_logger().info(f"Applying start pose offset: {offset_note}")
+
+            return self._setup_for_bag_body(
+                initial_pose=initial_pose,
+                goal_pose=goal_pose,
+                bag_start_pose=bag_start_pose,
+                timeout_sec=timeout_sec,
+                auto_engage=auto_engage,
+                offset_note=offset_note,
+                map_path=map_path,
+                stop_point_goal_fallback=stop_point_goal_fallback,
+                stop_points_csv=stop_points_csv,
+                stop_point_goal_min_dist_m=stop_point_goal_min_dist_m,
+                stop_point_snap_goal_m=stop_point_snap_goal_m,
+                stop_point_waypoint_fallback=stop_point_waypoint_fallback,
+                route_stop_order=route_order,
+                start_pose_stop_fallback=start_pose_stop_fallback,
+                start_pose_stop_min_dist_m=start_pose_stop_min_dist_m,
             )
-            self.get_logger().info(f"Applying start pose offset: {offset_note}")
+        finally:
+            self._executor_spinning = False
+            self._executor = None
+            stop_spin.set()
+            spin_thread.join(timeout=2.0)
+            executor.remove_node(self)
+
+    def _setup_for_bag_body(
+        self,
+        *,
+        initial_pose: Pose,
+        goal_pose: Pose,
+        bag_start_pose: Pose,
+        timeout_sec: float,
+        auto_engage: bool,
+        offset_note: str,
+        map_path: Path | None,
+        stop_point_goal_fallback: bool,
+        stop_points_csv: str,
+        stop_point_goal_min_dist_m: float,
+        stop_point_snap_goal_m: float,
+        stop_point_waypoint_fallback: bool,
+        route_stop_order: list[str],
+        start_pose_stop_fallback: bool,
+        start_pose_stop_min_dist_m: float,
+    ) -> tuple[bool, str]:
 
         disengage_ok, disengage_msg = self._disengage_and_wait_stopped(min(timeout_sec, 25.0))
         if not disengage_ok:
@@ -1030,7 +1589,7 @@ class RouteSetupNode(Node):
             stop_points_csv=stop_points_csv,
             stop_point_goal_min_dist_m=stop_point_goal_min_dist_m,
             stop_point_snap_goal_m=stop_point_snap_goal_m,
-            route_stop_order=route_order,
+            route_stop_order=route_stop_order,
             stop_point_waypoint_fallback=stop_point_waypoint_fallback,
         )
         if not ok and start_pose_stop_fallback:
@@ -1045,7 +1604,7 @@ class RouteSetupNode(Node):
                 stop_point_goal_fallback=stop_point_goal_fallback,
                 stop_point_goal_min_dist_m=stop_point_goal_min_dist_m,
                 stop_point_snap_goal_m=stop_point_snap_goal_m,
-                route_stop_order=route_order,
+                route_stop_order=route_stop_order,
                 stop_point_waypoint_fallback=stop_point_waypoint_fallback,
             )
         if not ok:
@@ -1241,6 +1800,11 @@ def main() -> None:
         help="Stop points filename inside map_path (default: stop_points.csv)",
     )
     args = parser.parse_args()
+
+    print(
+        f"[info] route_setup ROS_DOMAIN_ID={os.environ.get('ROS_DOMAIN_ID', '0')}",
+        flush=True,
+    )
 
     ok, message = setup_route_for_bag(
         args.bag,

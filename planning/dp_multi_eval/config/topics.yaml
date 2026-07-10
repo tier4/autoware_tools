@@ -1,0 +1,13 @@
+# Default ROS topics for pilot-auto.x2.isuzu.erga2 / Autoware planning sim.
+# Override via --topics-yaml or JobConfig fields.
+
+ego_pose: /localization/kinematic_state
+trajectory: /planning/trajectory
+predicted_objects: /perception/object_recognition/tracking/objects
+tf: /tf
+tf_static: /tf_static
+vehicle_status_velocity: /vehicle/status/velocity_status
+vehicle_status_steering: /vehicle/status/steering_status
+control_command: /control/command/control_cmd
+acceleration: /localization/acceleration
+route_state: /api/routing/state

@@ -1,0 +1,44 @@
+# Full pipeline config for dp_multi_eval (Phases 1–7)
+#
+#   ros2 run dp_multi_eval run_all.py -c ~/dp_multi_eval_pipeline.yaml --dry_run
+#   ros2 run dp_multi_eval run_all.py -c ~/dp_multi_eval_pipeline.yaml --max_workers 2
+
+rosbag_dir: /media/takahikohasegawa/71435f24-d875-4ded-b7ba-9a42505405e5/hiratsuka
+results_root: /media/takahikohasegawa/71435f24-d875-4ded-b7ba-9a42505405e5/dp_multi_eval_results
+map_path: /opt/autoware/maps
+
+vehicle_model: lv828l
+sensor_model: aip_x2_gen2
+vehicle_id: 6_lv828l
+
+max_workers: 1
+domain_id_start: 10
+render_video: true
+video_fps: 6.0
+video_sample_dt: 0.5   # fewer video frames → faster post-processing (0.2 = smoother)
+rviz: false
+
+end_condition: route_arrived
+bag_duration_margin_sec: 30.0
+route_timeout_sec: 300.0
+psim_startup_sec: 120.0
+route_setup_timeout_sec: 90.0
+auto_engage_timeout_sec: 60.0
+perception_warmup_sec: 5.0
+perception_ready_timeout_sec: 45.0
+perception_ready_min_objects: 1
+perception_ready_stable_sec: 2.0
+
+# Optional paths (defaults live in the package share/config/)
+# thresholds: /path/to/thresholds.yaml
+# topics_yaml: /path/to/topics.yaml
+# vehicle_info_yaml: /path/to/vehicle_info.param.yaml
+
+# GUI helpers
+models_dir: /opt/autoware/mlmodels
+
+models:
+  # model_config may be a .param.yaml file OR an ONNX model directory
+  # (diffusion_planner.onnx + args.json under /opt/autoware/mlmodels/…).
+  - name: diffusion_planner_for_erga_hiratsuka_june_26
+    model_config: /opt/autoware/mlmodels/diffusion_planner_for_erga_hiratsuka_june_26

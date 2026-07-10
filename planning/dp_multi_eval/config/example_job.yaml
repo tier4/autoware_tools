@@ -1,0 +1,19 @@
+# Example inputs for Phase 1 single-job smoke test.
+# Prefer CLI flags; this file documents typical values.
+
+model_config: /path/to/diffusion_planner.param.yaml
+bag_path: /path/to/rosbag_or_dir
+output_dir: /path/to/results/model_name/bag_name
+domain_id: 42
+
+map_path: /opt/autoware/maps
+vehicle_model: lv828l
+sensor_model: aip_x2_gen2
+
+# How the job decides to stop the scenario:
+#   route_arrived — Autoware ADAPI /api/routing/state == ARRIVED (preferred)
+#   bag_duration  — bag length + margin (fallback when route never arrives)
+end_condition: route_arrived
+bag_duration_margin_sec: 30.0
+route_timeout_sec: 900.0
+psim_startup_sec: 120.0
