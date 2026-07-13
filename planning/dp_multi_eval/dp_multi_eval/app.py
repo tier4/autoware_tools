@@ -30,10 +30,44 @@ STATE_FILE_NAME = ".gui_run_state.json"
 SESSION_KEYS = ("models_dir", "rosbag_dir", "results_root")
 
 
-def _init_session(defaults: dict[str, str]) -> None:
+def _widget_key(session_key: str) -> str:
+    return f"input_{session_key}"
+
+
+def _pending_key(session_key: str) -> str:
+    return f"_pending_folder_{session_key}"
+
+
+def _set_folder_path(session_key: str, path: str) -> None:
+    """Keep session path and Streamlit text_input widget key in sync.
+
+    Must be called only before the matching text_input widget is created.
+    """
+    path = str(path or "").strip()
+    st.session_state[session_key] = path
+    st.session_state[_widget_key(session_key)] = path
+
+
+def _init_session(defaults: dict[str, str], *, config_path: str) -> None:
+    """Seed folder paths from pipeline YAML.
+
+    Streamlit text_input widgets own a separate key (`input_*`). Once created empty,
+    `value=` is ignored — so we must write both keys, and re-seed when the pipeline
+    config file changes or a field is still empty.
+    """
+    prev_config = st.session_state.get("_pipeline_config_path")
+    config_changed = prev_config != config_path
+    st.session_state["_pipeline_config_path"] = config_path
+
     for key in SESSION_KEYS:
-        if key not in st.session_state:
-            st.session_state[key] = defaults.get(key, "")
+        default = str(defaults.get(key, "") or "").strip()
+        widget_key = _widget_key(key)
+        current = str(st.session_state.get(widget_key) or st.session_state.get(key) or "").strip()
+        if config_changed or not current:
+            if default:
+                _set_folder_path(key, default)
+            elif key not in st.session_state:
+                _set_folder_path(key, "")
 
 
 def folder_input(
@@ -43,23 +77,34 @@ def folder_input(
     picker_title: str,
     help_text: str = "",
 ) -> Path:
+    widget_key = _widget_key(session_key)
+    pending_key = _pending_key(session_key)
+
+    # Apply browse result before instantiating the text_input (Streamlit forbids
+    # writing widget keys after the widget exists).
+    pending = st.session_state.pop(pending_key, None)
+    if pending is not None:
+        _set_folder_path(session_key, pending)
+    elif widget_key not in st.session_state:
+        st.session_state[widget_key] = str(st.session_state.get(session_key, "") or "")
+
     col_path, col_btn = st.sidebar.columns([5, 1])
     with col_path:
         value = st.text_input(
             label,
-            value=st.session_state.get(session_key, ""),
-            key=f"input_{session_key}",
+            key=widget_key,
             help=help_text or None,
         )
     with col_btn:
         st.write("")
         if st.button("…", key=f"browse_{session_key}", help=f"Browse for {label.lower()}"):
-            picked = pick_folder(picker_title, st.session_state.get(session_key, ""))
+            picked = pick_folder(picker_title, st.session_state.get(widget_key, ""))
             if picked:
-                st.session_state[session_key] = picked
+                st.session_state[pending_key] = picked
                 st.rerun()
-    st.session_state[session_key] = value
-    return Path(value).expanduser()
+    path = str(value or "").strip()
+    st.session_state[session_key] = path
+    return Path(path).expanduser()
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -246,12 +291,15 @@ def main() -> None:
         st.sidebar.text_input("Pipeline config file", value=str(DEFAULT_CONFIG))
     ).expanduser()
     base = load_yaml(config_path)
+    if not config_path.is_file():
+        st.sidebar.warning(f"Config not found: `{config_path}`")
     _init_session(
         {
             "models_dir": str(base.get("models_dir", "/opt/autoware/mlmodels")),
             "rosbag_dir": str(base.get("rosbag_dir", "")),
             "results_root": str(base.get("results_root", "/tmp/dp_multi_eval_results")),
-        }
+        },
+        config_path=str(config_path.resolve()) if config_path.exists() else str(config_path),
     )
     models_dir = folder_input(
         "Models folder",
@@ -291,11 +339,22 @@ def main() -> None:
 
         st.subheader("Choose scenarios")
         bags = discover_bag_dirs(rosbag_dir)
-        if not bags and rosbag_dir:
+        if not str(rosbag_dir):
+            st.info(
+                "Set **Scenarios folder** in the sidebar to the parent of ID1, ID2, … "
+                f"(from config: `{base.get('rosbag_dir', '') or 'not set'}`)."
+            )
+        elif not rosbag_dir.is_dir():
+            st.warning(
+                f"Scenarios folder does not exist or is not a directory: `{rosbag_dir}`"
+            )
+        elif not bags:
             st.warning(
                 f"No scenarios found under `{rosbag_dir}`. "
-                "Each subfolder needs metadata.yaml or a .db3 file."
+                "Each subfolder needs `metadata.yaml` or a `.db3` file."
             )
+        else:
+            st.caption(f"Found {len(bags)} scenario(s) under `{rosbag_dir}`")
         select_all = st.checkbox("Select all scenarios", value=False)
         selected_bags: list[Path] = []
         for bag in bags:
@@ -425,7 +484,7 @@ def main() -> None:
                         }
                         for j in failed
                     ],
-                    use_container_width=True,
+                    width="stretch",
                 )
             running_jobs = [j for j in jobs if j.get("status") == "running"]
             if running_jobs:
@@ -469,7 +528,7 @@ def main() -> None:
                             "domain": domain,
                         }
                     )
-                st.dataframe(rows, use_container_width=True)
+                st.dataframe(rows, width="stretch")
 
             if st.button("Refresh now"):
                 st.rerun()
@@ -488,8 +547,8 @@ def main() -> None:
                 "The dashboard auto-refreshes every 5s while jobs are pending or running. "
                 "Click Refresh now on Live Progress to reload Streamlit."
             )
-            html = dash.read_text(encoding="utf-8")
-            st.components.v1.html(html, height=900, scrolling=True)
+            # Prefer file path so the iframe can load scripts / refresh meta tags.
+            st.iframe(dash, height=900)
 
 
 if __name__ == "__main__":
