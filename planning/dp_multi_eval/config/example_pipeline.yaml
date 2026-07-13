@@ -16,6 +16,11 @@ domain_id_start: 10
 render_video: true
 video_fps: 6.0
 video_sample_dt: 0.5   # fewer video frames → faster post-processing (0.2 = smoother)
+# Preview camera: map = fit full path; base_link = ego-centered (less zoomed out)
+video_view_frame: base_link
+video_view_range_m: 40.0
+# Draw virtual walls from /planning/planning_factors/{modifier_obstacle_stop,diffusion_planner,stop_point_fixer}
+show_planning_factors: true
 rviz: false
 
 end_condition: route_arrived

@@ -369,6 +369,40 @@ def main() -> None:
         run_name = st.text_input("Run name", value=time.strftime("run_%Y%m%d_%H%M%S"))
         max_workers = st.number_input("Parallel workers", min_value=1, max_value=8, value=int(base.get("max_workers", 1)))
 
+        st.subheader("Preview video")
+        col_v1, col_v2 = st.columns(2)
+        with col_v1:
+            view_opts = ["base_link", "map"]
+            default_view = str(base.get("video_view_frame", "base_link"))
+            if default_view not in view_opts:
+                default_view = "base_link"
+            video_view_frame = st.selectbox(
+                "View frame",
+                view_opts,
+                index=view_opts.index(default_view),
+                help="base_link = ego-centered (recommended); map = fit full path (can look zoomed out).",
+            )
+            show_planning_factors = st.checkbox(
+                "Show planning-factor virtual walls",
+                value=bool(base.get("show_planning_factors", True)),
+                help="Draw walls from modifier_obstacle_stop, diffusion_planner, stop_point_fixer.",
+            )
+        with col_v2:
+            video_view_range_m = st.number_input(
+                "View range [m] (base_link half-extent)",
+                min_value=10.0,
+                max_value=200.0,
+                value=float(base.get("video_view_range_m", 40.0)),
+                step=5.0,
+            )
+            video_fps = st.number_input(
+                "Video FPS",
+                min_value=1.0,
+                max_value=30.0,
+                value=float(base.get("video_fps", 6.0)),
+                step=1.0,
+            )
+
         state_path = results_root / STATE_FILE_NAME
         running, _state = gui_run_is_active(state_path)
 
@@ -385,6 +419,11 @@ def main() -> None:
                 cfg_base["results_root"] = str(results_root)
                 cfg_base["max_workers"] = int(max_workers)
                 cfg_base["map_path"] = cfg_base.get("map_path", "/opt/autoware/maps")
+                cfg_base["video_view_frame"] = video_view_frame
+                cfg_base["video_view_range_m"] = float(video_view_range_m)
+                cfg_base["show_planning_factors"] = bool(show_planning_factors)
+                cfg_base["video_fps"] = float(video_fps)
+                cfg_base["render_video"] = True
                 # Temporary rosbag_dir containing only selected bags via symlink farm
                 run_bag_root = results_root / run_name / "_selected_bags"
                 if run_bag_root.exists():

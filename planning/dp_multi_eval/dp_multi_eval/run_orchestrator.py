@@ -151,6 +151,7 @@ def _process_job(payload: dict[str, Any]) -> dict[str, Any]:
             model_config=str(job["model_config_path"]),
         )
 
+        show_factors = bool(opts.get("show_planning_factors", True))
         # Single bag read for metrics + video (object downsampling cuts load time ~10x).
         series = load_bag_series(
             bag_out,
@@ -158,8 +159,10 @@ def _process_job(payload: dict[str, Any]) -> dict[str, Any]:
             objects_topic=topics.predicted_objects,
             velocity_topic=topics.vehicle_status_velocity,
             trajectory_topic=topics.trajectory,
+            planning_factor_topics=topics.planning_factors if show_factors else [],
             object_sample_dt=sample_dt,
             trajectory_sample_dt=video_sample_dt,
+            factor_sample_dt=video_sample_dt,
             skip_zero_size_objects=True,
         )
 
@@ -202,6 +205,9 @@ def _process_job(payload: dict[str, Any]) -> dict[str, Any]:
                         Path(opts["vehicle_info_yaml"]) if opts.get("vehicle_info_yaml") else None
                     ),
                     series=series,
+                    view_frame=str(opts.get("video_view_frame", "map")),
+                    view_range_m=float(opts.get("video_view_range_m", 40.0)),
+                    show_planning_factors=show_factors,
                 )
             except Exception as exc:  # noqa: BLE001
                 # Video is nice-to-have; don't fail the job solely on render
@@ -333,6 +339,9 @@ def main(argv: list[str] | None = None) -> int:
             "perception_ready_stable_sec",
             "video_fps",
             "video_sample_dt",
+            "video_view_frame",
+            "video_view_range_m",
+            "show_planning_factors",
             "rviz",
         ):
             if key in raw:

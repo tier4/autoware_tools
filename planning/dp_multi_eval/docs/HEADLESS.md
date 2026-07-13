@@ -70,6 +70,9 @@ route_timeout_sec: 300.0
 psim_startup_sec: 120.0
 render_video: true                      # false = faster batch
 video_sample_dt: 0.5
+video_view_frame: base_link             # or map (fit full path)
+video_view_range_m: 40.0                # ego window half-extent for base_link
+show_planning_factors: true             # virtual walls in preview.mp4
 
 models:
   - name: diffusion_planner_for_erga_hiratsuka_june_26

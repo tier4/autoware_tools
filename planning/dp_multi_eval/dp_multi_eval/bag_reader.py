@@ -56,17 +56,47 @@ class TrajectorySample:
 
 
 @dataclass
+class VirtualWallSample:
+    """One control-point pose from a PlanningFactorArray (map frame)."""
+
+    stamp_sec: float
+    source: str  # short module / topic leaf name
+    x: float
+    y: float
+    yaw_rad: float
+    behavior: int
+    detail: str = ""
+
+
+@dataclass
 class BagSeries:
     ego: list[EgoSample] = field(default_factory=list)
     objects: list[ObjectSample] = field(default_factory=list)
     trajectories: list[TrajectorySample] = field(default_factory=list)
     velocity_mps: list[tuple[float, float]] = field(default_factory=list)  # (t, speed)
+    virtual_walls: list[VirtualWallSample] = field(default_factory=list)
 
     @property
     def duration_sec(self) -> float:
         if not self.ego:
             return 0.0
         return self.ego[-1].stamp_sec - self.ego[0].stamp_sec
+
+
+_BEHAVIOR_NAMES = {
+    0: "UNKNOWN",
+    1: "NONE",
+    2: "SLOW_DOWN",
+    3: "STOP",
+    4: "SHIFT_LEFT",
+    5: "SHIFT_RIGHT",
+    6: "TURN_LEFT",
+    7: "TURN_RIGHT",
+}
+
+
+def planning_factor_source_name(topic: str) -> str:
+    return topic.rstrip("/").split("/")[-1]
 
 
 def open_bag_reader(bag_path: Path):
@@ -135,14 +165,18 @@ def load_bag_series(
     objects_topic: str = "/perception/object_recognition/tracking/objects",
     velocity_topic: str = "/vehicle/status/velocity_status",
     trajectory_topic: str | None = "/planning/trajectory",
+    planning_factor_topics: list[str] | None = None,
     object_sample_dt: float | None = None,
     trajectory_sample_dt: float | None = None,
+    factor_sample_dt: float | None = None,
     skip_zero_size_objects: bool = True,
 ) -> BagSeries:
     series = BagSeries()
+    factor_topics = list(planning_factor_topics or [])
     topics = [ego_topic, objects_topic, velocity_topic]
     if trajectory_topic:
         topics.append(trajectory_topic)
+    topics.extend(factor_topics)
 
     label_names = {
         0: "UNKNOWN",
@@ -157,6 +191,7 @@ def load_bag_series(
 
     next_object_msg_t = -float("inf")
     next_traj_msg_t = -float("inf")
+    next_factor_msg_t: dict[str, float] = {t: -float("inf") for t in factor_topics}
 
     for topic, stamp, msg in iter_topic_messages(bag_path, topics):
         if topic == ego_topic:
@@ -229,11 +264,37 @@ def load_bag_series(
             ]
             if len(pts) >= 2:
                 series.trajectories.append(TrajectorySample(stamp_sec=stamp, points=pts))
+        elif topic in next_factor_msg_t:
+            if factor_sample_dt and stamp + 1e-9 < next_factor_msg_t[topic]:
+                continue
+            if factor_sample_dt:
+                next_factor_msg_t[topic] = stamp + factor_sample_dt
+            source = planning_factor_source_name(topic)
+            for factor in getattr(msg, "factors", []) or []:
+                behavior = int(getattr(factor, "behavior", 0) or 0)
+                detail = str(getattr(factor, "detail", "") or "")
+                module = str(getattr(factor, "module", "") or "") or source
+                for cp in getattr(factor, "control_points", []) or []:
+                    pose = getattr(cp, "pose", None)
+                    if pose is None:
+                        continue
+                    series.virtual_walls.append(
+                        VirtualWallSample(
+                            stamp_sec=stamp,
+                            source=module,
+                            x=float(pose.position.x),
+                            y=float(pose.position.y),
+                            yaw_rad=yaw_from_quat(pose.orientation),
+                            behavior=behavior,
+                            detail=detail or _BEHAVIOR_NAMES.get(behavior, str(behavior)),
+                        )
+                    )
 
     series.ego.sort(key=lambda s: s.stamp_sec)
     series.objects.sort(key=lambda s: s.stamp_sec)
     series.trajectories.sort(key=lambda s: s.stamp_sec)
     series.velocity_mps.sort(key=lambda s: s[0])
+    series.virtual_walls.sort(key=lambda s: s.stamp_sec)
     return series
 
 

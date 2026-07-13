@@ -11,3 +11,9 @@ vehicle_status_steering: /vehicle/status/steering_status
 control_command: /control/command/control_cmd
 acceleration: /localization/acceleration
 route_state: /api/routing/state
+
+# Virtual-wall sources for preview video (PlanningFactorArray)
+planning_factors:
+  - /planning/planning_factors/modifier_obstacle_stop
+  - /planning/planning_factors/diffusion_planner
+  - /planning/planning_factors/stop_point_fixer

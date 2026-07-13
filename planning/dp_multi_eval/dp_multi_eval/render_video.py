@@ -15,10 +15,20 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon as MplPolygon
+from matplotlib.patches import Patch
 
 from dp_multi_eval.bag_reader import BagSeries, TrajectorySample, downsample_ego, load_bag_series
 from dp_multi_eval.geometry import box_local, load_vehicle_footprint, transform_local_polygon
 from dp_multi_eval.topics import TopicSet, load_topics
+
+# Virtual wall colors by planning-factor source (topic leaf / module name)
+_WALL_COLORS = {
+    "modifier_obstacle_stop": "#e41a1c",
+    "diffusion_planner": "#ff7f00",
+    "stop_point_fixer": "#984ea3",
+}
+_WALL_DEFAULT_COLOR = "#377eb8"
+_WALL_LOCAL = box_local(0.15, 5.0)  # thin along heading, wide laterally (RViz-like)
 
 
 @lru_cache(maxsize=4)
@@ -97,6 +107,42 @@ def _index_objects_per_frame(
     return out
 
 
+def _index_walls_per_frame(
+    walls: list,
+    ego_frames: list,
+    sample_dt: float,
+    max_age_sec: float = 0.5,
+) -> list[list]:
+    """Latest planning-factor walls whose stamp is within max_age of the frame."""
+    if not walls or not ego_frames:
+        return [[] for _ in ego_frames]
+    stamps = [w.stamp_sec for w in walls]
+    out: list[list] = []
+    for ego in ego_frames:
+        idx = bisect.bisect_right(stamps, ego.stamp_sec) - 1
+        if idx < 0:
+            out.append([])
+            continue
+        # Collect all walls sharing the latest message stamp (per source batch)
+        latest_t = walls[idx].stamp_sec
+        if ego.stamp_sec - latest_t > max_age_sec:
+            out.append([])
+            continue
+        # Walk back to include sibling factors published at the same stamp window
+        t0 = latest_t - max(sample_dt, 0.05)
+        j = idx
+        while j >= 0 and walls[j].stamp_sec >= t0:
+            j -= 1
+        frame_walls = walls[j + 1 : idx + 1]
+        out.append(frame_walls)
+    return out
+
+
+def _wall_color(source: str) -> str:
+    leaf = source.rstrip("/").split("/")[-1]
+    return _WALL_COLORS.get(leaf, _WALL_DEFAULT_COLOR)
+
+
 def render_video(
     bag_path: Path,
     output_path: Path,
@@ -110,8 +156,14 @@ def render_video(
     vehicle_info_yaml: Path | None = None,
     series: BagSeries | None = None,
     dpi: int = 72,
+    view_frame: str = "map",
+    view_range_m: float = 40.0,
+    show_planning_factors: bool = True,
 ) -> Path:
     topics = topics or TopicSet()
+    view_frame = (view_frame or "map").strip().lower()
+    if view_frame not in ("map", "base_link"):
+        view_frame = "map"
     if series is None:
         series = load_bag_series(
             bag_path,
@@ -119,8 +171,10 @@ def render_video(
             objects_topic=topics.predicted_objects,
             velocity_topic=topics.vehicle_status_velocity,
             trajectory_topic=topics.trajectory,
+            planning_factor_topics=topics.planning_factors if show_planning_factors else [],
             object_sample_dt=sample_dt,
             trajectory_sample_dt=sample_dt,
+            factor_sample_dt=sample_dt,
             skip_zero_size_objects=True,
         )
     ego_frames = downsample_ego(series.ego, sample_dt)
@@ -146,9 +200,11 @@ def render_video(
     map_lines = _load_map_lines(map_path, xmin=xmin, xmax=xmax, ymin=ymin, ymax=ymax)
     objs = series.objects
     trajectories = series.trajectories
+    walls = series.virtual_walls if show_planning_factors else []
     ego_stamps = [e.stamp_sec for e in series.ego]
     trail_ends = [bisect.bisect_right(ego_stamps, e.stamp_sec) for e in ego_frames]
     objects_per_frame = _index_objects_per_frame(objs, ego_frames, sample_dt)
+    walls_per_frame = _index_walls_per_frame(walls, ego_frames, sample_dt)
 
     output_path = output_path.expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -183,23 +239,34 @@ def render_video(
     ego_patch = MplPolygon([[0, 0]], closed=True, facecolor="#d62728", edgecolor="k", alpha=0.8, zorder=3)
     ax.add_patch(ego_patch)
     npc_patches: list[MplPolygon] = []
+    wall_patches: list[MplPolygon] = []
     goal_artist = None
     if goal is not None:
         goal_artist = ax.scatter([], [], marker="*", s=180, c="gold", zorder=4, edgecolors="k")
         goal_artist.set_offsets([[goal[0], goal[1]]])
 
     ax.set_aspect("equal")
-    ax.set_xlim(xmin, xmax)
-    ax.set_ylim(ymin, ymax)
+    if view_frame == "map":
+        ax.set_xlim(xmin, xmax)
+        ax.set_ylim(ymin, ymax)
     ax.set_xlabel("x [m]")
     ax.set_ylabel("y [m]")
     if fail:
         for spine in ax.spines.values():
             spine.set_color("red")
             spine.set_linewidth(3)
-    ax.legend(loc="upper right", fontsize=8, framealpha=0.7)
+
+    legend_handles = [
+        Patch(facecolor="#1f77b4", edgecolor="none", label="ego path"),
+        Patch(facecolor="#ff7f0e", edgecolor="none", label="planned trajectory"),
+    ]
+    if show_planning_factors:
+        for name, color in _WALL_COLORS.items():
+            legend_handles.append(Patch(facecolor=color, edgecolor="k", alpha=0.65, label=name))
+    ax.legend(handles=legend_handles, loc="upper right", fontsize=7, framealpha=0.7)
 
     title = ax.set_title("")
+    half = max(5.0, float(view_range_m))
 
     def draw_frame(idx: int):
         e = ego_frames[idx]
@@ -232,11 +299,44 @@ def render_video(
             else:
                 patch.set_visible(False)
 
-        t_title = f"t={e.stamp_sec - ego_frames[0].stamp_sec:.1f}s  speed={e.speed_mps:.2f} m/s"
+        frame_walls = walls_per_frame[idx]
+        while len(wall_patches) < len(frame_walls):
+            patch = MplPolygon(
+                [[0, 0]],
+                closed=True,
+                facecolor=_WALL_DEFAULT_COLOR,
+                edgecolor="k",
+                alpha=0.7,
+                zorder=5,
+                linewidth=0.6,
+            )
+            ax.add_patch(patch)
+            wall_patches.append(patch)
+        for wi, patch in enumerate(wall_patches):
+            if wi < len(frame_walls):
+                wall = frame_walls[wi]
+                poly = transform_local_polygon(_WALL_LOCAL, wall.x, wall.y, wall.yaw_rad)
+                patch.set_xy(poly)
+                patch.set_facecolor(_wall_color(wall.source))
+                patch.set_visible(True)
+            else:
+                patch.set_visible(False)
+
+        if view_frame == "base_link":
+            ax.set_xlim(e.x - half, e.x + half)
+            ax.set_ylim(e.y - half, e.y + half)
+
+        t_title = (
+            f"t={e.stamp_sec - ego_frames[0].stamp_sec:.1f}s  "
+            f"speed={e.speed_mps:.2f} m/s  view={view_frame}"
+        )
         if fail_reason:
             t_title += "  FAIL: " + ",".join(fail_reason)
+        if frame_walls:
+            names = sorted({w.source for w in frame_walls})
+            t_title += "  walls=" + ",".join(names)
         title.set_text(t_title)
-        return [trail_line, plan_line, ego_patch, title, *npc_patches]
+        return [trail_line, plan_line, ego_patch, title, *npc_patches, *wall_patches]
 
     from matplotlib.animation import FFMpegWriter, FuncAnimation, PillowWriter
 
@@ -274,6 +374,23 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--sample_dt", type=float, default=0.2)
     p.add_argument("--topics-yaml", type=Path, default=None)
     p.add_argument("--vehicle_info_yaml", type=Path, default=None)
+    p.add_argument(
+        "--view_frame",
+        choices=("map", "base_link"),
+        default="map",
+        help="map = fit full path; base_link = ego-centered window",
+    )
+    p.add_argument(
+        "--view_range_m",
+        type=float,
+        default=40.0,
+        help="Half-extent [m] for base_link view (ignored for map)",
+    )
+    p.add_argument(
+        "--no_planning_factors",
+        action="store_true",
+        help="Skip virtual walls from /planning/planning_factors/*",
+    )
     args = p.parse_args(argv)
 
     goal = tuple(args.goal_pose) if args.goal_pose else None
@@ -287,6 +404,9 @@ def main(argv: list[str] | None = None) -> int:
         sample_dt=args.sample_dt,
         topics=load_topics(args.topics_yaml),
         vehicle_info_yaml=args.vehicle_info_yaml,
+        view_frame=args.view_frame,
+        view_range_m=args.view_range_m,
+        show_planning_factors=not args.no_planning_factors,
     )
     print(f"[done] video → {path}")
     return 0
