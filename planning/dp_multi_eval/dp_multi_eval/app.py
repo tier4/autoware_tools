@@ -12,7 +12,11 @@ from typing import Any
 
 import yaml
 
-from dp_multi_eval.build_dashboard import build_dashboard
+from dp_multi_eval.build_dashboard import (
+    build_dashboard,
+    collect_stop_scatter_points,
+    render_stop_scatter_section,
+)
 from dp_multi_eval.path_picker import pick_folder
 from dp_multi_eval.process_utils import cleanup_evaluation_processes, stop_pid_group
 
@@ -574,20 +578,183 @@ def main() -> None:
             st.caption("This page does not auto-refresh in all Streamlit versions — click Refresh.")
 
     with tab_results:
-        st.subheader("Results dashboard")
+        st.subheader("Results")
         render_stop_run_controls(results_root / STATE_FILE_NAME, key_prefix="results")
-        dashboards = sorted(results_root.glob("*/dashboard.html"), key=lambda p: p.stat().st_mtime)
-        if not dashboards:
+        manifests = sorted(results_root.glob("*/manifest.json"), key=lambda p: p.stat().st_mtime)
+        if not manifests:
             st.info("No results yet — start an evaluation from the Setup tab.")
         else:
-            dash = dashboards[-1]
-            st.write(f"Showing `{dash}`")
-            st.caption(
-                "The dashboard auto-refreshes every 5s while jobs are pending or running. "
-                "Click Refresh now on Live Progress to reload Streamlit."
-            )
-            # Prefer file path so the iframe can load scripts / refresh meta tags.
-            st.iframe(dash, height=900)
+            manifest_path = manifests[-1]
+            run_dir = manifest_path.parent
+            st.caption(f"Latest run: `{run_dir}`")
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                st.error(f"Could not read {manifest_path}")
+                manifest = None
+
+            if manifest:
+                jobs = manifest.get("jobs", [])
+                stop_points = collect_stop_scatter_points(jobs)
+
+                # KPI strip from completed metrics
+                n_done = sum(1 for j in jobs if j.get("status") == "done")
+                n_pass = 0
+                goal_ok = 0
+                for job in jobs:
+                    mp = Path(job.get("output_dir", "")) / "metrics.json"
+                    if not mp.is_file():
+                        continue
+                    try:
+                        m = json.loads(mp.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        continue
+                    if m.get("pass"):
+                        n_pass += 1
+                    g = m.get("goal_stop_precision") or {}
+                    if g.get("status") == "ok":
+                        goal_ok += 1
+
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("Jobs done", f"{n_done}/{len(jobs)}")
+                k2.metric("Pass", f"{n_pass}/{max(n_done, 1)}")
+                k3.metric("Stops on map", f"{len(stop_points)}")
+                k4.metric("Goal reached", f"{goal_ok}/{max(n_done, 1)}")
+
+                lat_tol, lon_tol = 2.0, 2.0
+                precision_rows: list[dict[str, Any]] = []
+                for job in jobs:
+                    mp = Path(job.get("output_dir", "")) / "metrics.json"
+                    if not mp.is_file():
+                        continue
+                    try:
+                        metrics = json.loads(mp.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        continue
+                    thr = metrics.get("thresholds") or {}
+                    if isinstance(thr.get("goal_lateral_tolerance_m"), (int, float)):
+                        lat_tol = float(thr["goal_lateral_tolerance_m"])
+                    if isinstance(thr.get("goal_longitudinal_tolerance_m"), (int, float)):
+                        lon_tol = float(thr["goal_longitudinal_tolerance_m"])
+                    goal = metrics.get("goal_stop_precision", {}) or {}
+                    bag = str(job.get("bag_key") or "")
+                    precision_rows.append(
+                        {
+                            "id": bag,
+                            "scenario": bag,
+                            "model": job.get("model_name") or "",
+                            "pass": bool(metrics.get("pass")),
+                            "goal_status": goal.get("status"),
+                            "pos_m": goal.get("position_error_m"),
+                            "lat_m": goal.get("lateral_m"),
+                            "lon_m": goal.get("longitudinal_m"),
+                            "abs_lat_m": goal.get("abs_lateral_m"),
+                            "abs_lon_m": goal.get("abs_longitudinal_m"),
+                            "heading_deg": goal.get("heading_error_deg"),
+                            "samples": goal.get("sample_count"),
+                            "flagged": goal.get("flagged"),
+                        }
+                    )
+
+                # Build compact HTML table for the unified panel
+                def _cell(v: Any, nd: int = 2) -> str:
+                    if isinstance(v, (int, float)) and v == v:  # not NaN
+                        return f"{float(v):.{nd}f}"
+                    return "—"
+
+                table_rows = []
+                for r in precision_rows:
+                    cls = "pass" if r["pass"] else "fail"
+                    label = "PASS" if r["pass"] else "FAIL"
+                    table_rows.append(
+                        "<tr>"
+                        f"<td><b>{r['id']}</b></td>"
+                        f"<td>{r['scenario']}</td>"
+                        f"<td>{r['model']}</td>"
+                        f"<td class='{cls}'>{label}</td>"
+                        f"<td>{r['goal_status']}</td>"
+                        f"<td>{_cell(r['pos_m'])}</td>"
+                        f"<td>{_cell(r['lat_m'])}</td>"
+                        f"<td>{_cell(r['lon_m'])}</td>"
+                        f"<td>{_cell(r['heading_deg'])}</td>"
+                        "</tr>"
+                    )
+                precision_table = (
+                    "<table class='summary'>"
+                    "<tr><th>ID</th><th>Scenario</th><th>Model</th><th>Result</th>"
+                    "<th>Status</th><th>pos</th><th>lat</th><th>lon</th><th>yaw</th></tr>"
+                    + "".join(table_rows)
+                    + "</table>"
+                )
+                scatter = render_stop_scatter_section(
+                    stop_points,
+                    lat_tol_m=lat_tol,
+                    lon_tol_m=lon_tol,
+                    precision_table_html=precision_table if precision_rows else "",
+                )
+
+                _SCATTER_CSS = """
+<style>
+body{margin:0;background:#0b0f14;color:#e7ecf1;font-family:system-ui,sans-serif}
+.goal-stop-panel{background:#141c26;border:1px solid #2a3440;border-radius:10px;padding:14px 16px}
+.goal-stop-panel>h2{margin:0 0 6px;font-size:1.15rem}
+.scatter-card{background:#1a2330;border:1px solid #2a3440;border-radius:8px;padding:12px;margin:8px 0}
+.scatter-row{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start}
+.hint{color:#9eb4c8;font-size:12px}
+.precision-table-wrap{margin-top:12px}
+.precision-table-wrap h3{margin:8px 0 4px;font-size:14px}
+table.summary{border-collapse:collapse;font-size:12px;color:#e7ecf1;width:100%}
+table.summary th,table.summary td{border:1px solid #2a3440;padding:4px 8px;text-align:left}
+td.pass{color:#7dffa6}td.fail{color:#ffb4b4}
+.swatch{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}
+.swatch.pt-pass{background:#3dffa6}.swatch.pt-fail{background:#ff6b6b}
+.swatch.avg{background:#ffd866}.avg-row td{color:#ffd866}
+svg.stop-scatter .plot-bg{fill:#0f1419}
+svg.stop-scatter .grid{stroke:#243040}
+svg.stop-scatter .axis{stroke:#6a7f96;stroke-width:1.5}
+svg.stop-scatter .tol-box{fill:rgba(125,170,255,.08);stroke:#7daaff;stroke-dasharray:6 4}
+svg.stop-scatter .goal-arrow{fill:#c8d6e8;stroke:#7daaff;stroke-width:1.2}
+svg.stop-scatter .goal-label,.pt-id,.avg-label{fill:#e7ecf1;font-size:12px;font-weight:700}
+svg.stop-scatter .pt-pass{fill:#3dffa6;stroke:#0f1419}
+svg.stop-scatter .pt-fail{fill:#ff6b6b;stroke:#0f1419}
+svg.stop-scatter .avg-ring{fill:none;stroke:#ffd866;stroke-width:2.5}
+svg.stop-scatter .avg-arrow{fill:#ffd866;stroke:#0f1419}
+svg.stop-scatter .triad-x{stroke:#ff6b6b;fill:#ff6b6b;stroke-width:2.5}
+svg.stop-scatter .triad-y{stroke:#3dffa6;fill:#3dffa6;stroke-width:2.5}
+svg.stop-scatter .triad-origin{fill:#e7ecf1}
+svg.stop-scatter .triad-label{fill:#c9d4e0;font-size:11px}
+svg.stop-scatter .tick{fill:#6a7f96;font-size:10px}
+svg.stop-scatter .axis-title,svg.stop-scatter .axis-title-y{fill:#9eb4c8;font-size:11px;text-anchor:middle}
+</style>
+"""
+                panel_height = 720 if stop_points else 220
+                if precision_rows:
+                    panel_height = min(1100, panel_height + 40 + 28 * len(precision_rows))
+                st.components.v1.html(_SCATTER_CSS + scatter, height=panel_height, scrolling=True)
+
+                if precision_rows:
+                    with st.expander("Stop precision table (sortable)", expanded=False):
+                        st.dataframe(precision_rows, use_container_width=True, hide_index=True)
+
+                dash = run_dir / "dashboard.html"
+                # Keep HTML dashboard in sync for the expander / external browser
+                try:
+                    build_dashboard(manifest, dash)
+                except OSError:
+                    pass
+                with st.expander("Full HTML dashboard (PASS/FAIL matrix, rates, videos)", expanded=False):
+                    if dash.is_file():
+                        st.caption(
+                            "Same run as above — scenario × model matrix and live progress. "
+                            f"File: `{dash}`"
+                        )
+                        st.iframe(dash, height=900)
+                    else:
+                        st.info("dashboard.html not found for this run.")
+
+                if st.button("Refresh results", key="results_refresh"):
+                    st.rerun()
+
 
 
 if __name__ == "__main__":

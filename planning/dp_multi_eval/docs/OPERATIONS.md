@@ -148,12 +148,14 @@ Stale Autoware processes on `ROS_DOMAIN_ID=10` cause `planning_stack_not_ready` 
 
 Configured in `config/thresholds.yaml`:
 
-| Metric | Default threshold | Pass impact |
-|--------|-------------------|-------------|
-| Stuck | ≤ 0.05 m/s for ≥ 45 s (away from goal) | **Fail** |
-| Collision | min distance < 0.1 m to vehicle-class NPCs | **Fail** |
-| Out of boundary | any corner outside Lanelet2 drivable area | **Fail** (if map loaded) |
-| Goal stop precision | avg position error when speed ≤ 0.2 m/s within 2 m of goal | **Fail** if flagged |
+| Metric | What / rate definition | Default fail when |
+|--------|------------------------|-------------------|
+| **stuck_rate** | Time fraction ego is nearly stopped (≤ 0.05 m/s) away from goal for ≥ 45 s contiguous. `rate = stuck_duration / bag_duration` | Any stuck event (`flagged`) |
+| **collision_rate** | Frame fraction ego footprint ≤ 0.1 m from vehicle-class NPCs. `rate = colliding_frames / ego_frames` | Any colliding frame |
+| **out_of_boundary** (`oob_rate`) | Frame fraction where ego footprint **crosses** Lanelet2 `road_border` / `curbstone` (or is within `oob_margin_m`). `rate = oob_frames / ego_frames` | Any OOB frame (if map loaded and borders exist) |
+| **goal_stop_precision** | Avg stop error in **goal frame**: position, **lateral**, **longitudinal** [m], heading [deg], over low-speed samples near goal | `|lat|`, `|lon|`, or position &gt; tolerance (default 2 m each) |
+
+Each metric block in `metrics.json` includes a `description` string. The HTML dashboard and Streamlit **Results** tab share one **Goal stop precision** panel (RViz-style pose map + per-rosbag table). The full PASS/FAIL matrix lives in `dashboard.html` (also under Results → expander).
 
 Collision skips `UNKNOWN` / `PEDESTRIAN` and zero-size objects. Goal precision averages valid low-speed samples near goal; stuck scenes use `excluded_stuck`.
 

@@ -251,14 +251,14 @@ Stale processes on `ROS_DOMAIN_ID=10` cause `planning_stack_not_ready` for every
 
 Thresholds: `config/thresholds.yaml`
 
-| Metric | Default | Fails run when |
-|--------|---------|----------------|
-| Stuck | ≤ 0.05 m/s for ≥ 45 s | flagged |
-| Collision | &lt; 0.1 m to vehicle NPCs | flagged |
-| Out of boundary | outside Lanelet2 drivable | flagged (if map loaded) |
-| Goal stop | avg error at low speed near goal | flagged |
+| Metric | Rate / value | Fails when |
+|--------|--------------|------------|
+| stuck_rate | stuck_duration / bag_duration | flagged stuck event |
+| collision_rate | colliding_frames / ego_frames | any collision frame |
+| oob_rate | footprint crosses road_border/curbstone (oob_frames / ego_frames) | any OOB frame (map + borders) |
+| goal_stop | avg pos / **lateral** / **longitudinal** near goal | |lat|, |lon|, or pos over tolerance |
 
-See [OPERATIONS.md](OPERATIONS.md#metrics-and-pass-criteria) for details on collision filtering and goal averaging.
+Descriptions are embedded in each `metrics.json` block and shown on `dashboard.html`. Details: [OPERATIONS.md](OPERATIONS.md#metrics-and-pass-criteria).
 
 ---
 

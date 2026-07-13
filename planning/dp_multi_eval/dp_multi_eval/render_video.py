@@ -6,6 +6,7 @@ import argparse
 import bisect
 import json
 import sys
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -17,18 +18,42 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon as MplPolygon
 from matplotlib.patches import Patch
 
-from dp_multi_eval.bag_reader import BagSeries, TrajectorySample, downsample_ego, load_bag_series
+from dp_multi_eval.bag_reader import (
+    BagSeries,
+    TrajectorySample,
+    TURN_LEFT,
+    TURN_RIGHT,
+    downsample_ego,
+    load_bag_series,
+)
 from dp_multi_eval.geometry import box_local, load_vehicle_footprint, transform_local_polygon
 from dp_multi_eval.topics import TopicSet, load_topics
 
-# Virtual wall colors by planning-factor source (topic leaf / module name)
-_WALL_COLORS = {
-    "modifier_obstacle_stop": "#e41a1c",
-    "diffusion_planner": "#ff7f00",
-    "stop_point_fixer": "#984ea3",
+# Virtual walls — high-contrast (avoid ego red #d62728 / NPC green)
+_WALL_STYLE = {
+    # face, edge, short label
+    "modifier_obstacle_stop": ("#ff00aa", "#ffffff", "obst_stop"),
+    "diffusion_planner": ("#ffcc00", "#000000", "diff_plan"),
+    "stop_point_fixer": ("#00e5ff", "#000000", "stop_fix"),
 }
-_WALL_DEFAULT_COLOR = "#377eb8"
-_WALL_LOCAL = box_local(0.15, 5.0)  # thin along heading, wide laterally (RViz-like)
+_WALL_DEFAULT_STYLE = ("#7c4dff", "#ffffff", "wall")
+# Thicker than RViz default so walls stay visible in top-down preview
+_WALL_LOCAL = box_local(0.55, 6.5)
+
+# Blinker chevrons in base_link (left / right of ego)
+_BLINKER_LEFT_LOCAL = [(-0.5, 1.6), (0.8, 2.4), (-0.5, 3.2)]
+_BLINKER_RIGHT_LOCAL = [(-0.5, -1.6), (0.8, -2.4), (-0.5, -3.2)]
+
+
+@dataclass
+class MapOverlay:
+    centerlines: list[list[tuple[float, float]]] = field(default_factory=list)
+    left_bounds: list[list[tuple[float, float]]] = field(default_factory=list)
+    right_bounds: list[list[tuple[float, float]]] = field(default_factory=list)
+    crosswalks: list[list[tuple[float, float]]] = field(default_factory=list)
+    stop_lines: list[list[tuple[float, float]]] = field(default_factory=list)
+    traffic_signs: list[tuple[float, float, str]] = field(default_factory=list)  # x,y,label
+    road_borders: list[list[tuple[float, float]]] = field(default_factory=list)
 
 
 @lru_cache(maxsize=4)
@@ -39,7 +64,27 @@ def _load_lanelet_map(osm_path: str):
     return load(osm_path, MGRSProjector(Origin(0.0, 0.0)))
 
 
-def _load_map_lines(
+def _lanelet_attr(obj: Any, key: str, default: str = "") -> str:
+    try:
+        attrs = obj.attributes
+        if key in attrs:
+            return str(attrs[key])
+    except Exception:  # noqa: BLE001
+        pass
+    return default
+
+
+def _pts_in_bbox(
+    pts: list[tuple[float, float]], bx0: float, bx1: float, by0: float, by1: float
+) -> bool:
+    return any(bx0 <= x <= bx1 and by0 <= y <= by1 for x, y in pts)
+
+
+def _linestring_xy(ls: Any) -> list[tuple[float, float]]:
+    return [(float(p.x), float(p.y)) for p in ls]
+
+
+def _load_map_overlay(
     map_path: Path | None,
     *,
     xmin: float,
@@ -47,29 +92,162 @@ def _load_map_lines(
     ymin: float,
     ymax: float,
     margin: float = 40.0,
-) -> list[list[tuple[float, float]]]:
+) -> MapOverlay:
+    overlay = MapOverlay()
     if map_path is None:
-        return []
+        return overlay
     map_path = map_path.expanduser().resolve()
     osm = map_path if map_path.suffix == ".osm" else map_path / "lanelet2_map.osm"
     if not osm.is_file():
-        return []
+        return overlay
     try:
         lanelet_map = _load_lanelet_map(str(osm))
     except Exception:  # noqa: BLE001
-        return []
+        return overlay
 
     bx0, bx1 = xmin - margin, xmax + margin
     by0, by1 = ymin - margin, ymax + margin
-    lines: list[list[tuple[float, float]]] = []
+
     for ll in lanelet_map.laneletLayer:
-        center = [(p.x, p.y) for p in ll.centerline]
-        if len(center) < 2:
+        subtype = _lanelet_attr(ll, "subtype")
+        center = _linestring_xy(ll.centerline)
+        left = _linestring_xy(ll.leftBound)
+        right = _linestring_xy(ll.rightBound)
+        if subtype == "crosswalk":
+            try:
+                poly = [(float(p.x), float(p.y)) for p in ll.polygon2d()]
+            except Exception:  # noqa: BLE001
+                poly = left + list(reversed(right)) if left and right else center
+            if len(poly) >= 3 and _pts_in_bbox(poly, bx0, bx1, by0, by1):
+                overlay.crosswalks.append(poly)
             continue
-        if not any(bx0 <= x <= bx1 and by0 <= y <= by1 for x, y in center):
+        if subtype not in ("", "road", "road_shoulder", "bicycle_lane", "highway", "play_street"):
+            # skip walkway / pedestrian_lane clutter unless bounds needed
+            if subtype in ("walkway", "pedestrian_lane"):
+                continue
+        if center and _pts_in_bbox(center, bx0, bx1, by0, by1):
+            if len(center) >= 2:
+                overlay.centerlines.append(center)
+            if len(left) >= 2:
+                overlay.left_bounds.append(left)
+            if len(right) >= 2:
+                overlay.right_bounds.append(right)
+
+    for poly in lanelet_map.polygonLayer:
+        ptype = _lanelet_attr(poly, "type")
+        if ptype not in ("crosswalk_polygon", "pedestrian_marking", "zebra_marking"):
             continue
-        lines.append(center)
-    return lines
+        try:
+            pts = [(float(p.x), float(p.y)) for p in poly]
+        except Exception:  # noqa: BLE001
+            continue
+        if len(pts) >= 3 and _pts_in_bbox(pts, bx0, bx1, by0, by1):
+            overlay.crosswalks.append(pts)
+
+    for ls in lanelet_map.lineStringLayer:
+        ltype = _lanelet_attr(ls, "type")
+        subtype = _lanelet_attr(ls, "subtype")
+        pts = _linestring_xy(ls)
+        if len(pts) < 2 or not _pts_in_bbox(pts, bx0, bx1, by0, by1):
+            continue
+        if ltype == "stop_line":
+            overlay.stop_lines.append(pts)
+        elif ltype == "road_border":
+            overlay.road_borders.append(pts)
+        elif ltype == "traffic_sign":
+            mid = pts[len(pts) // 2]
+            label = subtype or "sign"
+            if label in ("?", "unknown"):
+                label = "sign"
+            overlay.traffic_signs.append((mid[0], mid[1], label))
+        elif ltype == "zebra_marking":
+            overlay.crosswalks.append(pts)
+
+    return overlay
+
+
+def _draw_map_overlay(ax: Any, overlay: MapOverlay) -> list[Any]:
+    artists: list[Any] = []
+    for line in overlay.road_borders:
+        (ln,) = ax.plot(
+            [p[0] for p in line], [p[1] for p in line],
+            color="#6e7681", lw=1.0, alpha=0.7, zorder=0,
+        )
+        artists.append(ln)
+    for line in overlay.left_bounds + overlay.right_bounds:
+        (ln,) = ax.plot(
+            [p[0] for p in line], [p[1] for p in line],
+            color="#9aa0a6", lw=0.7, alpha=0.85, zorder=0,
+        )
+        artists.append(ln)
+    for line in overlay.centerlines:
+        (ln,) = ax.plot(
+            [p[0] for p in line], [p[1] for p in line],
+            color="#c5c9ce", lw=0.35, alpha=0.6, zorder=0, linestyle="--",
+        )
+        artists.append(ln)
+    for poly in overlay.crosswalks:
+        if len(poly) >= 3 and abs(poly[0][0] - poly[-1][0]) + abs(poly[0][1] - poly[-1][1]) > 1e-3:
+            patch = MplPolygon(
+                poly, closed=True, facecolor="#f0e68c", edgecolor="#c4a000",
+                alpha=0.35, lw=0.6, zorder=0.5,
+            )
+            ax.add_patch(patch)
+            artists.append(patch)
+        else:
+            (ln,) = ax.plot(
+                [p[0] for p in poly], [p[1] for p in poly],
+                color="#c4a000", lw=1.2, alpha=0.7, zorder=0.5,
+            )
+            artists.append(ln)
+    for line in overlay.stop_lines:
+        (ln,) = ax.plot(
+            [p[0] for p in line], [p[1] for p in line],
+            color="#d62728", lw=2.0, alpha=0.9, zorder=1,
+        )
+        artists.append(ln)
+    if overlay.traffic_signs:
+        xs = [s[0] for s in overlay.traffic_signs]
+        ys = [s[1] for s in overlay.traffic_signs]
+        sc = ax.scatter(xs, ys, marker="^", s=28, c="#9467bd", zorder=1, edgecolors="k", linewidths=0.3)
+        artists.append(sc)
+        # Only annotate a few nearby stop signs to avoid clutter
+        for x, y, label in overlay.traffic_signs:
+            if "stop" in label.lower():
+                artists.append(
+                    ax.text(x, y, "STOP", fontsize=5, color="#9467bd", ha="left", va="bottom", zorder=1)
+                )
+    return artists
+
+
+def _turn_state_at(
+    samples: list,
+    stamp_sec: float,
+    *,
+    prefer_source: str = "cmd",
+    max_age_sec: float = 1.0,
+) -> tuple[int, str]:
+    """Return (state, source) preferring planner cmd over vehicle status."""
+    if not samples:
+        return 1, ""
+    stamps = [s.stamp_sec for s in samples]
+    end = bisect.bisect_right(stamps, stamp_sec)
+    best_cmd = None
+    best_status = None
+    for s in samples[:end]:
+        if stamp_sec - s.stamp_sec > max_age_sec:
+            continue
+        if s.source == "cmd":
+            best_cmd = s
+        else:
+            best_status = s
+    if prefer_source == "cmd" and best_cmd is not None:
+        return best_cmd.state, best_cmd.source
+    if best_status is not None:
+        return best_status.state, best_status.source
+    if best_cmd is not None:
+        return best_cmd.state, best_cmd.source
+    return 1, ""
 
 
 def _trajectory_at(
@@ -138,9 +316,9 @@ def _index_walls_per_frame(
     return out
 
 
-def _wall_color(source: str) -> str:
+def _wall_style(source: str) -> tuple[str, str, str]:
     leaf = source.rstrip("/").split("/")[-1]
-    return _WALL_COLORS.get(leaf, _WALL_DEFAULT_COLOR)
+    return _WALL_STYLE.get(leaf, _WALL_DEFAULT_STYLE)
 
 
 def render_video(
@@ -172,6 +350,8 @@ def render_video(
             velocity_topic=topics.vehicle_status_velocity,
             trajectory_topic=topics.trajectory,
             planning_factor_topics=topics.planning_factors if show_planning_factors else [],
+            turn_indicators_status_topic=topics.turn_indicators_status,
+            turn_indicators_cmd_topic=topics.turn_indicators_cmd,
             object_sample_dt=sample_dt,
             trajectory_sample_dt=sample_dt,
             factor_sample_dt=sample_dt,
@@ -197,10 +377,11 @@ def render_video(
     xmin, xmax = min(xs) - pad, max(xs) + pad
     ymin, ymax = min(ys) - pad, max(ys) + pad
 
-    map_lines = _load_map_lines(map_path, xmin=xmin, xmax=xmax, ymin=ymin, ymax=ymax)
+    map_overlay = _load_map_overlay(map_path, xmin=xmin, xmax=xmax, ymin=ymin, ymax=ymax)
     objs = series.objects
     trajectories = series.trajectories
     walls = series.virtual_walls if show_planning_factors else []
+    turn_samples = series.turn_indicators
     ego_stamps = [e.stamp_sec for e in series.ego]
     trail_ends = [bisect.bisect_right(ego_stamps, e.stamp_sec) for e in ego_frames]
     objects_per_frame = _index_objects_per_frame(objs, ego_frames, sample_dt)
@@ -222,24 +403,23 @@ def render_video(
         if metrics.get("goal_stop_precision", {}).get("flagged"):
             fail_reason.append("GOAL")
 
-    # Static map layer — draw once, reuse via artist list
-    map_artists = []
-    for line in map_lines:
-        (ln,) = ax.plot(
-            [p[0] for p in line],
-            [p[1] for p in line],
-            color="#bbbbbb",
-            lw=0.4,
-            zorder=0,
-        )
-        map_artists.append(ln)
+    _draw_map_overlay(ax, map_overlay)
 
     trail_line, = ax.plot([], [], color="#1f77b4", lw=1.2, alpha=0.85, zorder=1, label="ego path")
     plan_line, = ax.plot([], [], color="#ff7f0e", lw=2.2, alpha=0.95, zorder=2, label="planned trajectory")
     ego_patch = MplPolygon([[0, 0]], closed=True, facecolor="#d62728", edgecolor="k", alpha=0.8, zorder=3)
     ax.add_patch(ego_patch)
+    blinker_left = MplPolygon(
+        [[0, 0]], closed=True, facecolor="#ffdd57", edgecolor="#b8860b", alpha=0.0, zorder=6, lw=0.8
+    )
+    blinker_right = MplPolygon(
+        [[0, 0]], closed=True, facecolor="#ffdd57", edgecolor="#b8860b", alpha=0.0, zorder=6, lw=0.8
+    )
+    ax.add_patch(blinker_left)
+    ax.add_patch(blinker_right)
     npc_patches: list[MplPolygon] = []
     wall_patches: list[MplPolygon] = []
+    wall_labels: list[Any] = []
     goal_artist = None
     if goal is not None:
         goal_artist = ax.scatter([], [], marker="*", s=180, c="gold", zorder=4, edgecolors="k")
@@ -259,11 +439,18 @@ def render_video(
     legend_handles = [
         Patch(facecolor="#1f77b4", edgecolor="none", label="ego path"),
         Patch(facecolor="#ff7f0e", edgecolor="none", label="planned trajectory"),
+        Patch(facecolor="#9aa0a6", edgecolor="none", label="lane bounds"),
+        Patch(facecolor="#f0e68c", edgecolor="#c4a000", label="crosswalk"),
+        Patch(facecolor="#8b0000", edgecolor="none", label="stop line"),
+        Patch(facecolor="#9467bd", edgecolor="k", label="traffic sign"),
+        Patch(facecolor="#ffdd57", edgecolor="#b8860b", label="blinker ON"),
     ]
     if show_planning_factors:
-        for name, color in _WALL_COLORS.items():
-            legend_handles.append(Patch(facecolor=color, edgecolor="k", alpha=0.65, label=name))
-    ax.legend(handles=legend_handles, loc="upper right", fontsize=7, framealpha=0.7)
+        for name, (face, edge, short) in _WALL_STYLE.items():
+            legend_handles.append(
+                Patch(facecolor=face, edgecolor=edge, linewidth=1.5, alpha=0.9, label=f"wall:{short}")
+            )
+    ax.legend(handles=legend_handles, loc="upper right", fontsize=6, framealpha=0.7)
 
     title = ax.set_title("")
     half = max(5.0, float(view_range_m))
@@ -283,6 +470,20 @@ def render_video(
         ego_poly = transform_local_polygon(footprint, e.x, e.y, e.yaw_rad)
         ego_patch.set_xy(ego_poly)
 
+        turn_state, turn_src = _turn_state_at(turn_samples, e.stamp_sec)
+        # Blink ~2 Hz when on
+        blink_on = (int(e.stamp_sec * 4) % 2) == 0
+        if turn_state == TURN_LEFT and blink_on:
+            blinker_left.set_xy(transform_local_polygon(_BLINKER_LEFT_LOCAL, e.x, e.y, e.yaw_rad))
+            blinker_left.set_alpha(0.95)
+        else:
+            blinker_left.set_alpha(0.0)
+        if turn_state == TURN_RIGHT and blink_on:
+            blinker_right.set_xy(transform_local_polygon(_BLINKER_RIGHT_LOCAL, e.x, e.y, e.yaw_rad))
+            blinker_right.set_alpha(0.95)
+        else:
+            blinker_right.set_alpha(0.0)
+
         frame_objs = objects_per_frame[idx]
         while len(npc_patches) < len(frame_objs):
             patch = MplPolygon([[0, 0]], closed=True, facecolor="#2ca02c", edgecolor="k", alpha=0.5, zorder=2)
@@ -301,26 +502,64 @@ def render_video(
 
         frame_walls = walls_per_frame[idx]
         while len(wall_patches) < len(frame_walls):
+            face, edge, _ = _WALL_DEFAULT_STYLE
             patch = MplPolygon(
                 [[0, 0]],
                 closed=True,
-                facecolor=_WALL_DEFAULT_COLOR,
-                edgecolor="k",
-                alpha=0.7,
-                zorder=5,
-                linewidth=0.6,
+                facecolor=face,
+                edgecolor=edge,
+                alpha=0.92,
+                zorder=8,
+                linewidth=2.0,
+                hatch="///",
             )
             ax.add_patch(patch)
             wall_patches.append(patch)
+            wall_labels.append(
+                ax.text(
+                    0.0,
+                    0.0,
+                    "",
+                    fontsize=7,
+                    fontweight="bold",
+                    color="white",
+                    ha="center",
+                    va="bottom",
+                    zorder=9,
+                    bbox={
+                        "boxstyle": "round,pad=0.15",
+                        "facecolor": face,
+                        "edgecolor": edge,
+                        "linewidth": 1.0,
+                        "alpha": 0.95,
+                    },
+                )
+            )
         for wi, patch in enumerate(wall_patches):
+            label = wall_labels[wi]
             if wi < len(frame_walls):
                 wall = frame_walls[wi]
+                face, edge, short = _wall_style(wall.source)
                 poly = transform_local_polygon(_WALL_LOCAL, wall.x, wall.y, wall.yaw_rad)
                 patch.set_xy(poly)
-                patch.set_facecolor(_wall_color(wall.source))
+                patch.set_facecolor(face)
+                patch.set_edgecolor(edge)
                 patch.set_visible(True)
+                label.set_position((wall.x, wall.y + 1.2))
+                label.set_text(short)
+                label.set_bbox(
+                    {
+                        "boxstyle": "round,pad=0.15",
+                        "facecolor": face,
+                        "edgecolor": edge,
+                        "linewidth": 1.0,
+                        "alpha": 0.95,
+                    }
+                )
+                label.set_visible(True)
             else:
                 patch.set_visible(False)
+                label.set_visible(False)
 
         if view_frame == "base_link":
             ax.set_xlim(e.x - half, e.x + half)
@@ -330,13 +569,27 @@ def render_video(
             f"t={e.stamp_sec - ego_frames[0].stamp_sec:.1f}s  "
             f"speed={e.speed_mps:.2f} m/s  view={view_frame}"
         )
+        if turn_state == TURN_LEFT:
+            t_title += f"  blinker=LEFT({turn_src or '?'})"
+        elif turn_state == TURN_RIGHT:
+            t_title += f"  blinker=RIGHT({turn_src or '?'})"
         if fail_reason:
             t_title += "  FAIL: " + ",".join(fail_reason)
         if frame_walls:
             names = sorted({w.source for w in frame_walls})
             t_title += "  walls=" + ",".join(names)
         title.set_text(t_title)
-        return [trail_line, plan_line, ego_patch, title, *npc_patches, *wall_patches]
+        return [
+            trail_line,
+            plan_line,
+            ego_patch,
+            blinker_left,
+            blinker_right,
+            title,
+            *npc_patches,
+            *wall_patches,
+            *wall_labels,
+        ]
 
     from matplotlib.animation import FFMpegWriter, FuncAnimation, PillowWriter
 

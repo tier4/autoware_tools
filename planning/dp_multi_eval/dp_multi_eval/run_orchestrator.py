@@ -160,6 +160,8 @@ def _process_job(payload: dict[str, Any]) -> dict[str, Any]:
             velocity_topic=topics.vehicle_status_velocity,
             trajectory_topic=topics.trajectory,
             planning_factor_topics=topics.planning_factors if show_factors else [],
+            turn_indicators_status_topic=topics.turn_indicators_status,
+            turn_indicators_cmd_topic=topics.turn_indicators_cmd,
             object_sample_dt=sample_dt,
             trajectory_sample_dt=video_sample_dt,
             factor_sample_dt=video_sample_dt,

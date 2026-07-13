@@ -3,5 +3,14 @@ stuck_speed_mps: 0.05
 stuck_duration_sec: 45.0
 goal_stop_speed_mps: 0.2
 goal_tolerance_m: 2.0
+# Goal-frame stop error (same default as position; override for tighter lateral/longitudinal QA)
+goal_lateral_tolerance_m: 2.0
+goal_longitudinal_tolerance_m: 2.0
+# OOB: ego footprint vs Lanelet2 LineString type ∈ oob_boundary_types
+oob_boundary_types:
+  - road_border
+  - curbstone
 oob_margin_m: 0.0
+oob_search_radius_m: 80.0
 collision_distance_m: 0.1
+sample_dt: 0.2

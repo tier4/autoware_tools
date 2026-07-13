@@ -11,6 +11,8 @@ vehicle_status_steering: /vehicle/status/steering_status
 control_command: /control/command/control_cmd
 acceleration: /localization/acceleration
 route_state: /api/routing/state
+turn_indicators_status: /vehicle/status/turn_indicators_status
+turn_indicators_cmd: /planning/turn_indicators_cmd
 
 # Virtual-wall sources for preview video (PlanningFactorArray)
 planning_factors:

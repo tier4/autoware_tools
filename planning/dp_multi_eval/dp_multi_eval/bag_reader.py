@@ -68,6 +68,19 @@ class VirtualWallSample:
     detail: str = ""
 
 
+# TurnIndicatorsReport / Command: DISABLE=1, ENABLE_LEFT=2, ENABLE_RIGHT=3
+TURN_DISABLE = 1
+TURN_LEFT = 2
+TURN_RIGHT = 3
+
+
+@dataclass
+class TurnIndicatorSample:
+    stamp_sec: float
+    state: int  # TURN_* 
+    source: str  # "status" | "cmd"
+
+
 @dataclass
 class BagSeries:
     ego: list[EgoSample] = field(default_factory=list)
@@ -75,6 +88,7 @@ class BagSeries:
     trajectories: list[TrajectorySample] = field(default_factory=list)
     velocity_mps: list[tuple[float, float]] = field(default_factory=list)  # (t, speed)
     virtual_walls: list[VirtualWallSample] = field(default_factory=list)
+    turn_indicators: list[TurnIndicatorSample] = field(default_factory=list)
 
     @property
     def duration_sec(self) -> float:
@@ -166,6 +180,8 @@ def load_bag_series(
     velocity_topic: str = "/vehicle/status/velocity_status",
     trajectory_topic: str | None = "/planning/trajectory",
     planning_factor_topics: list[str] | None = None,
+    turn_indicators_status_topic: str | None = "/vehicle/status/turn_indicators_status",
+    turn_indicators_cmd_topic: str | None = "/planning/turn_indicators_cmd",
     object_sample_dt: float | None = None,
     trajectory_sample_dt: float | None = None,
     factor_sample_dt: float | None = None,
@@ -177,6 +193,10 @@ def load_bag_series(
     if trajectory_topic:
         topics.append(trajectory_topic)
     topics.extend(factor_topics)
+    if turn_indicators_status_topic:
+        topics.append(turn_indicators_status_topic)
+    if turn_indicators_cmd_topic:
+        topics.append(turn_indicators_cmd_topic)
 
     label_names = {
         0: "UNKNOWN",
@@ -289,12 +309,23 @@ def load_bag_series(
                             detail=detail or _BEHAVIOR_NAMES.get(behavior, str(behavior)),
                         )
                     )
+        elif turn_indicators_status_topic and topic == turn_indicators_status_topic:
+            state = int(getattr(msg, "report", TURN_DISABLE) or TURN_DISABLE)
+            series.turn_indicators.append(
+                TurnIndicatorSample(stamp_sec=stamp, state=state, source="status")
+            )
+        elif turn_indicators_cmd_topic and topic == turn_indicators_cmd_topic:
+            state = int(getattr(msg, "command", TURN_DISABLE) or TURN_DISABLE)
+            series.turn_indicators.append(
+                TurnIndicatorSample(stamp_sec=stamp, state=state, source="cmd")
+            )
 
     series.ego.sort(key=lambda s: s.stamp_sec)
     series.objects.sort(key=lambda s: s.stamp_sec)
     series.trajectories.sort(key=lambda s: s.stamp_sec)
     series.velocity_mps.sort(key=lambda s: s[0])
     series.virtual_walls.sort(key=lambda s: s.stamp_sec)
+    series.turn_indicators.sort(key=lambda s: s.stamp_sec)
     return series
 
 

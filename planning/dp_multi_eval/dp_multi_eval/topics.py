@@ -27,6 +27,8 @@ class TopicSet:
     control_command: str = "/control/command/control_cmd"
     acceleration: str = "/localization/acceleration"
     route_state: str = "/api/routing/state"
+    turn_indicators_status: str = "/vehicle/status/turn_indicators_status"
+    turn_indicators_cmd: str = "/planning/turn_indicators_cmd"
     planning_factors: list[str] = field(
         default_factory=lambda: list(DEFAULT_PLANNING_FACTOR_TOPICS)
     )
@@ -43,6 +45,8 @@ class TopicSet:
             self.vehicle_status_steering,
             self.control_command,
             self.acceleration,
+            self.turn_indicators_status,
+            self.turn_indicators_cmd,
             *self.planning_factors,
         ]
         # Preserve order, drop duplicates

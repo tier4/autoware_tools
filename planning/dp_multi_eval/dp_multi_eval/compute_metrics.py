@@ -33,9 +33,42 @@ class Thresholds:
     stuck_duration_sec: float = 45.0
     goal_stop_speed_mps: float = 0.2
     goal_tolerance_m: float = 2.0
+    goal_lateral_tolerance_m: float = 2.0
+    goal_longitudinal_tolerance_m: float = 2.0
+    # Clearance to road_border/curbstone: OOB if footprint crosses or dist < margin.
     oob_margin_m: float = 0.0
+    oob_search_radius_m: float = 80.0
     collision_distance_m: float = 0.1
     sample_dt: float = 0.2
+    # Lanelet2 LineString ``type`` attributes treated as uncrossable borders.
+    oob_boundary_types: tuple[str, ...] = ("road_border", "curbstone")
+
+
+METRIC_DESCRIPTIONS = {
+    "stuck_rate": (
+        "Fraction of scenario time the ego is nearly stopped (speed ≤ stuck_speed_mps) "
+        "away from the goal for contiguous stretches ≥ stuck_duration_sec. "
+        "rate = total_stuck_duration / bag_duration."
+    ),
+    "collision_rate": (
+        "Fraction of downsampled ego frames where the ego footprint is within "
+        "collision_distance_m of a vehicle-class NPC (CAR/TRUCK/BUS/TRAILER/MOTORCYCLE/BICYCLE). "
+        "rate = colliding_frames / ego_frames. Pedestrians and UNKNOWN are excluded."
+    ),
+    "out_of_boundary": (
+        "Fraction of downsampled ego frames where the ego footprint crosses an uncrossable "
+        "Lanelet2 LineString (type in oob_boundary_types, default road_border + curbstone), "
+        "or comes within oob_margin_m of one. "
+        "rate = oob_frames / ego_frames. Requires a loaded lanelet map."
+    ),
+    "goal_stop_precision": (
+        "Average stop pose error in the goal frame over low-speed samples "
+        "(speed ≤ goal_stop_speed_mps) within goal_tolerance_m of the goal. "
+        "Reports position, lateral, longitudinal [m] and heading [deg]. "
+        "Fails when |lateral|, |longitudinal|, or position exceeds the configured tolerances. "
+        "Scenes flagged as stuck are excluded (status=excluded_stuck)."
+    ),
+}
 
 
 def load_thresholds(path: Path | None) -> Thresholds:
@@ -43,7 +76,17 @@ def load_thresholds(path: Path | None) -> Thresholds:
         return Thresholds()
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     known = {f.name for f in Thresholds.__dataclass_fields__.values()}  # type: ignore[attr-defined]
-    kwargs = {k: float(v) for k, v in raw.items() if k in known}
+    kwargs: dict[str, Any] = {}
+    for key, value in raw.items():
+        if key not in known:
+            continue
+        if key == "oob_boundary_types":
+            if isinstance(value, (list, tuple)):
+                kwargs[key] = tuple(str(v) for v in value)
+            else:
+                kwargs[key] = (str(value),)
+        else:
+            kwargs[key] = float(value)
     return Thresholds(**kwargs)
 
 
@@ -111,19 +154,32 @@ def metric_stuck(
     goal_y: float,
     thr: Thresholds,
 ) -> dict[str, Any]:
-    """Flag near-zero speed away from goal lasting > stuck_duration_sec."""
+    """Stuck time rate: near-zero speed away from goal lasting > stuck_duration_sec."""
     samples = series.ego
+    duration = series.duration_sec
     if not samples:
         if not series.velocity_mps:
-            return {"flagged": False, "duration_sec": 0.0, "events": [], "status": "no_ego_data"}
+            return {
+                "flagged": False,
+                "rate": 0.0,
+                "duration_sec": 0.0,
+                "bag_duration_sec": 0.0,
+                "events": [],
+                "status": "no_ego_data",
+                "description": METRIC_DESCRIPTIONS["stuck_rate"],
+            }
 
     events = find_stuck_events(samples, goal_x, goal_y, thr)
     total = sum(e["duration_sec"] for e in events)
+    rate = (total / duration) if duration > 1e-9 else 0.0
     return {
         "flagged": bool(events),
+        "rate": rate,
         "duration_sec": total,
+        "bag_duration_sec": duration,
         "events": events,
         "status": "ok",
+        "description": METRIC_DESCRIPTIONS["stuck_rate"],
     }
 
 
@@ -136,21 +192,24 @@ def metric_goal_stop(
     *,
     stuck: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Average stop precision over low-speed samples within goal tolerance.
+    """Average stop precision (position / lateral / longitudinal / heading) near goal.
 
     Scenes flagged as stuck (away from goal) are excluded from goal precision.
     """
     empty = {
         "flagged": True,
         "position_error_m": float("nan"),
-        "heading_error_deg": float("nan"),
         "lateral_m": float("nan"),
         "longitudinal_m": float("nan"),
+        "abs_lateral_m": float("nan"),
+        "abs_longitudinal_m": float("nan"),
+        "heading_error_deg": float("nan"),
         "stop_time_sec": float("nan"),
         "stop_speed_mps": float("nan"),
         "sample_count": 0,
         "duration_at_goal_sec": 0.0,
         "status": "no_ego_data",
+        "description": METRIC_DESCRIPTIONS["goal_stop_precision"],
     }
     if not series.ego:
         return empty
@@ -197,23 +256,36 @@ def metric_goal_stop(
     avg_pos = sum(positions) / n
     avg_lat = sum(laterals) / n
     avg_lon = sum(longitudinals) / n
+    avg_abs_lat = sum(abs(v) for v in laterals) / n
+    avg_abs_lon = sum(abs(v) for v in longitudinals) / n
     avg_heading = sum(headings) / n
     avg_speed = sum(speeds) / n
     duration_at_goal = at_goal[-1].stamp_sec - at_goal[0].stamp_sec
 
+    flagged = (
+        avg_pos > thr.goal_tolerance_m
+        or avg_abs_lat > thr.goal_lateral_tolerance_m
+        or avg_abs_lon > thr.goal_longitudinal_tolerance_m
+    )
+
     return {
-        "flagged": avg_pos > thr.goal_tolerance_m,
+        "flagged": flagged,
         "position_error_m": avg_pos,
-        "heading_error_deg": avg_heading,
         "lateral_m": avg_lat,
         "longitudinal_m": avg_lon,
+        "abs_lateral_m": avg_abs_lat,
+        "abs_longitudinal_m": avg_abs_lon,
+        "heading_error_deg": avg_heading,
         "max_position_error_m": max(positions),
+        "max_abs_lateral_m": max(abs(v) for v in laterals),
+        "max_abs_longitudinal_m": max(abs(v) for v in longitudinals),
         "max_heading_error_deg": max(abs(h) for h in headings),
         "stop_time_sec": at_goal[-1].stamp_sec,
         "stop_speed_mps": avg_speed,
         "sample_count": n,
         "duration_at_goal_sec": duration_at_goal,
         "status": "ok",
+        "description": METRIC_DESCRIPTIONS["goal_stop_precision"],
     }
 
 
@@ -224,7 +296,16 @@ def metric_collision(
 ) -> dict[str, Any]:
     ego_ds = downsample_ego(series.ego, thr.sample_dt)
     if not ego_ds:
-        return {"flagged": False, "events": [], "min_distance_m": float("nan"), "status": "no_ego"}
+        return {
+            "flagged": False,
+            "rate": 0.0,
+            "events": [],
+            "event_count": 0,
+            "frame_count": 0,
+            "min_distance_m": float("nan"),
+            "status": "no_ego",
+            "description": METRIC_DESCRIPTIONS["collision_rate"],
+        }
 
     # Index objects by rounded time for fast lookup
     objs = series.objects
@@ -232,6 +313,7 @@ def metric_collision(
     events: list[dict[str, Any]] = []
     min_dist = float("inf")
     first_t = None
+    colliding_frames = 0
 
     for ego in ego_ds:
         # advance object cursor to nearby stamps
@@ -239,6 +321,7 @@ def metric_collision(
             oi += 1
         j = oi
         ego_poly = transform_local_polygon(footprint_local, ego.x, ego.y, ego.yaw_rad)
+        frame_hit = False
         while j < len(objs) and objs[j].stamp_sec <= ego.stamp_sec + thr.sample_dt:
             obj = objs[j]
             j += 1
@@ -254,26 +337,143 @@ def metric_collision(
             if dist <= thr.collision_distance_m:
                 if first_t is None:
                     first_t = ego.stamp_sec
-                events.append(
-                    {
-                        "time_sec": ego.stamp_sec,
-                        "object_id": obj.object_id,
-                        "label": obj.label,
-                        "distance_m": dist,
-                    }
-                )
+                if not frame_hit:
+                    colliding_frames += 1
+                    frame_hit = True
+                    events.append(
+                        {
+                            "time_sec": ego.stamp_sec,
+                            "object_id": obj.object_id,
+                            "label": obj.label,
+                            "distance_m": dist,
+                        }
+                    )
                 break  # one collision event per ego sample
     if min_dist == float("inf"):
         min_dist = float("nan")
-    # Deduplicate consecutive same object
+    n_frames = len(ego_ds)
+    rate = colliding_frames / n_frames if n_frames else 0.0
     return {
-        "flagged": bool(events),
+        "flagged": colliding_frames > 0,
+        "rate": rate,
         "events": events[:50],
-        "event_count": len(events),
+        "event_count": colliding_frames,
+        "frame_count": n_frames,
         "min_distance_m": min_dist,
         "first_time_sec": first_t,
         "status": "ok",
+        "description": METRIC_DESCRIPTIONS["collision_rate"],
     }
+
+
+def _linestring_type(linestring: Any) -> str:
+    attrs = getattr(linestring, "attributes", None)
+    if attrs is None or "type" not in attrs:
+        return ""
+    return str(attrs["type"])
+
+
+def _orientation(
+    a: tuple[float, float], b: tuple[float, float], c: tuple[float, float]
+) -> float:
+    return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+
+def _on_segment(
+    a: tuple[float, float], b: tuple[float, float], c: tuple[float, float]
+) -> bool:
+    return (
+        min(a[0], c[0]) - 1e-9 <= b[0] <= max(a[0], c[0]) + 1e-9
+        and min(a[1], c[1]) - 1e-9 <= b[1] <= max(a[1], c[1]) + 1e-9
+    )
+
+
+def _segments_intersect(
+    p1: tuple[float, float],
+    p2: tuple[float, float],
+    q1: tuple[float, float],
+    q2: tuple[float, float],
+) -> bool:
+    o1 = _orientation(p1, p2, q1)
+    o2 = _orientation(p1, p2, q2)
+    o3 = _orientation(q1, q2, p1)
+    o4 = _orientation(q1, q2, p2)
+    if (o1 > 0.0) != (o2 > 0.0) and (o3 > 0.0) != (o4 > 0.0):
+        return True
+    if abs(o1) < 1e-9 and _on_segment(p1, q1, p2):
+        return True
+    if abs(o2) < 1e-9 and _on_segment(p1, q2, p2):
+        return True
+    if abs(o3) < 1e-9 and _on_segment(q1, p1, q2):
+        return True
+    if abs(o4) < 1e-9 and _on_segment(q1, p2, q2):
+        return True
+    return False
+
+
+def _point_segment_distance(
+    px: float, py: float, x1: float, y1: float, x2: float, y2: float
+) -> float:
+    dx, dy = x2 - x1, y2 - y1
+    if dx == 0.0 and dy == 0.0:
+        return math.hypot(px - x1, py - y1)
+    t = ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)
+    t = max(0.0, min(1.0, t))
+    return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+
+
+def _footprint_boundary_hit(
+    footprint: list[tuple[float, float]],
+    segments: list[tuple[float, float, float, float, str]],
+    *,
+    ego_x: float,
+    ego_y: float,
+    search_radius_m: float,
+    margin_m: float,
+) -> tuple[bool, float, str | None]:
+    """Return (hit, min_distance_m, boundary_type)."""
+    min_dist = float("inf")
+    hit_type: str | None = None
+    crossed = False
+    for x1, y1, x2, y2, btype in segments:
+        if (
+            math.hypot(x1 - ego_x, y1 - ego_y) > search_radius_m
+            and math.hypot(x2 - ego_x, y2 - ego_y) > search_radius_m
+        ):
+            continue
+        for i in range(len(footprint)):
+            p1 = footprint[i]
+            p2 = footprint[(i + 1) % len(footprint)]
+            if _segments_intersect(p1, p2, (x1, y1), (x2, y2)):
+                crossed = True
+                hit_type = btype
+                min_dist = 0.0
+        for px, py in footprint:
+            d = _point_segment_distance(px, py, x1, y1, x2, y2)
+            if d < min_dist:
+                min_dist = d
+                if not crossed:
+                    hit_type = btype
+    if min_dist == float("inf"):
+        return False, float("nan"), None
+    hit = crossed or (margin_m > 0.0 and min_dist < margin_m)
+    return hit, min_dist, hit_type
+
+
+def _extract_boundary_segments(
+    lanelet_map: Any, boundary_types: set[str]
+) -> list[tuple[float, float, float, float, str]]:
+    segments: list[tuple[float, float, float, float, str]] = []
+    for linestring in lanelet_map.lineStringLayer:
+        btype = _linestring_type(linestring)
+        if btype not in boundary_types:
+            continue
+        points = [(float(p.x), float(p.y)) for p in linestring]
+        for i in range(len(points) - 1):
+            x1, y1 = points[i]
+            x2, y2 = points[i + 1]
+            segments.append((x1, y1, x2, y2, btype))
+    return segments
 
 
 def metric_out_of_boundary(
@@ -282,80 +482,117 @@ def metric_out_of_boundary(
     thr: Thresholds,
     footprint_local: list[tuple[float, float]],
 ) -> dict[str, Any]:
-    """Lanelet footprint vs road_border; soft-fails if map libs missing."""
+    """Ego footprint vs road_border/curbstone LineStrings (batch-eval style)."""
+    desc = METRIC_DESCRIPTIONS["out_of_boundary"]
+    boundary_types = tuple(thr.oob_boundary_types) or ("road_border", "curbstone")
     ego_ds = downsample_ego(series.ego, thr.sample_dt)
+    empty = {
+        "flagged": False,
+        "rate": 0.0,
+        "min_distance_m": float("nan"),
+        "frame_count": len(ego_ds),
+        "oob_frame_count": 0,
+        "boundary_types": list(boundary_types),
+        "boundary_segment_count": 0,
+        "description": desc,
+    }
     if not ego_ds:
-        return {"flagged": False, "min_distance_m": float("nan"), "status": "no_ego"}
+        return {**empty, "frame_count": 0, "status": "no_ego"}
     if map_path is None:
-        return {"flagged": False, "min_distance_m": float("nan"), "status": "map_not_provided"}
+        return {**empty, "status": "map_not_provided"}
 
     try:
-        import lanelet2.geometry
         from autoware_lanelet2_extension_python.projection import MGRSProjector
-        from lanelet2.core import BasicPoint2d, BoundingBox2d
         from lanelet2.io import Origin, load
     except ImportError as exc:
-        return {
-            "flagged": False,
-            "min_distance_m": float("nan"),
-            "status": f"lanelet2_unavailable: {exc}",
-        }
+        return {**empty, "status": f"lanelet2_unavailable: {exc}"}
 
     map_path = map_path.expanduser().resolve()
     osm = map_path if map_path.suffix == ".osm" else map_path / "lanelet2_map.osm"
     if not osm.is_file():
-        return {"flagged": False, "min_distance_m": float("nan"), "status": f"map_missing: {osm}"}
+        return {**empty, "status": f"map_missing: {osm}"}
 
     try:
         projector = MGRSProjector(Origin(0.0, 0.0))
+        # Prefer map_projector_info when present (same folder as osm / map dir).
+        map_dir = map_path if map_path.is_dir() else map_path.parent
+        projector_info = map_dir / "map_projector_info.yaml"
+        if projector_info.is_file():
+            info = yaml.safe_load(projector_info.read_text(encoding="utf-8")) or {}
+            ptype = str(info.get("projector_type", "MGRS"))
+            if ptype in ("TransverseMercator", "LocalCartesianUTM"):
+                from autoware_lanelet2_extension_python._autoware_lanelet2_extension_python_boost_python_projection import (  # noqa: E501
+                    TransverseMercatorProjector,
+                )
+
+                origin = info["map_origin"]
+                projector = TransverseMercatorProjector(
+                    Origin(float(origin["latitude"]), float(origin["longitude"]))
+                )
         lanelet_map = load(str(osm), projector)
     except Exception as exc:  # noqa: BLE001
-        return {"flagged": False, "min_distance_m": float("nan"), "status": f"map_load_failed: {exc}"}
+        return {**empty, "status": f"map_load_failed: {exc}"}
 
-    min_signed = float("inf")
+    try:
+        segments = _extract_boundary_segments(lanelet_map, set(boundary_types))
+    except Exception as exc:  # noqa: BLE001
+        return {**empty, "status": f"boundary_extract_failed: {exc}"}
+
+    if not segments:
+        return {
+            **empty,
+            "status": "no_boundary_linestrings",
+            "boundary_segment_count": 0,
+        }
+
+    min_dist_overall = float("inf")
     worst_t = None
     violation_t = None
+    hit_type_first: str | None = None
+    oob_frames = 0
     try:
         for ego in ego_ds:
             poly = transform_local_polygon(footprint_local, ego.x, ego.y, ego.yaw_rad)
-            # Use map point-in-lane approx: distance of corners to nearest lanelet
-            for px, py in poly:
-                pt = BasicPoint2d(px, py)
-                # search radius
-                box = BoundingBox2d(
-                    BasicPoint2d(px - 30.0, py - 30.0), BasicPoint2d(px + 30.0, py + 30.0)
-                )
-                nearby = lanelet_map.laneletLayer.search(box)
-                if not nearby:
-                    # outside searchable map → treat as OOB
-                    d = -1.0
-                else:
-                    d = min(lanelet2.geometry.distance(ll, pt) for ll in nearby)
-                    # distance==0 means on/inside lanelet area-ish; use signed by inside check
-                    inside = any(lanelet2.geometry.inside(ll, pt) for ll in nearby)
-                    if not inside:
-                        d = -abs(d) if d > 0 else d
-                if d < min_signed:
-                    min_signed = d
-                    worst_t = ego.stamp_sec
-                if d < -thr.oob_margin_m and violation_t is None:
+            hit, dist, btype = _footprint_boundary_hit(
+                poly,
+                segments,
+                ego_x=ego.x,
+                ego_y=ego.y,
+                search_radius_m=thr.oob_search_radius_m,
+                margin_m=thr.oob_margin_m,
+            )
+            if isinstance(dist, float) and not math.isnan(dist) and dist < min_dist_overall:
+                min_dist_overall = dist
+                worst_t = ego.stamp_sec
+            if hit:
+                oob_frames += 1
+                if violation_t is None:
                     violation_t = ego.stamp_sec
+                    hit_type_first = btype
     except Exception as exc:  # noqa: BLE001
         return {
-            "flagged": False,
-            "min_distance_m": float("nan"),
+            **empty,
+            "boundary_segment_count": len(segments),
             "status": f"oob_compute_failed: {exc}",
         }
 
-    if min_signed == float("inf"):
-        min_signed = float("nan")
-    flagged = min_signed < -thr.oob_margin_m if not math.isnan(min_signed) else False
+    if min_dist_overall == float("inf"):
+        min_dist_overall = float("nan")
+    n_frames = len(ego_ds)
+    rate = oob_frames / n_frames if n_frames else 0.0
     return {
-        "flagged": flagged,
-        "min_distance_m": min_signed,
+        "flagged": oob_frames > 0,
+        "rate": rate,
+        "min_distance_m": min_dist_overall,
         "worst_time_sec": worst_t,
         "first_violation_sec": violation_t,
+        "first_boundary_type": hit_type_first,
+        "frame_count": n_frames,
+        "oob_frame_count": oob_frames,
+        "boundary_types": list(boundary_types),
+        "boundary_segment_count": len(segments),
         "status": "ok",
+        "description": desc,
     }
 
 
@@ -403,12 +640,14 @@ def compute_metrics(
         "out_of_boundary": oob,
         "collision_rate": collision,
         "goal_stop_precision": goal,
+        "metric_descriptions": dict(METRIC_DESCRIPTIONS),
         "meta": {
             "bag_path": str(bag_path),
             "ego_samples": len(series.ego),
             "object_samples": len(series.objects),
             "duration_sec": series.duration_sec,
             "goal": {"x": goal_x, "y": goal_y, "yaw": goal_yaw},
+            "thresholds": asdict(thr),
         },
     }
     if output_json is not None:
