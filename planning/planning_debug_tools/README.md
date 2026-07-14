@@ -217,6 +217,7 @@ The following topics are published during replay:
 - `/planning/mission_planning/state`: Replayed route state (published with transient_local QoS, only when the message changes; when `--replay-route` option is used)
 - `<any CompressedImage topic>`: Replayed reference images (published to the same topic name as in the rosbag)
 - `/perception_reproducer/rosbag_ego_odom`: Debug topic for recorded ego odometry
+- `/perception_reproducer/metrics`: Reproducer state metrics (`reproducer/state`, `reproducer/perturb_count`, `reproducer/expand_count`)
 - `/initialpose`: Initial pose (when `-p` option is used)
 - `/planning/mission_planning/goal`: Goal pose (when `-p` option is used)
 
@@ -226,12 +227,14 @@ The node subscribes to `/localization/kinematic_state` for the simulator ego pos
 
 Whenever the ego's position changes, a chronological `reproduce_sequence` queue is generated based on its position with a search radius (default to 2 m).
 If the queue is empty, the nearest odom message in the rosbag is added to the queue.
-When publishing perception messages, the first element in the `reproduce_sequence` is popped and published.
+At load time, ego odom is downsampled from kinematic ~50 Hz to perception **10 Hz** (keep every 5th sample). The main loop runs at a fixed **10 Hz** and advances one odom index per tick.
 
 This design results in the following behavior:
 
 - When ego stops, the perception messages are published in chronological order until queue is empty.
 - When the ego moves, a perception message close to ego's position is published.
+
+With `--auto-tackle-stuck`, if Autoware is in `DRIVING`, the live ego is stopped, and the reproducer stays in `repeat` longer than `--stuck-duration`, the node first force-rebuilds the reproduce sequence with search radius scaled by `--expand-radius-scale` (default 3.0). If it is still stuck for another `--stuck-duration` without the ego moving, it then walks forward along the bag ego pose list in `--perturb-distance`, by calling `/localization/initialize` with `method=DIRECT`.
 
 ### Available Options
 
@@ -244,6 +247,11 @@ This design results in the following behavior:
 - `-n`, `--noise`: Apply perception noise to objects when publishing repeated messages (default: False)
 - `-f`, `--rosbag-format`: Specify rosbag data format (default: "db3")
 - `--reference-image-topics`: Comma-separated list of CompressedImage topics to load and publish (e.g., `"/sensing/camera/camera0/image_raw/compressed,/sensing/camera/camera1/image_raw/compressed"`)
+- `--auto-tackle-stuck`: When Autoware is `DRIVING`, ego is stopped, and reproducer stays in repeat longer than `--stuck-duration`, first rebuild with scaled search radius once; if still stuck for another `--stuck-duration` without ego motion, call `/localization/initialize` (DIRECT) with a pose further along the bag trajectory
+- `--stuck-duration`: Seconds stuck in ego-stopped + repeat before tackle steps (expand, then perturb) (default: 5.0)
+- `--expand-radius-scale`: Scale applied to `--search-radius` for the one-shot stuck expand rebuild (default: 3.0)
+- `--perturb-distance`: Path distance in meters to walk forward along bag ego poses when perturbing (default: 0.5)
+- `--output-metrics`: Dump metrics JSON under `$ROS_LOG_DIR/autoware_metrics/` on shutdown (`reproducer/perturb_count`, `reproducer/expand_count`, `reproducer/normal_duration/total`, `reproducer/repeat_duration/total`)
 - `-v`, `--verbose`: Output debug data
 - `-h`, `--help`: Show help message
 

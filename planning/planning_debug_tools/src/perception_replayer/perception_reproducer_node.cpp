@@ -121,6 +121,36 @@ int main(int argc, char ** argv)
       "topics", "");
     options << ref_image_topics_option;
 
+    const QCommandLineOption auto_tackle_stuck_option(
+      QStringList() << "auto-tackle-stuck",
+      "when ego is stopped and reproducer stays in repeat longer than --stuck-duration, "
+      "first rebuild with search radius scaled by --expand-radius-scale; if still stuck for "
+      "another --stuck-duration, call /localization/initialize (DIRECT) with a pose further "
+      "along the bag trajectory");
+    options << auto_tackle_stuck_option;
+
+    const QCommandLineOption stuck_duration_option(
+      QStringList() << "stuck-duration",
+      "seconds that ego must be stopped while reproducer is in repeat before tackle steps "
+      "(expand, then perturb)",
+      "seconds", "5.0");
+    options << stuck_duration_option;
+
+    const QCommandLineOption expand_radius_scale_option(
+      QStringList() << "expand-radius-scale",
+      "scale applied to --search-radius for the one-shot stuck expand rebuild", "scale", "3.0");
+    options << expand_radius_scale_option;
+
+    const QCommandLineOption perturb_distance_option(
+      QStringList() << "perturb-distance",
+      "path distance [m] to walk forward along bag ego poses when perturbing", "meters", "0.5");
+    options << perturb_distance_option;
+
+    const QCommandLineOption output_metrics_option(
+      QStringList() << "output-metrics",
+      "dump reproducer metrics json under the ROS logging directory on shutdown");
+    options << output_metrics_option;
+
     for (const auto & option : options) {
       parser.addOption(option);
     }
@@ -148,6 +178,24 @@ int main(int argc, char ** argv)
     param.verbose = parser.isSet(verbose_option);
     param.publish_route = parser.isSet(pub_route_option);
     param.replay_route = parser.isSet(replay_route_option);
+    param.auto_tackle_stuck = parser.isSet(auto_tackle_stuck_option);
+    param.stuck_duration_s = parser.value(stuck_duration_option).toDouble();
+    param.expand_radius_scale = parser.value(expand_radius_scale_option).toDouble();
+    param.perturb_distance_m = parser.value(perturb_distance_option).toDouble();
+    param.output_metrics = parser.isSet(output_metrics_option);
+
+    if (param.stuck_duration_s < 0.0) {
+      std::cerr << "Error: --stuck-duration must be >= 0" << std::endl;
+      return 1;
+    }
+    if (param.expand_radius_scale <= 0.0) {
+      std::cerr << "Error: --expand-radius-scale must be > 0" << std::endl;
+      return 1;
+    }
+    if (param.perturb_distance_m < 0.0) {
+      std::cerr << "Error: --perturb-distance must be >= 0" << std::endl;
+      return 1;
+    }
 
     // Parse comma-separated reference image topics
     const QString topics_str = parser.value(ref_image_topics_option);
