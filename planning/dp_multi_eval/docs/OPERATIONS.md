@@ -139,7 +139,7 @@ Stale Autoware processes on `ROS_DOMAIN_ID=10` cause `planning_stack_not_ready` 
 |---------|--------------|--------|
 | `planning_stack_not_ready` | Polluted `ROS_DOMAIN_ID`, slow psim start | Clean processes; increase `psim_startup_sec` |
 | `route setup failed: planned route is empty` | Map/bag/model mismatch | Align model, map, scenario set |
-| `route_not_arrived` | Planner stuck / timeout | Watch `preview.mp4`; tune model or `route_timeout_sec` |
+| `route_not_arrived` | Planner stuck / timeout | Watch `preview.mp4`; stuck blinker nudge may help lane-change stalls; tune model or `route_timeout_sec` |
 | Suspicious PASS | Metric edge case | Re-read `metrics.json` and video |
 
 ---
@@ -169,6 +169,19 @@ ros2 run dp_multi_eval compute_metrics.py \
   --thresholds $(ros2 pkg prefix dp_multi_eval)/share/dp_multi_eval/config/thresholds.yaml \
   --output /path/to/job/metrics.json
 ```
+
+---
+
+## Modes
+
+| `mode` | Input | Runtime |
+|--------|--------|---------|
+| `reproducer` (default) | `rosbag_dir` (rosbag2 folders) | psim + perception_reproducer + bag record |
+| `scenario_simulator` | `scenario_dir` (`.yaml` / `.yml` / `.xosc`) | `scenario_test_runner` + bag record (`--use-sim-time`) |
+
+Both modes share model overlay, metrics (stuck / collision / OOB / goal-stop), video, and the HTML / Streamlit Results dashboard.
+
+Scenario Simulator requires the `scenario_test_runner` package (from `simulator.repos` / Scenario Simulator v2).
 
 ---
 

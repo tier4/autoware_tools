@@ -2,8 +2,17 @@
 #
 #   ros2 run dp_multi_eval run_all.py -c ~/dp_multi_eval_pipeline.yaml --dry_run
 #   ros2 run dp_multi_eval run_all.py -c ~/dp_multi_eval_pipeline.yaml --max_workers 2
+#
+# Modes:
+#   reproducer           — planning_simulator + perception_reproducer on ROS bags
+#   scenario_simulator   — scenario_test_runner on .yaml / .xosc scenario files
+
+mode: reproducer
+# mode: scenario_simulator
 
 rosbag_dir: /media/takahikohasegawa/71435f24-d875-4ded-b7ba-9a42505405e5/hiratsuka
+# scenario_dir: /path/to/scenarios   # required when mode=scenario_simulator (.yaml/.yml/.xosc)
+
 results_root: /media/takahikohasegawa/71435f24-d875-4ded-b7ba-9a42505405e5/dp_multi_eval_results
 map_path: /opt/autoware/maps
 
@@ -23,6 +32,7 @@ video_view_range_m: 40.0
 show_planning_factors: true
 rviz: false
 
+# --- Reproducer mode ---
 end_condition: route_arrived
 bag_duration_margin_sec: 30.0
 route_timeout_sec: 300.0
@@ -33,6 +43,20 @@ perception_warmup_sec: 5.0
 perception_ready_timeout_sec: 45.0
 perception_ready_min_objects: 1
 perception_ready_stable_sec: 2.0
+# If ego is nearly stopped while waiting for ARRIVED, publish LEFT then RIGHT
+# blinker on /vehicle/status/turn_indicators_status (DP input) to try triggering
+# a new trajectory (lane-change / pull-out stalls).
+stuck_blinker_nudge: true
+stuck_blinker_speed_mps: 0.15
+stuck_blinker_trigger_sec: 12.0
+stuck_blinker_hold_sec: 3.0
+stuck_blinker_cooldown_sec: 25.0
+
+# --- Scenario Simulator mode ---
+architecture_type: awf/universe/20250130
+planning_setting: diffusion_planner
+scenario_timeout_sec: 300.0
+scenario_record_warmup_sec: 15.0
 
 # Optional paths (defaults live in the package share/config/)
 # thresholds: /path/to/thresholds.yaml

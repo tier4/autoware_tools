@@ -73,8 +73,10 @@ def run_all(
 
     fresh = generate_manifest(
         models=cfg["models"],
-        rosbag_dir=Path(cfg["rosbag_dir"]),
         results_root=results_root,
+        mode=str(cfg.get("mode", "reproducer")),
+        rosbag_dir=Path(cfg["rosbag_dir"]) if cfg.get("rosbag_dir") else None,
+        scenario_dir=Path(cfg["scenario_dir"]) if cfg.get("scenario_dir") else None,
         param_template=(
             Path(cfg["param_template_path"]).expanduser()
             if cfg.get("param_template_path")
@@ -100,6 +102,7 @@ def run_all(
     extra = {
         k: cfg[k]
         for k in (
+            "mode",
             "vehicle_model",
             "sensor_model",
             "vehicle_id",
@@ -113,6 +116,15 @@ def run_all(
             "perception_ready_timeout_sec",
             "perception_ready_min_objects",
             "perception_ready_stable_sec",
+            "stuck_blinker_nudge",
+            "stuck_blinker_speed_mps",
+            "stuck_blinker_trigger_sec",
+            "stuck_blinker_hold_sec",
+            "stuck_blinker_cooldown_sec",
+            "architecture_type",
+            "scenario_timeout_sec",
+            "scenario_record_warmup_sec",
+            "planning_setting",
             "video_fps",
             "video_sample_dt",
             "video_view_frame",
@@ -125,6 +137,7 @@ def run_all(
         )
         if k in cfg
     }
+    extra.setdefault("mode", str(cfg.get("mode", "reproducer")))
 
     # Pass 1 + optional retries for failed
     for attempt in range(max_retries + 1):

@@ -19,6 +19,7 @@ from dp_multi_eval.build_dashboard import (
 )
 from dp_multi_eval.path_picker import pick_folder
 from dp_multi_eval.process_utils import cleanup_evaluation_processes, stop_pid_group
+from dp_multi_eval.scenario_sim import discover_scenarios, scenario_key
 
 # Soft dependency: streamlit
 try:
@@ -31,7 +32,7 @@ except ImportError as exc:  # pragma: no cover
 
 DEFAULT_CONFIG = Path.home() / "dp_multi_eval_pipeline.yaml"
 STATE_FILE_NAME = ".gui_run_state.json"
-SESSION_KEYS = ("models_dir", "rosbag_dir", "results_root")
+SESSION_KEYS = ("models_dir", "rosbag_dir", "scenario_dir", "results_root")
 
 
 def _widget_key(session_key: str) -> str:
@@ -267,19 +268,23 @@ def write_run_config(
     *,
     run_name: str,
     models: list[dict[str, str]],
-    rosbag_dir: Path,
-    selected_bags: list[Path] | None,
+    rosbag_dir: Path | None = None,
+    scenario_dir: Path | None = None,
+    selected_bags: list[Path] | None = None,
+    selected_scenarios: list[Path] | None = None,
 ) -> Path:
     results_root = Path(base.get("results_root", "/tmp/dp_multi_eval_results")) / run_name
     cfg = dict(base)
     cfg["models"] = models
-    cfg["rosbag_dir"] = str(rosbag_dir)
     cfg["results_root"] = str(results_root)
-    # If subset of bags selected, write a temp bag list file consumed by custom logic:
-    # For simplicity regenerate full dir but document; orchestrator uses whole rosbag_dir.
-    # Users selecting subset: copy manifest approach — write bag_whitelist
+    if rosbag_dir is not None:
+        cfg["rosbag_dir"] = str(rosbag_dir)
+    if scenario_dir is not None:
+        cfg["scenario_dir"] = str(scenario_dir)
     if selected_bags is not None:
         cfg["bag_whitelist"] = [str(b) for b in selected_bags]
+    if selected_scenarios is not None:
+        cfg["scenario_whitelist"] = [str(s) for s in selected_scenarios]
     out = results_root / "pipeline_config.yaml"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
@@ -301,6 +306,7 @@ def main() -> None:
         {
             "models_dir": str(base.get("models_dir", "/opt/autoware/mlmodels")),
             "rosbag_dir": str(base.get("rosbag_dir", "")),
+            "scenario_dir": str(base.get("scenario_dir", "")),
             "results_root": str(base.get("results_root", "/tmp/dp_multi_eval_results")),
         },
         config_path=str(config_path.resolve()) if config_path.exists() else str(config_path),
@@ -310,12 +316,6 @@ def main() -> None:
         "models_dir",
         picker_title="Select models folder",
         help_text="Folder with ONNX model dirs or diffusion_planner.param.yaml files.",
-    )
-    rosbag_dir = folder_input(
-        "Scenarios folder",
-        "rosbag_dir",
-        picker_title="Select ROS bag scenarios folder",
-        help_text="Parent folder of ID1, ID2, … scenario subfolders.",
     )
     results_root = folder_input(
         "Results folder",
@@ -329,6 +329,40 @@ def main() -> None:
     )
 
     with tab_setup:
+        mode_labels = {
+            "reproducer": "Reproducer (ROS bags)",
+            "scenario_simulator": "Scenario Simulator (.yaml / .xosc)",
+        }
+        default_mode = str(base.get("mode", "reproducer")).strip().lower()
+        if default_mode not in mode_labels:
+            default_mode = "reproducer"
+        mode = st.radio(
+            "Evaluation mode",
+            options=list(mode_labels.keys()),
+            format_func=lambda m: mode_labels[m],
+            index=list(mode_labels.keys()).index(default_mode),
+            horizontal=True,
+            help="Reproducer = perception_reproducer on bags. "
+            "Scenario Simulator = scenario_test_runner on OpenSCENARIO / T4 YAML.",
+        )
+
+        if mode == "reproducer":
+            rosbag_dir = folder_input(
+                "Rosbag scenarios folder",
+                "rosbag_dir",
+                picker_title="Select ROS bag scenarios folder",
+                help_text="Parent folder of ID1, ID2, … rosbag subfolders.",
+            )
+            scenario_dir = Path(st.session_state.get("scenario_dir") or "")
+        else:
+            scenario_dir = folder_input(
+                "Scenario files folder",
+                "scenario_dir",
+                picker_title="Select scenario folder",
+                help_text="Folder of .yaml / .yml / .xosc scenario files (one nesting level OK).",
+            )
+            rosbag_dir = Path(st.session_state.get("rosbag_dir") or "")
+
         st.subheader("Choose models")
         model_opts = discover_model_configs(models_dir)
         if not model_opts:
@@ -341,37 +375,75 @@ def main() -> None:
             if st.checkbox(name, value=False, key=f"m_{path}"):
                 selected_models.append({"name": name, "model_config": str(path)})
 
-        st.subheader("Choose scenarios")
-        bags = discover_bag_dirs(rosbag_dir)
-        if not str(rosbag_dir):
-            st.info(
-                "Set **Scenarios folder** in the sidebar to the parent of ID1, ID2, … "
-                f"(from config: `{base.get('rosbag_dir', '') or 'not set'}`)."
-            )
-        elif not rosbag_dir.is_dir():
-            st.warning(
-                f"Scenarios folder does not exist or is not a directory: `{rosbag_dir}`"
-            )
-        elif not bags:
-            st.warning(
-                f"No scenarios found under `{rosbag_dir}`. "
-                "Each subfolder needs `metadata.yaml` or a `.db3` file."
-            )
-        else:
-            st.caption(f"Found {len(bags)} scenario(s) under `{rosbag_dir}`")
-        select_all = st.checkbox("Select all scenarios", value=False)
         selected_bags: list[Path] = []
-        for bag in bags:
+        selected_scenarios: list[Path] = []
+        if mode == "reproducer":
+            st.subheader("Choose rosbag scenarios")
+            bags = discover_bag_dirs(rosbag_dir)
+            if not str(rosbag_dir):
+                st.info(
+                    "Set **Rosbag scenarios folder** to the parent of ID1, ID2, … "
+                    f"(from config: `{base.get('rosbag_dir', '') or 'not set'}`)."
+                )
+            elif not rosbag_dir.is_dir():
+                st.warning(
+                    f"Rosbag folder does not exist or is not a directory: `{rosbag_dir}`"
+                )
+            elif not bags:
+                st.warning(
+                    f"No bags found under `{rosbag_dir}`. "
+                    "Each subfolder needs `metadata.yaml` or a `.db3` file."
+                )
+            else:
+                st.caption(f"Found {len(bags)} bag(s) under `{rosbag_dir}`")
+            select_all = st.checkbox("Select all scenarios", value=False, key="select_all_bags")
+            for bag in bags:
+                try:
+                    label = str(bag.resolve().relative_to(rosbag_dir.resolve()))
+                except ValueError:
+                    label = bag.name
+                checked = select_all or st.checkbox(label, value=False, key=f"b_{bag}")
+                if checked:
+                    selected_bags.append(bag)
+        else:
+            st.subheader("Choose scenario files")
             try:
-                label = str(bag.resolve().relative_to(rosbag_dir.resolve()))
-            except ValueError:
-                label = bag.name
-            checked = select_all or st.checkbox(label, value=False, key=f"b_{bag}")
-            if checked:
-                selected_bags.append(bag)
+                scenarios = discover_scenarios(scenario_dir) if scenario_dir.is_dir() else []
+            except FileNotFoundError:
+                scenarios = []
+            if not str(scenario_dir):
+                st.info(
+                    "Set **Scenario files folder** "
+                    f"(from config: `{base.get('scenario_dir', '') or 'not set'}`)."
+                )
+            elif not scenario_dir.is_dir():
+                st.warning(f"Scenario folder missing: `{scenario_dir}`")
+            elif not scenarios:
+                st.warning(
+                    f"No scenario files under `{scenario_dir}`. "
+                    "Expected `.yaml` / `.yml` / `.xosc`."
+                )
+            else:
+                st.caption(f"Found {len(scenarios)} scenario file(s) under `{scenario_dir}`")
+            select_all = st.checkbox(
+                "Select all scenario files", value=False, key="select_all_scenarios"
+            )
+            for scn in scenarios:
+                try:
+                    label = scenario_key(scn, scenario_dir)
+                except Exception:  # noqa: BLE001
+                    label = scn.name
+                checked = select_all or st.checkbox(label, value=False, key=f"s_{scn}")
+                if checked:
+                    selected_scenarios.append(scn)
 
         run_name = st.text_input("Run name", value=time.strftime("run_%Y%m%d_%H%M%S"))
-        max_workers = st.number_input("Parallel workers", min_value=1, max_value=8, value=int(base.get("max_workers", 1)))
+        max_workers = st.number_input(
+            "Parallel workers",
+            min_value=1,
+            max_value=8,
+            value=int(base.get("max_workers", 1)),
+        )
 
         st.subheader("Preview video")
         col_v1, col_v2 = st.columns(2)
@@ -416,10 +488,13 @@ def main() -> None:
         elif st.button("Start evaluation", type="primary"):
             if not selected_models:
                 st.error("Select at least one model.")
-            elif not selected_bags:
-                st.error("Select at least one scenario.")
+            elif mode == "reproducer" and not selected_bags:
+                st.error("Select at least one rosbag scenario.")
+            elif mode == "scenario_simulator" and not selected_scenarios:
+                st.error("Select at least one scenario file.")
             else:
                 cfg_base = dict(base)
+                cfg_base["mode"] = mode
                 cfg_base["results_root"] = str(results_root)
                 cfg_base["max_workers"] = int(max_workers)
                 cfg_base["map_path"] = cfg_base.get("map_path", "/opt/autoware/maps")
@@ -428,24 +503,44 @@ def main() -> None:
                 cfg_base["show_planning_factors"] = bool(show_planning_factors)
                 cfg_base["video_fps"] = float(video_fps)
                 cfg_base["render_video"] = True
-                # Temporary rosbag_dir containing only selected bags via symlink farm
-                run_bag_root = results_root / run_name / "_selected_bags"
-                if run_bag_root.exists():
-                    import shutil
+                import shutil
 
-                    shutil.rmtree(run_bag_root)
-                run_bag_root.mkdir(parents=True)
-                for bag in selected_bags:
-                    link = run_bag_root / bag.name
-                    if not link.exists():
-                        link.symlink_to(bag, target_is_directory=bag.is_dir())
-                cfg_path = write_run_config(
-                    cfg_base,
-                    run_name=run_name,
-                    models=selected_models,
-                    rosbag_dir=run_bag_root,
-                    selected_bags=selected_bags,
-                )
+                if mode == "reproducer":
+                    run_input_root = results_root / run_name / "_selected_bags"
+                    if run_input_root.exists():
+                        shutil.rmtree(run_input_root)
+                    run_input_root.mkdir(parents=True)
+                    for bag in selected_bags:
+                        link = run_input_root / bag.name
+                        if not link.exists():
+                            link.symlink_to(bag, target_is_directory=bag.is_dir())
+                    cfg_path = write_run_config(
+                        cfg_base,
+                        run_name=run_name,
+                        models=selected_models,
+                        rosbag_dir=run_input_root,
+                        selected_bags=selected_bags,
+                    )
+                else:
+                    run_input_root = results_root / run_name / "_selected_scenarios"
+                    if run_input_root.exists():
+                        shutil.rmtree(run_input_root)
+                    run_input_root.mkdir(parents=True)
+                    for scn in selected_scenarios:
+                        # Preserve relative key via flat unique names
+                        link = run_input_root / scn.name
+                        n = 1
+                        while link.exists():
+                            link = run_input_root / f"{scn.stem}_{n}{scn.suffix}"
+                            n += 1
+                        link.symlink_to(scn)
+                    cfg_path = write_run_config(
+                        cfg_base,
+                        run_name=run_name,
+                        models=selected_models,
+                        scenario_dir=run_input_root,
+                        selected_scenarios=selected_scenarios,
+                    )
                 log_path = results_root / run_name / "run_all.log"
                 log_path.parent.mkdir(parents=True, exist_ok=True)
                 log_f = open(log_path, "w", encoding="utf-8")  # noqa: SIM115

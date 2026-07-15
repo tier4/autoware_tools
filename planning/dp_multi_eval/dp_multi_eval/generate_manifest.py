@@ -1,4 +1,4 @@
-"""Phase 4a — generate job manifest from models + bags."""
+"""Phase 4a — generate job manifest from models + bags/scenarios."""
 
 from __future__ import annotations
 
@@ -11,6 +11,11 @@ from typing import Any
 import yaml
 
 from dp_multi_eval.model_config import resolve_model_config
+from dp_multi_eval.scenario_sim import (
+    SCENARIO_EXTENSIONS,
+    discover_scenarios,
+    scenario_key,
+)
 
 
 def default_param_cache_dir() -> Path:
@@ -59,21 +64,82 @@ def bag_key(bag: Path, rosbag_dir: Path) -> str:
 def generate_manifest(
     *,
     models: list[dict[str, Any]],
-    rosbag_dir: Path,
     results_root: Path,
+    mode: str = "reproducer",
+    rosbag_dir: Path | None = None,
+    scenario_dir: Path | None = None,
     bags: list[Path] | None = None,
+    scenarios: list[Path] | None = None,
     param_template: Path | None = None,
 ) -> dict[str, Any]:
-    rosbag_dir = rosbag_dir.expanduser().resolve()
+    """Build jobs for reproducer (rosbags) or scenario_simulator (scenario files)."""
+    mode = (mode or "reproducer").strip().lower()
+    if mode not in ("reproducer", "scenario_simulator"):
+        raise ValueError(f"unsupported mode: {mode}")
+
     results_root = results_root.expanduser().resolve()
-    bag_list = bags or discover_bags(rosbag_dir)
-    if not bag_list:
-        print(
-            f"[warn] No ROS bags found under {rosbag_dir}. "
-            "Each scenario folder needs metadata.yaml or a .db3 file."
-        )
     param_cache = default_param_cache_dir()
     jobs: list[dict[str, Any]] = []
+
+    if mode == "reproducer":
+        if rosbag_dir is None:
+            raise ValueError("rosbag_dir is required for mode=reproducer")
+        rosbag_dir = rosbag_dir.expanduser().resolve()
+        bag_list = bags or discover_bags(rosbag_dir)
+        if not bag_list:
+            print(
+                f"[warn] No ROS bags found under {rosbag_dir}. "
+                "Each scenario folder needs metadata.yaml or a .db3 file."
+            )
+        for model in models:
+            name = str(model["name"]).rstrip("/")
+            model_config = str(
+                resolve_model_config(
+                    model["model_config"],
+                    cache_dir=param_cache,
+                    model_name=name,
+                    param_template=param_template,
+                    model_opts=model,
+                )
+            )
+            for bag in bag_list:
+                key = bag_key(bag, rosbag_dir)
+                job_id = f"{name}__{key.replace('/', '__')}"
+                out = results_root / name / key
+                jobs.append(
+                    {
+                        "job_id": job_id,
+                        "mode": mode,
+                        "model_name": name,
+                        "model_config_path": model_config,
+                        "bag_path": str(bag.resolve()),
+                        "scenario_path": None,
+                        "bag_key": key,
+                        "output_dir": str(out),
+                        "status": "pending",
+                        "error": None,
+                        "attempts": 0,
+                    }
+                )
+        return {
+            "version": 2,
+            "mode": mode,
+            "rosbag_dir": str(rosbag_dir),
+            "scenario_dir": None,
+            "results_root": str(results_root),
+            "jobs": jobs,
+        }
+
+    # scenario_simulator
+    if scenario_dir is None:
+        raise ValueError("scenario_dir is required for mode=scenario_simulator")
+    scenario_dir = scenario_dir.expanduser().resolve()
+    scenario_list = scenarios or discover_scenarios(scenario_dir)
+    if not scenario_list:
+        print(
+            f"[warn] No scenario files found under {scenario_dir}. "
+            f"Expected extensions: {', '.join(SCENARIO_EXTENSIONS)}"
+        )
     for model in models:
         name = str(model["name"]).rstrip("/")
         model_config = str(
@@ -85,16 +151,18 @@ def generate_manifest(
                 model_opts=model,
             )
         )
-        for bag in bag_list:
-            key = bag_key(bag, rosbag_dir)
+        for scenario in scenario_list:
+            key = scenario_key(scenario, scenario_dir)
             job_id = f"{name}__{key.replace('/', '__')}"
             out = results_root / name / key
             jobs.append(
                 {
                     "job_id": job_id,
+                    "mode": mode,
                     "model_name": name,
                     "model_config_path": model_config,
-                    "bag_path": str(bag.resolve()),
+                    "bag_path": None,
+                    "scenario_path": str(scenario.resolve()),
                     "bag_key": key,
                     "output_dir": str(out),
                     "status": "pending",
@@ -103,8 +171,10 @@ def generate_manifest(
                 }
             )
     return {
-        "version": 1,
-        "rosbag_dir": str(rosbag_dir),
+        "version": 2,
+        "mode": mode,
+        "rosbag_dir": None,
+        "scenario_dir": str(scenario_dir),
         "results_root": str(results_root),
         "jobs": jobs,
     }
@@ -131,16 +201,48 @@ def main(argv: list[str] | None = None) -> int:
             print("[error] each model needs name + model_config")
             return 1
 
-    manifest = generate_manifest(
-        models=models,
-        rosbag_dir=Path(cfg["rosbag_dir"]),
-        results_root=Path(cfg["results_root"]),
-    )
+    mode = str(cfg.get("mode", "reproducer")).strip().lower()
+    try:
+        if mode == "scenario_simulator":
+            scenario_dir = cfg.get("scenario_dir")
+            if not scenario_dir:
+                print("[error] mode=scenario_simulator requires scenario_dir")
+                return 1
+            manifest = generate_manifest(
+                models=models,
+                results_root=Path(cfg["results_root"]),
+                mode=mode,
+                scenario_dir=Path(scenario_dir),
+                param_template=(
+                    Path(cfg["param_template_path"]).expanduser()
+                    if cfg.get("param_template_path")
+                    else None
+                ),
+            )
+        else:
+            if not cfg.get("rosbag_dir"):
+                print("[error] mode=reproducer requires rosbag_dir")
+                return 1
+            manifest = generate_manifest(
+                models=models,
+                results_root=Path(cfg["results_root"]),
+                mode="reproducer",
+                rosbag_dir=Path(cfg["rosbag_dir"]),
+                param_template=(
+                    Path(cfg["param_template_path"]).expanduser()
+                    if cfg.get("param_template_path")
+                    else None
+                ),
+            )
+    except (ValueError, FileNotFoundError) as exc:
+        print(f"[error] {exc}")
+        return 1
+
     out = args.output or Path(cfg["results_root"]).expanduser() / "manifest.json"
     out = out.expanduser().resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    print(f"[done] {len(manifest['jobs'])} jobs → {out}")
+    print(f"[done] {len(manifest['jobs'])} jobs (mode={mode}) → {out}")
     return 0
 
 

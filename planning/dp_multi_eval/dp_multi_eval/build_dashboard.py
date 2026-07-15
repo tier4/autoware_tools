@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from dp_multi_eval.job_status import preview_video_path
+
 
 def load_metrics(job: dict[str, Any]) -> dict[str, Any] | None:
     path = Path(job["output_dir"]) / "metrics.json"
@@ -411,6 +413,7 @@ def build_dashboard(manifest: dict[str, Any], output_html: Path) -> Path:
     done_frac = counts["done"] / total
     in_progress = counts["pending"] + counts["running"] > 0
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    results_root = Path(manifest.get("results_root") or output_html.parent)
 
     # Index job by (bag, model)
     by_key: dict[tuple[str, str], dict[str, Any]] = {}
@@ -532,7 +535,7 @@ def build_dashboard(manifest: dict[str, Any], output_html: Path) -> Path:
                     if isinstance(lon, (int, float)) and not math.isnan(float(lon)):
                         model_stats[model]["goal_lon_sum"] += abs(float(lon))
 
-            video = Path(job["output_dir"]) / "preview.mp4"
+            video = preview_video_path(job, results_root=results_root)
             video_link = ""
             if video.is_file():
                 video_link = f"<div>video: <code>{html.escape(str(video))}</code></div>"

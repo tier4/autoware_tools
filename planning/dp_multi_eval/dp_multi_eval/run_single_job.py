@@ -22,6 +22,11 @@ import yaml
 from dp_multi_eval.ament_overlay import env_with_overlay, make_model_overlay
 from dp_multi_eval.job_status import utc_now_iso, write_job_status
 from dp_multi_eval.process_utils import close_log_handle, popen, popen_log_file, stop_process_group
+from dp_multi_eval.scenario_sim import (
+    build_record_command_sim_time,
+    build_scenario_runner_command,
+    scenario_test_runner_available,
+)
 from dp_multi_eval.topics import TopicSet, load_topics
 
 
@@ -32,6 +37,7 @@ def update_job_progress(
     start_time: str,
     domain_id: int,
     bag_path: str | None = None,
+    scenario_path: str | None = None,
     model_config: str | None = None,
 ) -> None:
     status_path = output_dir / "job_status.json"
@@ -54,6 +60,7 @@ def update_job_progress(
             "error": None,
             "domain_id": domain_id,
             "bag_path": bag_path,
+            "scenario_path": scenario_path,
             "model_config": model_config,
         },
     )
@@ -62,9 +69,11 @@ def update_job_progress(
 @dataclass
 class JobConfig:
     model_config: Path
-    bag_path: Path
     output_dir: Path
     domain_id: int
+    bag_path: Path | None = None
+    scenario_path: Path | None = None
+    mode: str = "reproducer"  # reproducer | scenario_simulator
     map_path: Path = Path("/opt/autoware/maps")
     vehicle_model: str = "lv828l"
     sensor_model: str = "aip_x2_gen2"
@@ -81,6 +90,17 @@ class JobConfig:
     perception_ready_timeout_sec: float = 45.0
     perception_ready_min_objects: int = 1
     perception_ready_stable_sec: float = 2.0
+    # When stuck (near-zero speed), publish left/right blinker to DP input to try
+    # triggering a new trajectory (experimental recovery for lane-change stalls).
+    stuck_blinker_nudge: bool = True
+    stuck_blinker_speed_mps: float = 0.15
+    stuck_blinker_trigger_sec: float = 12.0
+    stuck_blinker_hold_sec: float = 3.0
+    stuck_blinker_cooldown_sec: float = 25.0
+    # Scenario Simulator v2
+    architecture_type: str = "awf/universe/20250130"
+    scenario_timeout_sec: float = 300.0
+    scenario_record_warmup_sec: float = 15.0
     dry_run: bool = False
     skip_route_setup: bool = False
     rviz: bool = False
@@ -292,53 +312,158 @@ def _route_state_label(state: int | None) -> str:
         return "unknown" if state is None else str(state)
 
 
-def wait_for_route_arrived(env: dict[str, str], timeout_sec: float) -> tuple[str, str]:
-    """Poll /api/routing/state via ros2 topic echo. Returns (status, detail)."""
-    # Prefer python rclpy when available; fall back to timeout by bag duration caller.
+def wait_for_route_arrived(
+    env: dict[str, str],
+    timeout_sec: float,
+    *,
+    stuck_blinker_nudge: bool = False,
+    stuck_blinker_speed_mps: float = 0.15,
+    stuck_blinker_trigger_sec: float = 12.0,
+    stuck_blinker_hold_sec: float = 3.0,
+    stuck_blinker_cooldown_sec: float = 25.0,
+) -> tuple[str, str]:
+    """Poll /api/routing/state. Optionally nudge DP with blinkers when stuck."""
     try:
         import rclpy
         from autoware_adapi_v1_msgs.msg import RouteState
+        from nav_msgs.msg import Odometry
         from rclpy.node import Node
         from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
     except ImportError:
         return "timeout", "rclpy_or_adapi_msgs_unavailable"
 
+    try:
+        from autoware_vehicle_msgs.msg import TurnIndicatorsReport
+    except ImportError:
+        TurnIndicatorsReport = None  # type: ignore[misc, assignment]
+
     if not rclpy.ok():
         rclpy.init()
+
+    # Keep env for this process (ROS_DOMAIN_ID already set by caller via os.environ
+    # when used from setup_route; here we rely on caller's env being current).
+    old_env = os.environ.copy()
+    os.environ.update(env)
 
     class Waiter(Node):
         def __init__(self) -> None:
             super().__init__("dp_multi_eval_route_waiter")
             self.state: int | None = None
-            qos = QoSProfile(
+            self.speed_mps: float = float("nan")
+            qos_route = QoSProfile(
                 depth=1,
                 reliability=ReliabilityPolicy.RELIABLE,
                 durability=DurabilityPolicy.TRANSIENT_LOCAL,
             )
-            self.create_subscription(RouteState, "/api/routing/state", self._cb, qos)
+            self.create_subscription(RouteState, "/api/routing/state", self._cb_route, qos_route)
+            self.create_subscription(
+                Odometry,
+                "/localization/kinematic_state",
+                self._cb_odom,
+                10,
+            )
+            self._blinker_pub = None
+            if stuck_blinker_nudge and TurnIndicatorsReport is not None:
+                self._blinker_pub = self.create_publisher(
+                    TurnIndicatorsReport,
+                    "/vehicle/status/turn_indicators_status",
+                    10,
+                )
 
-        def _cb(self, msg: RouteState) -> None:
+        def _cb_route(self, msg: RouteState) -> None:
             self.state = msg.state
+
+        def _cb_odom(self, msg: Odometry) -> None:
+            vx = float(msg.twist.twist.linear.x)
+            vy = float(msg.twist.twist.linear.y)
+            self.speed_mps = (vx * vx + vy * vy) ** 0.5
+
+        def publish_blinker(self, report: int) -> None:
+            if self._blinker_pub is None or TurnIndicatorsReport is None:
+                return
+            msg = TurnIndicatorsReport()
+            msg.stamp = self.get_clock().now().to_msg()
+            msg.report = report
+            self._blinker_pub.publish(msg)
 
     node = Waiter()
     deadline = time.time() + timeout_sec
     last_log = 0.0
+    stuck_since: float | None = None
+    last_nudge_end = 0.0
+    nudge_count = 0
+    # Cycle: LEFT → DISABLE → RIGHT → DISABLE
+    nudge_phases: list[tuple[str, int]] = []
+    if TurnIndicatorsReport is not None:
+        nudge_phases = [
+            ("LEFT", int(TurnIndicatorsReport.ENABLE_LEFT)),
+            ("DISABLE", int(TurnIndicatorsReport.DISABLE)),
+            ("RIGHT", int(TurnIndicatorsReport.ENABLE_RIGHT)),
+            ("DISABLE", int(TurnIndicatorsReport.DISABLE)),
+        ]
+
+    detail_state: int | None = None
     try:
         while time.time() < deadline and rclpy.ok():
-            rclpy.spin_once(node, timeout_sec=0.5)
-            if node.state == RouteState.ARRIVED:
-                return "done", "route_arrived"
+            rclpy.spin_once(node, timeout_sec=0.25)
             now = time.time()
+            if node.state == RouteState.ARRIVED:
+                detail = "route_arrived"
+                if nudge_count:
+                    detail += f" (blinker_nudges={nudge_count})"
+                return "done", detail
+
+            speed = node.speed_mps
+            if stuck_blinker_nudge and nudge_phases and speed == speed:  # not NaN
+                if speed <= stuck_blinker_speed_mps:
+                    if stuck_since is None:
+                        stuck_since = now
+                else:
+                    stuck_since = None
+
+                ready_to_nudge = (
+                    stuck_since is not None
+                    and (now - stuck_since) >= stuck_blinker_trigger_sec
+                    and (now - last_nudge_end) >= stuck_blinker_cooldown_sec
+                )
+                if ready_to_nudge:
+                    nudge_count += 1
+                    print(
+                        f"[info] Stuck (v={speed:.2f} m/s for "
+                        f"{now - stuck_since:.0f}s) — blinker nudge #{nudge_count} "
+                        "(LEFT then RIGHT) to try DP trajectory generation"
+                    )
+                    for label, report in nudge_phases:
+                        phase_deadline = time.time() + stuck_blinker_hold_sec
+                        print(f"[info]   blinker → {label} ({stuck_blinker_hold_sec:.1f}s)")
+                        while time.time() < phase_deadline and rclpy.ok():
+                            node.publish_blinker(report)
+                            rclpy.spin_once(node, timeout_sec=0.1)
+                            if node.state == RouteState.ARRIVED:
+                                return "done", f"route_arrived (during blinker={label})"
+                        node.publish_blinker(report)
+                    last_nudge_end = time.time()
+                    stuck_since = None
+
             if now - last_log >= 15.0:
+                speed_s = f"{speed:.2f}" if speed == speed else "?"
                 print(
                     f"[info] waiting for route ARRIVED "
                     f"({timeout_sec - (deadline - now):.0f}/{timeout_sec:.0f}s) "
-                    f"state={_route_state_label(node.state)}"
+                    f"state={_route_state_label(node.state)} v={speed_s} m/s"
+                    + (f" nudges={nudge_count}" if nudge_count else "")
                 )
                 last_log = now
+            detail_state = node.state
     finally:
         node.destroy_node()
-    return "timeout", f"route_not_arrived state={_route_state_label(node.state)}"
+        os.environ.clear()
+        os.environ.update(old_env)
+
+    detail = f"route_not_arrived state={_route_state_label(detail_state)}"
+    if nudge_count:
+        detail += f" blinker_nudges={nudge_count}"
+    return "timeout", detail
 
 
 def wait_for_perception_ready(cfg: JobConfig) -> tuple[bool, str]:
@@ -495,7 +620,7 @@ def setup_route(cfg: JobConfig, env: dict[str, str]) -> tuple[bool, str]:
         os.environ.update(env)
         module = _load_route_setup_module(env)
         ok, message = module.setup_route_for_bag(
-            bag_path=cfg.bag_path.expanduser().resolve(),
+            bag_path=cfg.bag_path.expanduser().resolve(),  # type: ignore[union-attr]
             timeout_sec=cfg.route_setup_timeout_sec,
             service_wait_sec=max(cfg.route_setup_timeout_sec, 60.0),
             backend_preference="adapi",
@@ -550,6 +675,191 @@ def engage_autonomous(env: dict[str, str], timeout_sec: float = 60.0) -> tuple[b
 
 
 def run_single_job(cfg: JobConfig) -> JobResult:
+    mode = (cfg.mode or "reproducer").strip().lower()
+    if mode == "scenario_simulator":
+        return run_scenario_simulator_job(cfg)
+    return run_reproducer_job(cfg)
+
+
+def run_scenario_simulator_job(cfg: JobConfig) -> JobResult:
+    """Run one Scenario Simulator v2 case with diffusion planner + bag record."""
+    start_iso = utc_now_iso()
+    t0 = time.time()
+    cfg.output_dir.mkdir(parents=True, exist_ok=True)
+    overlay_key = hashlib.sha1(str(cfg.output_dir.resolve()).encode()).hexdigest()[:16]
+    overlay_root = Path("/tmp/dp_multi_eval_overlays") / overlay_key
+    output_bag = cfg.output_dir / "output"
+    ss2_out = cfg.output_dir / "ss2_out"
+    if output_bag.exists():
+        shutil.rmtree(output_bag)
+    ss2_out.mkdir(parents=True, exist_ok=True)
+
+    status = "failed"
+    error: str | None = None
+    procs: list[subprocess.Popen[Any]] = []
+    env = dict(os.environ)
+    env["ROS_DOMAIN_ID"] = str(cfg.domain_id)
+    env.setdefault("ROS2_DISABLE_DAEMON", "1")
+    scenario_path = (cfg.scenario_path or Path("")).expanduser().resolve()
+
+    try:
+        if not cfg.model_config.expanduser().resolve().is_file():
+            raise FileNotFoundError(f"model_config not found: {cfg.model_config}")
+        if not scenario_path.is_file():
+            raise FileNotFoundError(f"scenario_path not found: {scenario_path}")
+        if not scenario_test_runner_available(env):
+            raise RuntimeError(
+                "scenario_test_runner package not found. "
+                "Install Scenario Simulator v2 (simulator.repos) and source the workspace."
+            )
+
+        make_model_overlay(cfg.model_config, overlay_root)
+        env = env_with_overlay(env, overlay_root, cfg.domain_id)
+        vehicle_id = cfg.vehicle_id or env.get("VEHICLE_ID")
+        if vehicle_id:
+            env["VEHICLE_ID"] = vehicle_id
+
+        run_timeout = float(cfg.scenario_timeout_sec or cfg.route_timeout_sec)
+        ss2_cmd = build_scenario_runner_command(
+            scenario_path=scenario_path,
+            output_directory=ss2_out,
+            vehicle_model=cfg.vehicle_model,
+            sensor_model=cfg.sensor_model,
+            architecture_type=cfg.architecture_type,
+            planning_setting=cfg.planning_setting,
+            initialize_duration_sec=cfg.psim_startup_sec,
+            global_timeout_sec=run_timeout,
+            rviz=cfg.rviz,
+            record=False,
+            vehicle_id=vehicle_id,
+        )
+        record_cmd = build_record_command_sim_time(output_bag, cfg.topics.record_list())
+
+        print(f"[info] mode=scenario_simulator ROS_DOMAIN_ID={cfg.domain_id}")
+        print(f"[info] scenario={scenario_path}")
+        print(f"[info] model_config={cfg.model_config}")
+        print(f"[info] timeout={run_timeout:.0f}s")
+
+        if cfg.dry_run:
+            print("[dry-run] Would launch:")
+            print(f"  ss2:      {' '.join(ss2_cmd)}")
+            print(f"  record:   {' '.join(record_cmd)}")
+            write_job_status(
+                cfg.output_dir,
+                {
+                    "status": "dry_run",
+                    "mode": "scenario_simulator",
+                    "start_time": start_iso,
+                    "end_time": utc_now_iso(),
+                    "error": None,
+                    "dry_run": True,
+                    "domain_id": cfg.domain_id,
+                    "commands": {"scenario_test_runner": ss2_cmd, "record": record_cmd},
+                },
+            )
+            return JobResult("dry_run", start_iso, utc_now_iso(), None, None, time.time() - t0)
+
+        update_job_progress(
+            cfg.output_dir,
+            phase="scenario_startup",
+            start_time=start_iso,
+            domain_id=cfg.domain_id,
+            scenario_path=str(scenario_path),
+            model_config=str(cfg.model_config),
+        )
+        ss2_log = cfg.output_dir / "scenario_runner.log"
+        print(f"[info] Launching scenario_test_runner...")
+        print(f"[info] log: {ss2_log}")
+        ss2, _ = popen_log_file(ss2_cmd, ss2_log, env=env)
+        procs.append(ss2)
+
+        # Wait briefly for /clock then start recording with use_sim_time
+        warmup = max(0.0, float(cfg.scenario_record_warmup_sec))
+        print(f"[info] Waiting {warmup:.0f}s before bag record (sim time)...")
+        time.sleep(warmup)
+        if ss2.poll() is not None:
+            raise RuntimeError(
+                f"scenario_test_runner exited early (code={ss2.returncode}); "
+                f"see {ss2_log}"
+            )
+
+        update_job_progress(
+            cfg.output_dir,
+            phase="recording",
+            start_time=start_iso,
+            domain_id=cfg.domain_id,
+            scenario_path=str(scenario_path),
+            model_config=str(cfg.model_config),
+        )
+        print(f"[info] Starting ros2 bag record (use_sim_time) → {output_bag}")
+        recorder = popen(record_cmd, env=env)
+        procs.append(recorder)
+        time.sleep(1.0)
+        if recorder.poll() is not None:
+            raise RuntimeError("ros2 bag record exited immediately (check use_sim_time / clock)")
+
+        update_job_progress(
+            cfg.output_dir,
+            phase="driving",
+            start_time=start_iso,
+            domain_id=cfg.domain_id,
+            scenario_path=str(scenario_path),
+            model_config=str(cfg.model_config),
+        )
+        print(f"[info] Waiting for scenario_test_runner (timeout {run_timeout:.0f}s)...")
+        try:
+            code = ss2.wait(timeout=run_timeout + float(cfg.psim_startup_sec))
+        except subprocess.TimeoutExpired:
+            error = f"scenario_timeout after {run_timeout:.0f}s"
+            status = "failed"
+            code = None
+        else:
+            if code == 0:
+                status = "done"
+                error = None
+                time.sleep(cfg.post_arrival_sec)
+            else:
+                status = "failed"
+                error = f"scenario_test_runner exit={code}"
+                # Soft: keep bag for offline metrics if anything was recorded
+                if output_bag.exists():
+                    print(f"[warn] {error} — keeping recorded bag for metrics")
+
+    except Exception as exc:  # noqa: BLE001
+        status = "failed"
+        error = str(exc)
+        print(f"[error] {error}")
+
+    finally:
+        for proc in reversed(procs):
+            stop_process_group(proc, grace_sec=10.0)
+            close_log_handle(proc)
+
+    end_iso = utc_now_iso()
+    bag_path_out = str(output_bag) if output_bag.exists() else None
+    # If runner succeeded but bag missing, still fail
+    if status == "done" and not bag_path_out:
+        status = "failed"
+        error = (error or "") + "; output_bag_missing"
+
+    write_job_status(
+        cfg.output_dir,
+        {
+            "status": status,
+            "mode": "scenario_simulator",
+            "start_time": start_iso,
+            "end_time": end_iso,
+            "error": error,
+            "domain_id": cfg.domain_id,
+            "scenario_path": str(scenario_path),
+            "output_bag": bag_path_out,
+            "duration_sec": time.time() - t0,
+        },
+    )
+    return JobResult(status, start_iso, end_iso, error, bag_path_out, time.time() - t0)
+
+
+def run_reproducer_job(cfg: JobConfig) -> JobResult:
     start_iso = utc_now_iso()
     t0 = time.time()
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
@@ -567,12 +877,13 @@ def run_single_job(cfg: JobConfig) -> JobResult:
     env = dict(os.environ)
     env["ROS_DOMAIN_ID"] = str(cfg.domain_id)
     env.setdefault("ROS2_DISABLE_DAEMON", "1")
+    bag_path = (cfg.bag_path or Path("")).expanduser().resolve()
 
     try:
         if not cfg.model_config.expanduser().resolve().is_file():
             raise FileNotFoundError(f"model_config not found: {cfg.model_config}")
-        if not cfg.bag_path.expanduser().resolve().exists():
-            raise FileNotFoundError(f"bag_path not found: {cfg.bag_path}")
+        if not bag_path.exists():
+            raise FileNotFoundError(f"bag_path not found: {bag_path}")
 
         make_model_overlay(cfg.model_config, overlay_root)
         env = env_with_overlay(env, overlay_root, cfg.domain_id)
@@ -580,20 +891,22 @@ def run_single_job(cfg: JobConfig) -> JobResult:
         if vehicle_id:
             env["VEHICLE_ID"] = vehicle_id
 
-        bag_duration = get_bag_duration_sec(cfg.bag_path)
+        bag_duration = get_bag_duration_sec(bag_path)
         run_timeout = cfg.route_timeout_sec
         if cfg.end_condition == "bag_duration" and bag_duration is not None:
             run_timeout = min(run_timeout, bag_duration + cfg.bag_duration_margin_sec)
 
+        # Ensure setup_route sees bag_path
+        cfg.bag_path = bag_path
         psim_cmd = build_psim_command(cfg)
-        repro_cmd = build_reproducer_command(cfg.bag_path)
+        repro_cmd = build_reproducer_command(bag_path)
         record_cmd = build_record_command(output_bag, cfg.topics.record_list())
 
-        print(f"[info] ROS_DOMAIN_ID={cfg.domain_id}")
+        print(f"[info] mode=reproducer ROS_DOMAIN_ID={cfg.domain_id}")
         if vehicle_id:
             print(f"[info] vehicle_id={vehicle_id}")
         print(f"[info] model_config={cfg.model_config}")
-        print(f"[info] bag_path={cfg.bag_path} duration={bag_duration}")
+        print(f"[info] bag_path={bag_path} duration={bag_duration}")
         print(f"[info] output_dir={cfg.output_dir}")
         print(f"[info] run_timeout={run_timeout:.0f}s end_condition={cfg.end_condition}")
 
@@ -607,6 +920,7 @@ def run_single_job(cfg: JobConfig) -> JobResult:
                 cfg.output_dir,
                 {
                     "status": "dry_run",
+                    "mode": "reproducer",
                     "start_time": start_iso,
                     "end_time": utc_now_iso(),
                     "error": None,
@@ -626,7 +940,7 @@ def run_single_job(cfg: JobConfig) -> JobResult:
             phase="psim_startup",
             start_time=start_iso,
             domain_id=cfg.domain_id,
-            bag_path=str(cfg.bag_path),
+            bag_path=str(bag_path),
             model_config=str(cfg.model_config),
         )
         psim_log = cfg.output_dir / "psim_launch.log"
@@ -651,7 +965,7 @@ def run_single_job(cfg: JobConfig) -> JobResult:
             phase="route_setup",
             start_time=start_iso,
             domain_id=cfg.domain_id,
-            bag_path=str(cfg.bag_path),
+            bag_path=str(bag_path),
             model_config=str(cfg.model_config),
         )
         if not wait_for_routing_callable(env, timeout_sec=45.0):
@@ -669,7 +983,7 @@ def run_single_job(cfg: JobConfig) -> JobResult:
             phase="reproducer",
             start_time=start_iso,
             domain_id=cfg.domain_id,
-            bag_path=str(cfg.bag_path),
+            bag_path=str(bag_path),
             model_config=str(cfg.model_config),
         )
         print(f"[info] Starting perception_reproducer...")
@@ -691,7 +1005,7 @@ def run_single_job(cfg: JobConfig) -> JobResult:
             phase="recording",
             start_time=start_iso,
             domain_id=cfg.domain_id,
-            bag_path=str(cfg.bag_path),
+            bag_path=str(bag_path),
             model_config=str(cfg.model_config),
         )
         print(f"[info] Starting ros2 bag record → {output_bag}")
@@ -712,11 +1026,19 @@ def run_single_job(cfg: JobConfig) -> JobResult:
             phase="driving",
             start_time=start_iso,
             domain_id=cfg.domain_id,
-            bag_path=str(cfg.bag_path),
+            bag_path=str(bag_path),
             model_config=str(cfg.model_config),
         )
         if cfg.end_condition == "route_arrived":
-            end_status, detail = wait_for_route_arrived(env, run_timeout)
+            end_status, detail = wait_for_route_arrived(
+                env,
+                run_timeout,
+                stuck_blinker_nudge=bool(cfg.stuck_blinker_nudge),
+                stuck_blinker_speed_mps=float(cfg.stuck_blinker_speed_mps),
+                stuck_blinker_trigger_sec=float(cfg.stuck_blinker_trigger_sec),
+                stuck_blinker_hold_sec=float(cfg.stuck_blinker_hold_sec),
+                stuck_blinker_cooldown_sec=float(cfg.stuck_blinker_cooldown_sec),
+            )
             if end_status != "done":
                 # Soft failure: still keep the bag for offline metrics
                 error = detail
@@ -725,8 +1047,23 @@ def run_single_job(cfg: JobConfig) -> JobResult:
                 status = "done"
                 time.sleep(cfg.post_arrival_sec)
         else:
-            print(f"[info] Waiting bag_duration timeout {run_timeout:.0f}s...")
-            time.sleep(run_timeout)
+            # bag_duration: wait full timeout with optional stuck blinker nudge;
+            # ARRIVED early-exits successfully.
+            print(f"[info] Waiting bag_duration timeout {run_timeout:.0f}s (blinker nudge enabled={cfg.stuck_blinker_nudge})...")
+            end_status, detail = wait_for_route_arrived(
+                env,
+                run_timeout,
+                stuck_blinker_nudge=bool(cfg.stuck_blinker_nudge),
+                stuck_blinker_speed_mps=float(cfg.stuck_blinker_speed_mps),
+                stuck_blinker_trigger_sec=float(cfg.stuck_blinker_trigger_sec),
+                stuck_blinker_hold_sec=float(cfg.stuck_blinker_hold_sec),
+                stuck_blinker_cooldown_sec=float(cfg.stuck_blinker_cooldown_sec),
+            )
+            if end_status == "done":
+                print(f"[info] ARRIVED before bag_duration ({detail})")
+                time.sleep(cfg.post_arrival_sec)
+            else:
+                print(f"[info] bag_duration complete ({detail})")
             status = "done"
 
         if status == "done":
@@ -752,17 +1089,18 @@ def run_single_job(cfg: JobConfig) -> JobResult:
         cfg.output_dir,
         {
             "status": status,
+            "mode": "reproducer",
             "start_time": start_iso,
             "end_time": end_iso,
             "error": error,
             "domain_id": cfg.domain_id,
+            "bag_path": str(bag_path),
             "output_bag": bag_path_out,
-            "model_config": str(cfg.model_config),
-            "bag_path": str(cfg.bag_path),
-            "duration_sec": round(time.time() - t0, 1),
+            "duration_sec": time.time() - t0,
         },
     )
     return JobResult(status, start_iso, end_iso, error, bag_path_out, time.time() - t0)
+
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -771,7 +1109,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "(psim + perception_reproducer + ros2 bag record)."
     )
     p.add_argument("--model_config", type=Path, required=True, help="diffusion_planner.param.yaml")
-    p.add_argument("--bag_path", type=Path, required=True, help="Input rosbag path or directory")
+    p.add_argument("--bag_path", type=Path, default=None, help="Input rosbag (reproducer mode)")
+    p.add_argument("--scenario_path", type=Path, default=None, help="Scenario file (scenario_simulator mode)")
+    p.add_argument(
+        "--mode",
+        choices=("reproducer", "scenario_simulator"),
+        default="reproducer",
+    )
     p.add_argument("--output_dir", type=Path, required=True, help="Per-job output directory")
     p.add_argument("--domain_id", type=int, required=True, help="ROS_DOMAIN_ID for this job")
     p.add_argument("--map_path", type=Path, default=Path("/opt/autoware/maps"))
@@ -798,6 +1142,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--perception_ready_timeout_sec", type=float, default=45.0)
     p.add_argument("--perception_ready_min_objects", type=int, default=1)
     p.add_argument("--perception_ready_stable_sec", type=float, default=2.0)
+    p.add_argument("--architecture_type", default="awf/universe/20250130")
+    p.add_argument("--scenario_timeout_sec", type=float, default=300.0)
     p.add_argument("--skip_route_setup", action="store_true")
     p.add_argument("--rviz", action="store_true", help="Launch RViz (off by default for headless)")
     p.add_argument("--dry_run", action="store_true")
@@ -805,9 +1151,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def config_from_args(args: argparse.Namespace) -> JobConfig:
+    mode = args.mode
+    if mode == "reproducer" and not args.bag_path:
+        raise SystemExit("--bag_path is required for mode=reproducer")
+    if mode == "scenario_simulator" and not args.scenario_path:
+        raise SystemExit("--scenario_path is required for mode=scenario_simulator")
     return JobConfig(
         model_config=args.model_config.expanduser(),
-        bag_path=args.bag_path.expanduser(),
+        bag_path=args.bag_path.expanduser() if args.bag_path else None,
+        scenario_path=args.scenario_path.expanduser() if args.scenario_path else None,
+        mode=mode,
         output_dir=args.output_dir.expanduser(),
         domain_id=args.domain_id,
         map_path=args.map_path.expanduser(),
@@ -825,6 +1178,8 @@ def config_from_args(args: argparse.Namespace) -> JobConfig:
         perception_ready_timeout_sec=args.perception_ready_timeout_sec,
         perception_ready_min_objects=args.perception_ready_min_objects,
         perception_ready_stable_sec=args.perception_ready_stable_sec,
+        architecture_type=args.architecture_type,
+        scenario_timeout_sec=args.scenario_timeout_sec,
         dry_run=args.dry_run,
         skip_route_setup=args.skip_route_setup,
         rviz=args.rviz,

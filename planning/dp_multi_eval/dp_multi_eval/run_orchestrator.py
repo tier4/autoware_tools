@@ -18,8 +18,13 @@ from dp_multi_eval.build_dashboard import build_dashboard
 from dp_multi_eval.bag_reader import load_bag_series
 from dp_multi_eval.compute_metrics import Thresholds, compute_metrics, load_thresholds
 from dp_multi_eval.generate_manifest import bag_key
+from dp_multi_eval.job_status import preview_video_path
 from dp_multi_eval.render_video import render_video
 from dp_multi_eval.run_single_job import JobConfig, run_single_job, update_job_progress
+from dp_multi_eval.scenario_sim import (
+    extract_goal_from_output_bag,
+    extract_goal_from_scenario,
+)
 from dp_multi_eval.topics import load_topics
 
 
@@ -61,6 +66,57 @@ def extract_goal_from_input_bag(bag_path: Path, min_move_m: float = 0.1) -> tupl
     return 0.0, 0.0, 0.0
 
 
+def resolve_job_goal(job: dict[str, Any], bag_out: Path) -> tuple[float, float, float]:
+    """Goal for metrics: scenario file (SS2) → input bag (reproducer) → output bag last pose."""
+    mode = str(job.get("mode") or "reproducer")
+    if mode == "scenario_simulator" and job.get("scenario_path"):
+        goal = extract_goal_from_scenario(Path(job["scenario_path"]))
+        if goal is not None:
+            return goal
+        return extract_goal_from_output_bag(bag_out)
+    if job.get("bag_path"):
+        return extract_goal_from_input_bag(Path(job["bag_path"]))
+    return extract_goal_from_output_bag(bag_out)
+
+
+def _job_config_from_payload(job: dict[str, Any], opts: dict[str, Any], domain_id: int) -> JobConfig:
+    mode = str(job.get("mode") or opts.get("mode") or "reproducer")
+    return JobConfig(
+        model_config=Path(job["model_config_path"]),
+        bag_path=Path(job["bag_path"]) if job.get("bag_path") else None,
+        scenario_path=Path(job["scenario_path"]) if job.get("scenario_path") else None,
+        mode=mode,
+        output_dir=Path(job["output_dir"]),
+        domain_id=domain_id,
+        map_path=Path(opts["map_path"]),
+        vehicle_model=opts.get("vehicle_model", "lv828l"),
+        sensor_model=opts.get("sensor_model", "aip_x2_gen2"),
+        vehicle_id=opts.get("vehicle_id"),
+        topics=load_topics(Path(opts["topics_yaml"]) if opts.get("topics_yaml") else None),
+        end_condition=opts.get("end_condition", "route_arrived"),
+        bag_duration_margin_sec=float(opts.get("bag_duration_margin_sec", 30.0)),
+        route_timeout_sec=float(opts.get("route_timeout_sec", 900.0)),
+        psim_startup_sec=float(opts.get("psim_startup_sec", 120.0)),
+        route_setup_timeout_sec=float(opts.get("route_setup_timeout_sec", 90.0)),
+        auto_engage_timeout_sec=float(opts.get("auto_engage_timeout_sec", 60.0)),
+        perception_warmup_sec=float(opts.get("perception_warmup_sec", 5.0)),
+        perception_ready_timeout_sec=float(opts.get("perception_ready_timeout_sec", 45.0)),
+        perception_ready_min_objects=int(opts.get("perception_ready_min_objects", 1)),
+        perception_ready_stable_sec=float(opts.get("perception_ready_stable_sec", 2.0)),
+        stuck_blinker_nudge=bool(opts.get("stuck_blinker_nudge", True)),
+        stuck_blinker_speed_mps=float(opts.get("stuck_blinker_speed_mps", 0.15)),
+        stuck_blinker_trigger_sec=float(opts.get("stuck_blinker_trigger_sec", 12.0)),
+        stuck_blinker_hold_sec=float(opts.get("stuck_blinker_hold_sec", 3.0)),
+        stuck_blinker_cooldown_sec=float(opts.get("stuck_blinker_cooldown_sec", 25.0)),
+        architecture_type=str(opts.get("architecture_type", "awf/universe/20250130")),
+        scenario_timeout_sec=float(opts.get("scenario_timeout_sec", 300.0)),
+        scenario_record_warmup_sec=float(opts.get("scenario_record_warmup_sec", 15.0)),
+        dry_run=bool(opts.get("dry_run", False)),
+        rviz=bool(opts.get("rviz", False)),
+        planning_setting=str(opts.get("planning_setting", "diffusion_planner")),
+    )
+
+
 def _process_job(payload: dict[str, Any]) -> dict[str, Any]:
     """Worker entry — must be picklable (top-level)."""
     job = payload["job"]
@@ -75,48 +131,17 @@ def _process_job(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         out_dir = Path(job["output_dir"])
         out_dir.mkdir(parents=True, exist_ok=True)
+        results_root = opts.get("results_root") or job.get("results_root")
 
         if opts.get("dry_run"):
-            cfg = JobConfig(
-                model_config=Path(job["model_config_path"]),
-                bag_path=Path(job["bag_path"]),
-                output_dir=out_dir,
-                domain_id=domain_id,
-                map_path=Path(opts["map_path"]),
-                vehicle_model=opts.get("vehicle_model", "lv828l"),
-                sensor_model=opts.get("sensor_model", "aip_x2_gen2"),
-                vehicle_id=opts.get("vehicle_id"),
-                dry_run=True,
-                skip_route_setup=True,
-            )
+            cfg = _job_config_from_payload(job, {**opts, "dry_run": True}, domain_id)
+            cfg.skip_route_setup = True
             jr = run_single_job(cfg)
             result["status"] = jr.status
             result["error"] = jr.error
             return result
 
-        cfg = JobConfig(
-            model_config=Path(job["model_config_path"]),
-            bag_path=Path(job["bag_path"]),
-            output_dir=out_dir,
-            domain_id=domain_id,
-            map_path=Path(opts["map_path"]),
-            vehicle_model=opts.get("vehicle_model", "lv828l"),
-            sensor_model=opts.get("sensor_model", "aip_x2_gen2"),
-            vehicle_id=opts.get("vehicle_id"),
-            topics=load_topics(Path(opts["topics_yaml"]) if opts.get("topics_yaml") else None),
-            end_condition=opts.get("end_condition", "route_arrived"),
-            bag_duration_margin_sec=float(opts.get("bag_duration_margin_sec", 30.0)),
-            route_timeout_sec=float(opts.get("route_timeout_sec", 900.0)),
-            psim_startup_sec=float(opts.get("psim_startup_sec", 120.0)),
-            route_setup_timeout_sec=float(opts.get("route_setup_timeout_sec", 90.0)),
-            auto_engage_timeout_sec=float(opts.get("auto_engage_timeout_sec", 60.0)),
-            perception_warmup_sec=float(opts.get("perception_warmup_sec", 5.0)),
-            perception_ready_timeout_sec=float(opts.get("perception_ready_timeout_sec", 45.0)),
-            perception_ready_min_objects=int(opts.get("perception_ready_min_objects", 1)),
-            perception_ready_stable_sec=float(opts.get("perception_ready_stable_sec", 2.0)),
-            dry_run=False,
-            rviz=bool(opts.get("rviz", False)),
-        )
+        cfg = _job_config_from_payload(job, opts, domain_id)
         jr = run_single_job(cfg)
         if jr.status != "done":
             result["status"] = "failed"
@@ -129,7 +154,7 @@ def _process_job(payload: dict[str, Any]) -> dict[str, Any]:
             result["error"] = "output_bag_missing"
             return result
 
-        goal = extract_goal_from_input_bag(Path(job["bag_path"]))
+        goal = resolve_job_goal(job, bag_out)
         (out_dir / "goal_pose.json").write_text(
             json.dumps({"x": goal[0], "y": goal[1], "yaw": goal[2]}, indent=2) + "\n",
             encoding="utf-8",
@@ -147,7 +172,8 @@ def _process_job(payload: dict[str, Any]) -> dict[str, Any]:
             phase="post_processing",
             start_time=jr.start_time or "",
             domain_id=domain_id,
-            bag_path=str(job["bag_path"]),
+            bag_path=job.get("bag_path"),
+            scenario_path=job.get("scenario_path"),
             model_config=str(job["model_config_path"]),
         )
 
@@ -191,12 +217,13 @@ def _process_job(payload: dict[str, Any]) -> dict[str, Any]:
                     phase="rendering_video",
                     start_time=jr.start_time or "",
                     domain_id=domain_id,
-                    bag_path=str(job["bag_path"]),
+                    bag_path=job.get("bag_path"),
+                    scenario_path=job.get("scenario_path"),
                     model_config=str(job["model_config_path"]),
                 )
                 render_video(
                     bag_out,
-                    out_dir / "preview.mp4",
+                    preview_video_path(job, results_root=results_root, for_write=True),
                     metrics_json=metrics_path,
                     map_path=Path(opts["map_path"]) if opts.get("map_path") else None,
                     goal=goal,
@@ -251,6 +278,7 @@ def run_orchestrator(
         "dry_run": dry_run,
         "render_video": render_video_flag,
         **(extra_opts or {}),
+        "results_root": str(manifest.get("results_root") or manifest_path.parent),
     }
 
     pending = [

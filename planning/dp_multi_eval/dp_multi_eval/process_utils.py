@@ -102,6 +102,8 @@ def cleanup_evaluation_processes() -> None:
     patterns = (
         "planning_simulator.launch",
         "perception_reproducer.py",
+        "scenario_test_runner",
+        "openscenario_interpreter",
         "ros2 bag record",
         "dp_multi_eval.run_single_job",
     )
