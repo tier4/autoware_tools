@@ -148,24 +148,29 @@ def _as_float(value: Any) -> float | None:
 
 
 def _pose_from_mapping(node: dict[str, Any]) -> tuple[float, float, float] | None:
-    """Extract (x, y, yaw) from common pose dict shapes."""
+    """Extract (x, y, yaw) from common pose dict shapes (incl. WorldPosition)."""
     if not isinstance(node, dict):
         return None
-    # Nested Position / Orientation
+    # Nested Position / WorldPosition / Orientation
     pos = node.get("Position") or node.get("position") or node
-    x = _as_float(pos.get("x") if isinstance(pos, dict) else None)
-    y = _as_float(pos.get("y") if isinstance(pos, dict) else None)
+    if isinstance(pos, dict):
+        wp = pos.get("WorldPosition") or pos.get("worldPosition")
+        if isinstance(wp, dict):
+            pos = wp
+    if not isinstance(pos, dict):
+        return None
+    x = _as_float(pos.get("x"))
+    y = _as_float(pos.get("y"))
     if x is None or y is None:
         return None
     yaw = None
     for key in ("yaw", "heading", "h", "theta"):
+        yaw = _as_float(pos.get(key))
+        if yaw is not None:
+            break
         yaw = _as_float(node.get(key))
         if yaw is not None:
             break
-        if isinstance(pos, dict):
-            yaw = _as_float(pos.get(key))
-            if yaw is not None:
-                break
     orient = node.get("Orientation") or node.get("orientation")
     if yaw is None and isinstance(orient, dict):
         yaw = _as_float(orient.get("yaw") or orient.get("h"))
@@ -186,9 +191,9 @@ def _walk_goal_candidates(node: Any, found: list[tuple[float, float, float]], de
             "route_goal",
             "endpose",
             "end_pose",
+            "acquirepositionaction",
         }
         if goalish or ("x" in node and "y" in node and ("yaw" in node or "h" in node)):
-            # Prefer explicitly named goal nodes
             for key, value in node.items():
                 kl = str(key).lower()
                 if kl in {
@@ -200,6 +205,7 @@ def _walk_goal_candidates(node: Any, found: list[tuple[float, float, float]], de
                     "route_goal",
                     "endpose",
                     "end_pose",
+                    "acquirepositionaction",
                 }:
                     pose = _pose_from_mapping(value if isinstance(value, dict) else node)
                     if pose is not None:
@@ -215,8 +221,57 @@ def _walk_goal_candidates(node: Any, found: list[tuple[float, float, float]], de
             _walk_goal_candidates(item, found, depth + 1)
 
 
+def _ego_acquire_position_goal(raw: Any) -> tuple[float, float, float] | None:
+    """T4 / OpenSCENARIO YAML: ego Init → RoutingAction → AcquirePositionAction."""
+    root = raw.get("OpenSCENARIO", raw) if isinstance(raw, dict) else None
+    if not isinstance(root, dict):
+        return None
+    storyboard = root.get("Storyboard") or root.get("storyboard")
+    if not isinstance(storyboard, dict):
+        return None
+    init = storyboard.get("Init") or storyboard.get("init")
+    if not isinstance(init, dict):
+        return None
+    actions = init.get("Actions") or init.get("actions") or {}
+    privates = []
+    if isinstance(actions, dict):
+        privates = actions.get("Private") or actions.get("private") or []
+    if not isinstance(privates, list):
+        return None
+
+    for private in privates:
+        if not isinstance(private, dict):
+            continue
+        entity = str(private.get("entityRef") or private.get("entityref") or "").lower()
+        if entity not in ("ego", "ego_vehicle", "hero"):
+            continue
+        for pact in private.get("PrivateAction") or private.get("privateAction") or []:
+            if not isinstance(pact, dict):
+                continue
+            routing = pact.get("RoutingAction") or pact.get("routingAction") or pact
+            if not isinstance(routing, dict):
+                continue
+            acquire = (
+                routing.get("AcquirePositionAction")
+                or routing.get("acquirePositionAction")
+                or pact.get("AcquirePositionAction")
+            )
+            if isinstance(acquire, dict):
+                pose = _pose_from_mapping(acquire)
+                if pose is not None:
+                    return pose
+    return None
+
+
 def _goal_from_xosc(text: str) -> tuple[float, float, float] | None:
-    # Prefer WorldPosition near "Destination" / last WorldPosition
+    # Prefer AcquirePositionAction / Destination WorldPosition
+    acquire = re.findall(
+        r"(?is)AcquirePositionAction.*?WorldPosition[^>]*x\s*=\s*\"([^\"]+)\"[^>]*y\s*=\s*\"([^\"]+)\"(?:[^>]*h\s*=\s*\"([^\"]+)\")?",
+        text,
+    )
+    if acquire:
+        x, y, h = acquire[0]
+        return float(x), float(y), float(h or 0.0)
     dest_blocks = re.findall(
         r"(?is)Destination.*?WorldPosition[^>]*x\s*=\s*\"([^\"]+)\"[^>]*y\s*=\s*\"([^\"]+)\"(?:[^>]*h\s*=\s*\"([^\"]+)\")?",
         text,
@@ -253,11 +308,16 @@ def extract_goal_from_scenario(scenario_path: Path) -> tuple[float, float, float
     except yaml.YAMLError:
         return _goal_from_xosc(text)
 
+    # Preferred: ego AcquirePositionAction (Scenario Editor / SS2 export)
+    ego_goal = _ego_acquire_position_goal(raw)
+    if ego_goal is not None:
+        return ego_goal
+
     found: list[tuple[float, float, float]] = []
     _walk_goal_candidates(raw, found)
     if found:
         return found[-1]
-    return None
+    return _goal_from_xosc(text)
 
 
 def extract_goal_from_output_bag(bag_path: Path) -> tuple[float, float, float]:
