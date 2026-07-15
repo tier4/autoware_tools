@@ -113,11 +113,15 @@ def build_scenario_runner_command(
         "autoware_launch_package:=autoware_launch",
         "autoware_launch_file:=planning_simulator.launch.xml",
         f"planning_setting:={planning_setting}",
-        # Dotted override used by some SS2 / Web.Auto runners
+        # Dotted overrides used by SS2 / Web.Auto (match manual launches).
+        # planning_simulator.launch.xml defaults rviz:=true — must override explicitly
+        # or Autoware still opens RViz even when launch_rviz:=false.
         f"autoware.planning_setting:={planning_setting}",
+        f"autoware.rviz:={'true' if rviz else 'false'}",
     ]
     if vehicle_id:
         cmd.append(f"vehicle_id:={vehicle_id}")
+        cmd.append(f"autoware.vehicle_id:={vehicle_id}")
     return cmd
 
 

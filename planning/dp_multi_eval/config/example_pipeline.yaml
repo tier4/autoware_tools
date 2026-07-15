@@ -53,8 +53,17 @@ stuck_blinker_hold_sec: 3.0
 stuck_blinker_cooldown_sec: 25.0
 
 # --- Scenario Simulator mode ---
+# Matches a typical working local launch:
+#   ros2 launch scenario_test_runner scenario_test_runner.launch.py \
+#     architecture_type:=awf/universe/20250130 record:=false \
+#     scenario:=/path/to/case.yaml vehicle_model:=lv828l sensor_model:=aip_x2_gen2 \
+#     autoware.vehicle_id:=6_lv828l autoware.planning_setting:=diffusion_planner \
+#     initialize_duration:=120 global_timeout:=300
+# scenario_dir: /home/takahikohasegawa/Documents/scenario_sim/_run
 architecture_type: awf/universe/20250130
 planning_setting: diffusion_planner
+# initialize_duration → psim_startup_sec; global_timeout → scenario_timeout_sec
+psim_startup_sec: 120.0
 scenario_timeout_sec: 300.0
 scenario_record_warmup_sec: 15.0
 

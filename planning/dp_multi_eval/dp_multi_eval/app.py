@@ -19,7 +19,11 @@ from dp_multi_eval.build_dashboard import (
 )
 from dp_multi_eval.path_picker import pick_folder
 from dp_multi_eval.process_utils import cleanup_evaluation_processes, stop_pid_group
-from dp_multi_eval.scenario_sim import discover_scenarios, scenario_key
+from dp_multi_eval.scenario_sim import (
+    build_scenario_runner_command,
+    discover_scenarios,
+    scenario_key,
+)
 
 # Soft dependency: streamlit
 try:
@@ -437,6 +441,105 @@ def main() -> None:
                 if checked:
                     selected_scenarios.append(scn)
 
+        st.subheader("Vehicle / Autoware")
+        col_a1, col_a2, col_a3 = st.columns(3)
+        with col_a1:
+            vehicle_model = st.text_input(
+                "vehicle_model",
+                value=str(base.get("vehicle_model", "lv828l")),
+                help="Passed to scenario_test_runner / planning_simulator as vehicle_model:=…",
+            )
+            sensor_model = st.text_input(
+                "sensor_model",
+                value=str(base.get("sensor_model", "aip_x2_gen2")),
+            )
+        with col_a2:
+            vehicle_id = st.text_input(
+                "vehicle_id (autoware.vehicle_id)",
+                value=str(base.get("vehicle_id", "6_lv828l")),
+                help="Matches manual launch: autoware.vehicle_id:=6_lv828l",
+            )
+            planning_setting = st.text_input(
+                "planning_setting",
+                value=str(base.get("planning_setting", "diffusion_planner")),
+                help="autoware.planning_setting:=… (use diffusion_planner)",
+            )
+        with col_a3:
+            map_path = st.text_input(
+                "map_path",
+                value=str(base.get("map_path", "/opt/autoware/maps")),
+                help="Lanelet map used for OOB / offline metrics.",
+            )
+            launch_rviz = st.checkbox(
+                "Launch RViz",
+                value=bool(base.get("rviz", False)),
+                help="On = open RViz (debug). Off = headless (default). "
+                "Reproducer: rviz:=…  "
+                "Scenario Simulator: launch_rviz:=… and autoware.rviz:=… "
+                "(Autoware defaults rviz on — both must be off).",
+            )
+
+        initialize_duration_sec = float(base.get("psim_startup_sec", 120.0))
+        scenario_timeout_sec = float(base.get("scenario_timeout_sec", 300.0))
+        architecture_type = str(base.get("architecture_type", "awf/universe/20250130"))
+        scenario_record_warmup_sec = float(base.get("scenario_record_warmup_sec", 15.0))
+
+        if mode == "scenario_simulator":
+            st.subheader("Scenario Simulator launch")
+            st.caption(
+                "Mapped to `ros2 launch scenario_test_runner scenario_test_runner.launch.py` "
+                "(same args as a successful local single-scenario run)."
+            )
+            col_s1, col_s2 = st.columns(2)
+            with col_s1:
+                architecture_type = st.text_input(
+                    "architecture_type",
+                    value=architecture_type,
+                    help="e.g. awf/universe/20250130",
+                )
+                initialize_duration_sec = st.number_input(
+                    "initialize_duration [s]",
+                    min_value=30.0,
+                    max_value=600.0,
+                    value=float(initialize_duration_sec),
+                    step=10.0,
+                    help="SS2 initialize_duration — Autoware bring-up allowance.",
+                )
+            with col_s2:
+                scenario_timeout_sec = st.number_input(
+                    "global_timeout [s]",
+                    min_value=30.0,
+                    max_value=3600.0,
+                    value=float(scenario_timeout_sec),
+                    step=30.0,
+                    help="SS2 global_timeout — scenario wall-clock budget.",
+                )
+                scenario_record_warmup_sec = st.number_input(
+                    "Record warmup [s]",
+                    min_value=0.0,
+                    max_value=120.0,
+                    value=float(scenario_record_warmup_sec),
+                    step=5.0,
+                    help="Wait after SS2 start before ros2 bag record (sim time).",
+                )
+            if selected_scenarios:
+                sample = selected_scenarios[0]
+                preview_cmd = build_scenario_runner_command(
+                    scenario_path=sample,
+                    output_directory=Path("/tmp/dp_multi_eval_ss2_preview"),
+                    vehicle_model=vehicle_model,
+                    sensor_model=sensor_model,
+                    architecture_type=architecture_type,
+                    planning_setting=planning_setting,
+                    initialize_duration_sec=initialize_duration_sec,
+                    global_timeout_sec=scenario_timeout_sec,
+                    rviz=launch_rviz,
+                    record=False,
+                    vehicle_id=vehicle_id or None,
+                )
+                with st.expander("Preview launch command (first selected scenario)", expanded=False):
+                    st.code(" \\\n  ".join(preview_cmd), language="bash")
+
         run_name = st.text_input("Run name", value=time.strftime("run_%Y%m%d_%H%M%S"))
         max_workers = st.number_input(
             "Parallel workers",
@@ -497,7 +600,16 @@ def main() -> None:
                 cfg_base["mode"] = mode
                 cfg_base["results_root"] = str(results_root)
                 cfg_base["max_workers"] = int(max_workers)
-                cfg_base["map_path"] = cfg_base.get("map_path", "/opt/autoware/maps")
+                cfg_base["map_path"] = str(map_path).strip() or "/opt/autoware/maps"
+                cfg_base["vehicle_model"] = str(vehicle_model).strip()
+                cfg_base["sensor_model"] = str(sensor_model).strip()
+                cfg_base["vehicle_id"] = str(vehicle_id).strip()
+                cfg_base["planning_setting"] = str(planning_setting).strip()
+                cfg_base["psim_startup_sec"] = float(initialize_duration_sec)
+                cfg_base["architecture_type"] = str(architecture_type).strip()
+                cfg_base["scenario_timeout_sec"] = float(scenario_timeout_sec)
+                cfg_base["scenario_record_warmup_sec"] = float(scenario_record_warmup_sec)
+                cfg_base["rviz"] = bool(launch_rviz)
                 cfg_base["video_view_frame"] = video_view_frame
                 cfg_base["video_view_range_m"] = float(video_view_range_m)
                 cfg_base["show_planning_factors"] = bool(show_planning_factors)
