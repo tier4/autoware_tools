@@ -18,6 +18,8 @@
 #include "type_alias.hpp"
 #include "utils.hpp"
 
+#include <autoware/object_recognition_utils/object_classification.hpp>
+#include <autoware/universe_utils/ros/uuid_helper.hpp>
 #include <builtin_interfaces/msg/time.hpp>
 #include <rclcpp/rclcpp.hpp>
 
@@ -25,6 +27,7 @@
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -44,6 +47,17 @@ struct PerceptionReplayerCommonParam
   bool tracked_object;
   bool replay_route;
   std::vector<std::string> reference_image_topics;  // Topics for reference images
+
+  // Distance-based object filter: objects farther than this from the current ego position are
+  // not published. Disabled when <= 0.0.
+  double object_filter_distance{0.0};
+  // Semantic labels (autoware_perception_msgs::msg::ObjectClassification) the distance filter
+  // applies to (AND condition with the distance check). Empty means all semantic types.
+  std::vector<uint8_t> object_filter_semantics;
+  // Object id prefixes (hex strings, as produced by autoware::universe_utils::toHexString; may
+  // be the full 32-char id or just a leading prefix, e.g. the first 4 hex chars) whose matching
+  // objects are never published, regardless of distance or semantic type.
+  std::vector<std::string> object_filter_ids;
 };
 
 class PerceptionReplayerCommon : public rclcpp::Node
@@ -170,6 +184,76 @@ protected:
       pose.position.x += noise_x_world;
       pose.position.y += noise_y_world;
     }
+  }
+
+  // Drop objects that should not be published:
+  //  - any object whose id (hex string) starts with one of param_.object_filter_ids,
+  //    unconditionally. Entries may be a full 32-char id or just a leading prefix (e.g. the
+  //    first 4 hex chars); and
+  //  - objects farther than param_.object_filter_distance from the current ego position, if that
+  //    filter is enabled (> 0.0). When param_.object_filter_semantics is non-empty, only objects
+  //    whose highest-probability classification is in that list are subject to the distance
+  //    filter (AND condition); otherwise the distance filter applies to every object.
+  template <typename T>
+  void filter_objects(T & msg) const
+  {
+    const bool id_filter_enabled = !param_.object_filter_ids.empty();
+    const bool distance_filter_enabled = param_.object_filter_distance > 0.0 && ego_odom_;
+    if (!id_filter_enabled && !distance_filter_enabled) {
+      return;
+    }
+
+    const auto is_filtered_id = [this](const auto & object) {
+      const auto id_hex = autoware::universe_utils::toHexString(object.object_id);
+      return std::any_of(
+        param_.object_filter_ids.begin(), param_.object_filter_ids.end(),
+        [&id_hex](const std::string & prefix) { return id_hex.rfind(prefix, 0) == 0; });
+    };
+
+    const auto is_subject_to_distance_filter = [this](const auto & object) {
+      if (param_.object_filter_semantics.empty()) {
+        return true;
+      }
+      const auto label = autoware::object_recognition_utils::getHighestProbLabel(
+        object.classification);
+      return std::find(
+               param_.object_filter_semantics.begin(), param_.object_filter_semantics.end(),
+               label) != param_.object_filter_semantics.end();
+    };
+
+    const double filter_distance_squared =
+      param_.object_filter_distance * param_.object_filter_distance;
+    const auto ego_position =
+      distance_filter_enabled ? ego_odom_->pose.pose.position : geometry_msgs::msg::Point{};
+
+    auto & objects = msg.objects;
+    objects.erase(
+      std::remove_if(
+        objects.begin(), objects.end(),
+        [&](const auto & object) {
+          if (id_filter_enabled && is_filtered_id(object)) {
+            return true;
+          }
+
+          if (!distance_filter_enabled || !is_subject_to_distance_filter(object)) {
+            return false;
+          }
+
+          const geometry_msgs::msg::Point & object_position = [&]() -> const
+            geometry_msgs::msg::Point &
+          {
+            if constexpr (std::is_same_v<T, PredictedObjects>) {
+              return object.kinematics.initial_pose_with_covariance.pose.position;
+            } else {
+              return object.kinematics.pose_with_covariance.pose.position;
+            }
+          }();
+
+          const double dx = object_position.x - ego_position.x;
+          const double dy = object_position.y - ego_position.y;
+          return (dx * dx + dy * dy) > filter_distance_squared;
+        }),
+      objects.end());
   }
 
   // noise

@@ -15,6 +15,8 @@
 #include "help_utils.hpp"
 #include "perception_reproducer.hpp"
 
+#include <autoware/object_recognition_utils/object_classification.hpp>
+
 #include <QCommandLineParser>
 #include <QCoreApplication>
 #include <rclcpp/rclcpp.hpp>
@@ -121,6 +123,31 @@ int main(int argc, char ** argv)
       "topics", "");
     options << ref_image_topics_option;
 
+    const QCommandLineOption object_filter_distance_option(
+      QStringList() << "object-filter-distance",
+      "do not publish objects farther than this distance [m] from the current ego position. "
+      "Disabled by default.",
+      "meters", "0.0");
+    options << object_filter_distance_option;
+
+    const QCommandLineOption object_filter_semantics_option(
+      QStringList() << "object-filter-semantics",
+      "comma-separated list of semantic types (e.g., 'PEDESTRIAN,BICYCLE') that the "
+      "--object-filter-distance filter applies to (AND condition with the distance filter). "
+      "One of UNKNOWN, CAR, TRUCK, BUS, TRAILER, MOTORCYCLE, BICYCLE, PEDESTRIAN, ANIMAL, HAZARD. "
+      "If not given while --object-filter-distance is set, the distance filter applies to all "
+      "semantic types.",
+      "semantics", "");
+    options << object_filter_semantics_option;
+
+    const QCommandLineOption object_filter_ids_option(
+      QStringList() << "object-filter-ids",
+      "comma-separated list of object id hex strings to never publish, regardless of distance "
+      "or semantic type. Each entry may be a full 32-char id or just a leading prefix (e.g. "
+      "'1a2b' matches any id starting with those 4 hex chars).",
+      "ids", "");
+    options << object_filter_ids_option;
+
     for (const auto & option : options) {
       parser.addOption(option);
     }
@@ -158,6 +185,33 @@ int main(int argc, char ** argv)
       }
       std::cout << "Reference image topics: " << param.reference_image_topics.size()
                 << " topics configured" << std::endl;
+    }
+
+    param.object_filter_distance = parser.value(object_filter_distance_option).toDouble();
+
+    // Parse comma-separated semantic types for the distance filter
+    const QString semantics_str = parser.value(object_filter_semantics_option);
+    if (!semantics_str.isEmpty()) {
+      const QStringList semantics_list = semantics_str.split(',', Qt::SkipEmptyParts);
+      for (const auto & semantic : semantics_list) {
+        try {
+          param.object_filter_semantics.push_back(
+            autoware::object_recognition_utils::toLabel(semantic.trimmed().toStdString()));
+        } catch (const std::exception & e) {
+          std::cerr << "Error: invalid --object-filter-semantics value: "
+                     << semantic.trimmed().toStdString() << std::endl;
+          return 1;
+        }
+      }
+    }
+
+    // Parse comma-separated object ids to exclude
+    const QString filter_ids_str = parser.value(object_filter_ids_option);
+    if (!filter_ids_str.isEmpty()) {
+      const QStringList filter_ids_list = filter_ids_str.split(',', Qt::SkipEmptyParts);
+      for (const auto & id : filter_ids_list) {
+        param.object_filter_ids.push_back(id.trimmed().toLower().toStdString());
+      }
     }
 
     if (param.rosbag_format != "sqlite3" && param.rosbag_format != "mcap") {

@@ -329,6 +329,7 @@ void PerceptionReplayerCommon::publish_topics_at_timestamp(
     const auto objects_msg = utils::find_message_by_timestamp(data, bag_timestamp);
     if (objects_msg.has_value()) {
       auto msg = objects_msg.value();
+      filter_objects(msg);
       if (apply_noise) {
         apply_perception_noise(msg);
       }
