@@ -164,6 +164,25 @@ def _poses_from_tf(reader: SequentialReader, type_map: dict[str, str], min_move_
     return poses
 
 
+def yaw_to_quaternion(yaw: float) -> tuple[float, float, float, float]:
+    """Return (x, y, z, w) for a pure yaw rotation."""
+    half = 0.5 * yaw
+    return 0.0, 0.0, math.sin(half), math.cos(half)
+
+
+def pose_from_xy_yaw(x: float, y: float, yaw: float, z: float = 0.0) -> Pose:
+    pose = Pose()
+    pose.position.x = float(x)
+    pose.position.y = float(y)
+    pose.position.z = float(z)
+    qx, qy, qz, qw = yaw_to_quaternion(float(yaw))
+    pose.orientation.x = qx
+    pose.orientation.y = qy
+    pose.orientation.z = qz
+    pose.orientation.w = qw
+    return pose
+
+
 def get_poses_from_bag(bag_path: Path, min_move_m: float = 0.1) -> tuple[Pose, Pose]:
     reader = open_bag_reader(bag_path)
     type_map = {topic.name: topic.type for topic in reader.get_all_topics_and_types()}
@@ -1473,6 +1492,7 @@ class RouteSetupNode(Node):
         route_stop_order: list[str] | None = None,
         start_pose_stop_fallback: bool = False,
         start_pose_stop_min_dist_m: float = 1.0,
+        goal_pose: Pose | None = None,
     ) -> tuple[bool, str]:
         route_order = route_stop_order or DEFAULT_HIRATSUKA_ROUTE_ORDER
 
@@ -1503,9 +1523,11 @@ class RouteSetupNode(Node):
             self._warmup_route_subscriptions(timeout_sec=5.0)
 
             try:
-                bag_start_pose, goal_pose = get_poses_from_bag(bag_path, min_move_m=min_move_m)
+                bag_start_pose, bag_goal_pose = get_poses_from_bag(bag_path, min_move_m=min_move_m)
             except ValueError as error:
                 return False, str(error)
+            if goal_pose is None:
+                goal_pose = bag_goal_pose
 
             initial_pose = bag_start_pose
             offset_note = ""
@@ -1720,6 +1742,7 @@ def setup_route_for_bag(
     route_stop_order: list[str] | None = None,
     start_pose_stop_fallback: bool = False,
     start_pose_stop_min_dist_m: float = 1.0,
+    goal_pose: Pose | None = None,
 ) -> tuple[bool, str]:
     if not rclpy.ok():
         rclpy.init()
@@ -1743,8 +1766,83 @@ def setup_route_for_bag(
             route_stop_order=route_stop_order,
             start_pose_stop_fallback=start_pose_stop_fallback,
             start_pose_stop_min_dist_m=start_pose_stop_min_dist_m,
+            goal_pose=goal_pose,
         )
     finally:
+        node.destroy_node()
+
+
+def advance_route_to_goal(
+    goal_pose: Pose,
+    *,
+    timeout_sec: float = 60.0,
+    service_wait_sec: float = 60.0,
+    backend_preference: str = "adapi",
+    map_path: Path | None = None,
+    stop_point_goal_fallback: bool = True,
+    stop_point_snap_goal_m: float = 2.0,
+    stop_point_goal_min_dist_m: float = 0.5,
+    stop_point_waypoint_fallback: bool = True,
+) -> tuple[bool, str]:
+    """Clear current route (after ARRIVED) and set a new goal without re-localizing."""
+    if not rclpy.ok():
+        rclpy.init()
+
+    node = RouteSetupNode()
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
+    stop_spin = threading.Event()
+
+    def _spin_executor() -> None:
+        while not stop_spin.is_set() and rclpy.ok():
+            if node._executor_pause.is_set():
+                time.sleep(0.05)
+                continue
+            executor.spin_once(timeout_sec=0.1)
+
+    spin_thread = threading.Thread(target=_spin_executor, daemon=True)
+    spin_thread.start()
+    node._executor = executor
+    node._executor_spinning = True
+    time.sleep(1.0)
+
+    try:
+        backend, message = node._wait_for_backend(service_wait_sec, backend_preference)
+        if backend is None:
+            return False, message
+        node.backend = backend
+        node._warmup_route_subscriptions(timeout_sec=3.0)
+
+        # Prefer live ego as spawn for the next leg
+        spawn_pose = goal_pose
+        if node.ego_pose is not None:
+            spawn_pose = node.ego_pose
+
+        ok, step_message = node._clear_route_if_needed(timeout_sec)
+        if not ok:
+            return False, f"advance_clear_failed: {step_message}"
+
+        ok, route_message = node._try_set_route_with_stop_fallback(
+            spawn_pose,
+            goal_pose,
+            timeout_sec,
+            map_path=map_path,
+            stop_point_goal_fallback=stop_point_goal_fallback,
+            stop_points_csv="stop_points.csv",
+            stop_point_goal_min_dist_m=stop_point_goal_min_dist_m,
+            stop_point_snap_goal_m=stop_point_snap_goal_m,
+            route_stop_order=[],
+            stop_point_waypoint_fallback=stop_point_waypoint_fallback,
+        )
+        if not ok:
+            return False, f"advance_set_failed: {route_message}"
+        return True, f"advance_ok: {route_message}"
+    finally:
+        node._executor_spinning = False
+        node._executor = None
+        stop_spin.set()
+        spin_thread.join(timeout=2.0)
+        executor.remove_node(node)
         node.destroy_node()
 
 

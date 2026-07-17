@@ -43,6 +43,14 @@ perception_warmup_sec: 5.0
 perception_ready_timeout_sec: 45.0
 perception_ready_min_objects: 1
 perception_ready_stable_sec: 2.0
+# perception_reproducer -r [m]. 0 = nearest only (can flicker); 1.5 = tool default
+reproducer_search_radius_m: 1.5
+# Multi-goal bag replay: bus stop → ARRIVED → next goal (single-goal bags still work).
+multi_goal: false
+multi_goal_source: auto   # auto | goal_topic | stop_segments
+multi_goal_stop_speed_mps: 0.2
+multi_goal_stop_min_sec: 8.0
+multi_goal_min_spacing_m: 15.0
 # If ego is nearly stopped while waiting for ARRIVED, publish LEFT then RIGHT
 # blinker on /vehicle/status/turn_indicators_status (DP input) to try triggering
 # a new trajectory (lane-change / pull-out stalls).
@@ -66,6 +74,8 @@ planning_setting: diffusion_planner
 psim_startup_sec: 120.0
 scenario_timeout_sec: 300.0
 scenario_record_warmup_sec: 15.0
+# How many times to run each scenario file (creates …/run01, run02, … jobs when > 1)
+scenario_repeat_count: 1
 
 # Optional paths (defaults live in the package share/config/)
 # thresholds: /path/to/thresholds.yaml

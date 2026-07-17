@@ -90,6 +90,14 @@ class JobConfig:
     perception_ready_timeout_sec: float = 45.0
     perception_ready_min_objects: int = 1
     perception_ready_stable_sec: float = 2.0
+    # perception_reproducer -r: 0 causes nearest-index thrash/flicker; 1.5 is tool default.
+    reproducer_search_radius_m: float = 1.5
+    # Multi-goal bag replay (bus stop → arrive → next goal). Off = single start→end route.
+    multi_goal: bool = False
+    multi_goal_source: str = "auto"  # auto | goal_topic | stop_segments
+    multi_goal_stop_speed_mps: float = 0.2
+    multi_goal_stop_min_sec: float = 8.0
+    multi_goal_min_spacing_m: float = 15.0
     # When stuck (near-zero speed), publish left/right blinker to DP input to try
     # triggering a new trajectory (experimental recovery for lane-change stalls).
     stuck_blinker_nudge: bool = True
@@ -561,7 +569,7 @@ def build_psim_command(cfg: JobConfig) -> list[str]:
     return cmd
 
 
-def build_reproducer_command(bag_path: Path, search_radius: float = 0.0) -> list[str]:
+def build_reproducer_command(bag_path: Path, search_radius: float = 1.5) -> list[str]:
     return [
         "ros2",
         "run",
@@ -608,7 +616,12 @@ def _load_route_setup_module(env: dict[str, str]):
     return module
 
 
-def setup_route(cfg: JobConfig, env: dict[str, str]) -> tuple[bool, str]:
+def setup_route(
+    cfg: JobConfig,
+    env: dict[str, str],
+    *,
+    goal_xy_yaw: tuple[float, float, float] | None = None,
+) -> tuple[bool, str]:
     """Localization + route in-process (same Python interpreter, shared DDS env)."""
     if cfg.skip_route_setup:
         return True, "route_setup_skipped"
@@ -619,6 +632,9 @@ def setup_route(cfg: JobConfig, env: dict[str, str]) -> tuple[bool, str]:
         os.environ.clear()
         os.environ.update(env)
         module = _load_route_setup_module(env)
+        goal_pose = None
+        if goal_xy_yaw is not None and hasattr(module, "pose_from_xy_yaw"):
+            goal_pose = module.pose_from_xy_yaw(*goal_xy_yaw)
         ok, message = module.setup_route_for_bag(
             bag_path=cfg.bag_path.expanduser().resolve(),  # type: ignore[union-attr]
             timeout_sec=cfg.route_setup_timeout_sec,
@@ -628,6 +644,7 @@ def setup_route(cfg: JobConfig, env: dict[str, str]) -> tuple[bool, str]:
             map_path=cfg.map_path,
             stop_point_goal_fallback=True,
             start_pose_stop_fallback=True,
+            goal_pose=goal_pose,
         )
         if ok:
             print(f"Route setup succeeded: {message}")
@@ -636,6 +653,44 @@ def setup_route(cfg: JobConfig, env: dict[str, str]) -> tuple[bool, str]:
         return False, f"route_setup_failed: {message}"
     except Exception as exc:  # noqa: BLE001
         return False, f"route_setup_exception: {exc}"
+    finally:
+        os.environ.clear()
+        os.environ.update(old_env)
+
+
+def advance_route(
+    cfg: JobConfig,
+    env: dict[str, str],
+    goal_xy_yaw: tuple[float, float, float],
+) -> tuple[bool, str]:
+    """Clear ARRIVED route and set the next multi-goal destination."""
+    print(
+        f"[info] Advancing route to next goal "
+        f"({goal_xy_yaw[0]:.1f}, {goal_xy_yaw[1]:.1f})"
+    )
+    old_env = os.environ.copy()
+    try:
+        os.environ.clear()
+        os.environ.update(env)
+        module = _load_route_setup_module(env)
+        if not hasattr(module, "advance_route_to_goal") or not hasattr(module, "pose_from_xy_yaw"):
+            return False, "advance_route_unsupported (rebuild diffusion_planner_batch_eval)"
+        goal_pose = module.pose_from_xy_yaw(*goal_xy_yaw)
+        ok, message = module.advance_route_to_goal(
+            goal_pose,
+            timeout_sec=cfg.route_setup_timeout_sec,
+            service_wait_sec=max(cfg.route_setup_timeout_sec, 60.0),
+            backend_preference="adapi",
+            map_path=cfg.map_path,
+            stop_point_goal_fallback=True,
+        )
+        if ok:
+            print(f"[info] {message}")
+            return True, message
+        print(f"[error] advance failed: {message}")
+        return False, message
+    except Exception as exc:  # noqa: BLE001
+        return False, f"advance_route_exception: {exc}"
     finally:
         os.environ.clear()
         os.environ.update(old_env)
@@ -899,7 +954,9 @@ def run_reproducer_job(cfg: JobConfig) -> JobResult:
         # Ensure setup_route sees bag_path
         cfg.bag_path = bag_path
         psim_cmd = build_psim_command(cfg)
-        repro_cmd = build_reproducer_command(bag_path)
+        repro_cmd = build_reproducer_command(
+            bag_path, search_radius=float(cfg.reproducer_search_radius_m)
+        )
         record_cmd = build_record_command(output_bag, cfg.topics.record_list())
 
         print(f"[info] mode=reproducer ROS_DOMAIN_ID={cfg.domain_id}")
@@ -973,7 +1030,35 @@ def run_reproducer_job(cfg: JobConfig) -> JobResult:
                 "routing services not visible in ROS graph after startup waits"
             )
 
-        ok, route_msg = setup_route(cfg, env)
+        # Resolve route legs (single-goal by default)
+        route_goals: list[tuple[float, float, float]] = []
+        if cfg.multi_goal:
+            from dp_multi_eval.multi_goal import extract_route_goals, goals_to_jsonable
+
+            extracted = extract_route_goals(
+                bag_path,
+                source=cfg.multi_goal_source,
+                stop_speed_mps=cfg.multi_goal_stop_speed_mps,
+                stop_min_sec=cfg.multi_goal_stop_min_sec,
+                min_spacing_m=cfg.multi_goal_min_spacing_m,
+            )
+            route_goals = [(g.x, g.y, g.yaw) for g in extracted]
+            (cfg.output_dir / "route_goals.json").write_text(
+                json.dumps({"goals": goals_to_jsonable(extracted)}, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            print(
+                f"[info] multi_goal=on source={cfg.multi_goal_source} "
+                f"legs={len(route_goals)}"
+            )
+            for i, g in enumerate(extracted):
+                print(
+                    f"[info]   leg {i + 1}/{len(extracted)}: "
+                    f"({g.x:.1f}, {g.y:.1f}) source={g.source}"
+                )
+
+        first_goal = route_goals[0] if route_goals else None
+        ok, route_msg = setup_route(cfg, env, goal_xy_yaw=first_goal)
         if not ok:
             raise RuntimeError(f"route setup failed: {route_msg}")
         print(f"[info] {route_msg}")
@@ -986,7 +1071,10 @@ def run_reproducer_job(cfg: JobConfig) -> JobResult:
             bag_path=str(bag_path),
             model_config=str(cfg.model_config),
         )
-        print(f"[info] Starting perception_reproducer...")
+        print(
+            f"[info] Starting perception_reproducer "
+            f"(search_radius={cfg.reproducer_search_radius_m:.1f}m)..."
+        )
         repro = popen(repro_cmd, env=env)
         procs.append(repro)
 
@@ -1029,42 +1117,80 @@ def run_reproducer_job(cfg: JobConfig) -> JobResult:
             bag_path=str(bag_path),
             model_config=str(cfg.model_config),
         )
-        if cfg.end_condition == "route_arrived":
-            end_status, detail = wait_for_route_arrived(
-                env,
-                run_timeout,
-                stuck_blinker_nudge=bool(cfg.stuck_blinker_nudge),
-                stuck_blinker_speed_mps=float(cfg.stuck_blinker_speed_mps),
-                stuck_blinker_trigger_sec=float(cfg.stuck_blinker_trigger_sec),
-                stuck_blinker_hold_sec=float(cfg.stuck_blinker_hold_sec),
-                stuck_blinker_cooldown_sec=float(cfg.stuck_blinker_cooldown_sec),
-            )
-            if end_status != "done":
-                # Soft failure: still keep the bag for offline metrics
-                error = detail
-                status = "failed"
+
+        legs = route_goals if (cfg.multi_goal and len(route_goals) > 1) else [None]
+        drive_deadline = time.time() + run_timeout
+        status = "done"
+        error = None
+        for leg_idx, _leg in enumerate(legs):
+            remaining = max(5.0, drive_deadline - time.time())
+            if cfg.multi_goal and len(legs) > 1:
+                print(
+                    f"[info] Driving leg {leg_idx + 1}/{len(legs)} "
+                    f"(timeout remaining {remaining:.0f}s)..."
+                )
+            if cfg.end_condition == "route_arrived" or (
+                cfg.multi_goal and len(legs) > 1 and leg_idx < len(legs) - 1
+            ):
+                end_status, detail = wait_for_route_arrived(
+                    env,
+                    remaining,
+                    stuck_blinker_nudge=bool(cfg.stuck_blinker_nudge),
+                    stuck_blinker_speed_mps=float(cfg.stuck_blinker_speed_mps),
+                    stuck_blinker_trigger_sec=float(cfg.stuck_blinker_trigger_sec),
+                    stuck_blinker_hold_sec=float(cfg.stuck_blinker_hold_sec),
+                    stuck_blinker_cooldown_sec=float(cfg.stuck_blinker_cooldown_sec),
+                )
+                if end_status != "done":
+                    if cfg.end_condition == "bag_duration" and time.time() >= drive_deadline:
+                        print(f"[info] bag_duration complete ({detail})")
+                        status = "done"
+                        error = None
+                        break
+                    error = detail if len(legs) == 1 else f"leg_{leg_idx + 1}:{detail}"
+                    status = "failed"
+                    break
+                print(f"[info] Leg {leg_idx + 1} ARRIVED ({detail})")
+                time.sleep(cfg.post_arrival_sec)
             else:
+                # Final leg with bag_duration: wait remaining time; ARRIVED early-exits.
+                print(
+                    f"[info] Waiting bag_duration timeout {remaining:.0f}s "
+                    f"(blinker nudge enabled={cfg.stuck_blinker_nudge})..."
+                )
+                end_status, detail = wait_for_route_arrived(
+                    env,
+                    remaining,
+                    stuck_blinker_nudge=bool(cfg.stuck_blinker_nudge),
+                    stuck_blinker_speed_mps=float(cfg.stuck_blinker_speed_mps),
+                    stuck_blinker_trigger_sec=float(cfg.stuck_blinker_trigger_sec),
+                    stuck_blinker_hold_sec=float(cfg.stuck_blinker_hold_sec),
+                    stuck_blinker_cooldown_sec=float(cfg.stuck_blinker_cooldown_sec),
+                )
+                if end_status == "done":
+                    print(f"[info] ARRIVED before bag_duration ({detail})")
+                    time.sleep(cfg.post_arrival_sec)
+                else:
+                    print(f"[info] bag_duration complete ({detail})")
                 status = "done"
-                time.sleep(cfg.post_arrival_sec)
-        else:
-            # bag_duration: wait full timeout with optional stuck blinker nudge;
-            # ARRIVED early-exits successfully.
-            print(f"[info] Waiting bag_duration timeout {run_timeout:.0f}s (blinker nudge enabled={cfg.stuck_blinker_nudge})...")
-            end_status, detail = wait_for_route_arrived(
-                env,
-                run_timeout,
-                stuck_blinker_nudge=bool(cfg.stuck_blinker_nudge),
-                stuck_blinker_speed_mps=float(cfg.stuck_blinker_speed_mps),
-                stuck_blinker_trigger_sec=float(cfg.stuck_blinker_trigger_sec),
-                stuck_blinker_hold_sec=float(cfg.stuck_blinker_hold_sec),
-                stuck_blinker_cooldown_sec=float(cfg.stuck_blinker_cooldown_sec),
-            )
-            if end_status == "done":
-                print(f"[info] ARRIVED before bag_duration ({detail})")
-                time.sleep(cfg.post_arrival_sec)
-            else:
-                print(f"[info] bag_duration complete ({detail})")
-            status = "done"
+                error = None
+                break
+
+            # More legs? Clear + set next goal, then re-engage.
+            if leg_idx + 1 < len(legs) and legs[leg_idx + 1] is not None:
+                next_goal = route_goals[leg_idx + 1]
+                adv_ok, adv_msg = advance_route(cfg, env, next_goal)
+                if not adv_ok:
+                    error = f"leg_{leg_idx + 2}_advance:{adv_msg}"
+                    status = "failed"
+                    break
+                ok, engage_msg = engage_autonomous(
+                    env, timeout_sec=cfg.auto_engage_timeout_sec
+                )
+                if not ok:
+                    print(f"[warn] {engage_msg} after advance — continuing")
+                else:
+                    print(f"[info] {engage_msg} (leg {leg_idx + 2})")
 
         if status == "done":
             error = None
@@ -1142,6 +1268,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--perception_ready_timeout_sec", type=float, default=45.0)
     p.add_argument("--perception_ready_min_objects", type=int, default=1)
     p.add_argument("--perception_ready_stable_sec", type=float, default=2.0)
+    p.add_argument(
+        "--reproducer_search_radius_m",
+        type=float,
+        default=1.5,
+        help="perception_reproducer -r (meters). Use 0 for old nearest-only behavior (may flicker).",
+    )
+    p.add_argument(
+        "--multi_goal",
+        action="store_true",
+        help="Replay multiple goals from one bag (bus-stop legs).",
+    )
+    p.add_argument(
+        "--multi_goal_source",
+        choices=("auto", "goal_topic", "stop_segments"),
+        default="auto",
+    )
+    p.add_argument("--multi_goal_stop_speed_mps", type=float, default=0.2)
+    p.add_argument("--multi_goal_stop_min_sec", type=float, default=8.0)
+    p.add_argument("--multi_goal_min_spacing_m", type=float, default=15.0)
     p.add_argument("--architecture_type", default="awf/universe/20250130")
     p.add_argument("--scenario_timeout_sec", type=float, default=300.0)
     p.add_argument("--skip_route_setup", action="store_true")
@@ -1178,6 +1323,12 @@ def config_from_args(args: argparse.Namespace) -> JobConfig:
         perception_ready_timeout_sec=args.perception_ready_timeout_sec,
         perception_ready_min_objects=args.perception_ready_min_objects,
         perception_ready_stable_sec=args.perception_ready_stable_sec,
+        reproducer_search_radius_m=args.reproducer_search_radius_m,
+        multi_goal=bool(args.multi_goal),
+        multi_goal_source=str(args.multi_goal_source),
+        multi_goal_stop_speed_mps=float(args.multi_goal_stop_speed_mps),
+        multi_goal_stop_min_sec=float(args.multi_goal_stop_min_sec),
+        multi_goal_min_spacing_m=float(args.multi_goal_min_spacing_m),
         architecture_type=args.architecture_type,
         scenario_timeout_sec=args.scenario_timeout_sec,
         dry_run=args.dry_run,

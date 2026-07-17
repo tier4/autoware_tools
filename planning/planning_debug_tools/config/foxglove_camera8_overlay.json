@@ -1,0 +1,74 @@
+{
+  "configById": {
+    "Image!camera8": {
+      "imageMode": {
+        "imageTopic": "/sensing/camera/camera8/image_raw/compressed",
+        "calibrationTopic": "/sensing/camera/camera8/image_raw/camera_info",
+        "synchronize": false,
+        "rotation": 0,
+        "flipHorizontal": false,
+        "flipVertical": false
+      },
+      "scene": {},
+      "transforms": {},
+      "imageAnnotations": {
+        "/foxglove/overlay/control_mode_2d": { "visible": true }
+      },
+      "topics": {
+        "/foxglove/overlay/trajectory": { "visible": true },
+        "/foxglove/overlay/predicted_objects": { "visible": true },
+        "/foxglove/overlay/planning_factors/modifier_obstacle_stop": { "visible": true },
+        "/foxglove/overlay/planning_factors/diffusion_planner": { "visible": true },
+        "/map/vector_map_marker": { "visible": true },
+        "/control/trajectory_follower/controller_node_exe/virtual_wall": { "visible": true },
+        "/planning/scenario_planning/lane_driving/behavior_planning/behavior_velocity_planner/virtual_wall/crosswalk": { "visible": true },
+        "/planning/scenario_planning/lane_driving/behavior_planning/behavior_velocity_planner/virtual_wall/intersection": { "visible": true },
+        "/planning/scenario_planning/lane_driving/behavior_planning/behavior_velocity_planner/virtual_wall/stop_line": { "visible": true },
+        "/planning/scenario_planning/lane_driving/behavior_planning/behavior_velocity_planner/virtual_wall/traffic_light": { "visible": true },
+        "/planning/scenario_planning/lane_driving/motion_planning/motion_velocity_planner/obstacle_stop/virtual_walls": { "visible": true },
+        "/planning/scenario_planning/lane_driving/motion_planning/motion_velocity_planner/obstacle_cruise/virtual_walls": { "visible": true },
+        "/planning/scenario_planning/lane_driving/motion_planning/motion_velocity_planner/suitable_stop/virtual_walls": { "visible": true }
+      }
+    },
+    "3D!scene": {
+      "cameraState": {
+        "perspective": true,
+        "distance": 60,
+        "phi": 60,
+        "thetaOffset": 45,
+        "targetOffset": [0, 0, 0],
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "followMode": "follow-pose",
+      "followTf": "base_link",
+      "scene": {},
+      "transforms": {},
+      "topics": {
+        "/foxglove/overlay/trajectory": { "visible": true },
+        "/foxglove/overlay/predicted_objects": { "visible": true },
+        "/foxglove/overlay/planning_factors/modifier_obstacle_stop": { "visible": true },
+        "/foxglove/overlay/planning_factors/diffusion_planner": { "visible": true },
+        "/map/vector_map_marker": { "visible": true },
+        "/control/trajectory_follower/controller_node_exe/virtual_wall": { "visible": true },
+        "/planning/scenario_planning/lane_driving/behavior_planning/behavior_velocity_planner/virtual_wall/crosswalk": { "visible": true },
+        "/planning/scenario_planning/lane_driving/behavior_planning/behavior_velocity_planner/virtual_wall/intersection": { "visible": true },
+        "/planning/scenario_planning/lane_driving/behavior_planning/behavior_velocity_planner/virtual_wall/stop_line": { "visible": true },
+        "/planning/scenario_planning/lane_driving/behavior_planning/behavior_velocity_planner/virtual_wall/traffic_light": { "visible": true },
+        "/planning/scenario_planning/lane_driving/motion_planning/motion_velocity_planner/obstacle_stop/virtual_walls": { "visible": true },
+        "/planning/scenario_planning/lane_driving/motion_planning/motion_velocity_planner/obstacle_cruise/virtual_walls": { "visible": true },
+        "/planning/scenario_planning/lane_driving/motion_planning/motion_velocity_planner/suitable_stop/virtual_walls": { "visible": true }
+      }
+    }
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "playbackConfig": { "speed": 1.0 },
+  "layout": {
+    "direction": "row",
+    "first": "Image!camera8",
+    "second": "3D!scene",
+    "splitPercentage": 55
+  }
+}

@@ -71,6 +71,7 @@ def generate_manifest(
     bags: list[Path] | None = None,
     scenarios: list[Path] | None = None,
     param_template: Path | None = None,
+    scenario_repeat_count: int = 1,
 ) -> dict[str, Any]:
     """Build jobs for reproducer (rosbags) or scenario_simulator (scenario files)."""
     mode = (mode or "reproducer").strip().lower()
@@ -80,6 +81,7 @@ def generate_manifest(
     results_root = results_root.expanduser().resolve()
     param_cache = default_param_cache_dir()
     jobs: list[dict[str, Any]] = []
+    repeats = max(1, int(scenario_repeat_count or 1))
 
     if mode == "reproducer":
         if rosbag_dir is None:
@@ -140,6 +142,8 @@ def generate_manifest(
             f"[warn] No scenario files found under {scenario_dir}. "
             f"Expected extensions: {', '.join(SCENARIO_EXTENSIONS)}"
         )
+    if repeats > 1:
+        print(f"[info] scenario_repeat_count={repeats} → {repeats} jobs per scenario file")
     for model in models:
         name = str(model["name"]).rstrip("/")
         model_config = str(
@@ -152,30 +156,38 @@ def generate_manifest(
             )
         )
         for scenario in scenario_list:
-            key = scenario_key(scenario, scenario_dir)
-            job_id = f"{name}__{key.replace('/', '__')}"
-            out = results_root / name / key
-            jobs.append(
-                {
-                    "job_id": job_id,
-                    "mode": mode,
-                    "model_name": name,
-                    "model_config_path": model_config,
-                    "bag_path": None,
-                    "scenario_path": str(scenario.resolve()),
-                    "bag_key": key,
-                    "output_dir": str(out),
-                    "status": "pending",
-                    "error": None,
-                    "attempts": 0,
-                }
-            )
+            base_key = scenario_key(scenario, scenario_dir)
+            for run_i in range(1, repeats + 1):
+                if repeats == 1:
+                    key = base_key
+                else:
+                    key = f"{base_key}/run{run_i:02d}"
+                job_id = f"{name}__{key.replace('/', '__')}"
+                out = results_root / name / key
+                jobs.append(
+                    {
+                        "job_id": job_id,
+                        "mode": mode,
+                        "model_name": name,
+                        "model_config_path": model_config,
+                        "bag_path": None,
+                        "scenario_path": str(scenario.resolve()),
+                        "bag_key": key,
+                        "repeat_index": run_i,
+                        "repeat_count": repeats,
+                        "output_dir": str(out),
+                        "status": "pending",
+                        "error": None,
+                        "attempts": 0,
+                    }
+                )
     return {
         "version": 2,
         "mode": mode,
         "rosbag_dir": None,
         "scenario_dir": str(scenario_dir),
         "results_root": str(results_root),
+        "scenario_repeat_count": repeats,
         "jobs": jobs,
     }
 
@@ -218,6 +230,7 @@ def main(argv: list[str] | None = None) -> int:
                     if cfg.get("param_template_path")
                     else None
                 ),
+                scenario_repeat_count=int(cfg.get("scenario_repeat_count", 1)),
             )
         else:
             if not cfg.get("rosbag_dir"):

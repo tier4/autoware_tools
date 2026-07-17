@@ -67,13 +67,26 @@ def extract_goal_from_input_bag(bag_path: Path, min_move_m: float = 0.1) -> tupl
 
 
 def resolve_job_goal(job: dict[str, Any], bag_out: Path) -> tuple[float, float, float]:
-    """Goal for metrics: scenario file (SS2) → input bag (reproducer) → output bag last pose."""
+    """Goal for metrics: scenario file (SS2) → route_goals.json → input bag → output bag."""
     mode = str(job.get("mode") or "reproducer")
     if mode == "scenario_simulator" and job.get("scenario_path"):
         goal = extract_goal_from_scenario(Path(job["scenario_path"]))
         if goal is not None:
             return goal
         return extract_goal_from_output_bag(bag_out)
+
+    # Multi-goal runs write route_goals.json; use the last leg for stop-precision metrics.
+    goals_path = Path(job["output_dir"]) / "route_goals.json"
+    if goals_path.is_file():
+        try:
+            payload = json.loads(goals_path.read_text(encoding="utf-8"))
+            goals = payload.get("goals") or []
+            if goals:
+                g = goals[-1]
+                return float(g["x"]), float(g["y"]), float(g.get("yaw", 0.0))
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            pass
+
     if job.get("bag_path"):
         return extract_goal_from_input_bag(Path(job["bag_path"]))
     return extract_goal_from_output_bag(bag_out)
@@ -103,6 +116,12 @@ def _job_config_from_payload(job: dict[str, Any], opts: dict[str, Any], domain_i
         perception_ready_timeout_sec=float(opts.get("perception_ready_timeout_sec", 45.0)),
         perception_ready_min_objects=int(opts.get("perception_ready_min_objects", 1)),
         perception_ready_stable_sec=float(opts.get("perception_ready_stable_sec", 2.0)),
+        reproducer_search_radius_m=float(opts.get("reproducer_search_radius_m", 1.5)),
+        multi_goal=bool(opts.get("multi_goal", False)),
+        multi_goal_source=str(opts.get("multi_goal_source", "auto")),
+        multi_goal_stop_speed_mps=float(opts.get("multi_goal_stop_speed_mps", 0.2)),
+        multi_goal_stop_min_sec=float(opts.get("multi_goal_stop_min_sec", 8.0)),
+        multi_goal_min_spacing_m=float(opts.get("multi_goal_min_spacing_m", 15.0)),
         stuck_blinker_nudge=bool(opts.get("stuck_blinker_nudge", True)),
         stuck_blinker_speed_mps=float(opts.get("stuck_blinker_speed_mps", 0.15)),
         stuck_blinker_trigger_sec=float(opts.get("stuck_blinker_trigger_sec", 12.0)),
@@ -367,6 +386,12 @@ def main(argv: list[str] | None = None) -> int:
             "perception_ready_timeout_sec",
             "perception_ready_min_objects",
             "perception_ready_stable_sec",
+            "reproducer_search_radius_m",
+            "multi_goal",
+            "multi_goal_source",
+            "multi_goal_stop_speed_mps",
+            "multi_goal_stop_min_sec",
+            "multi_goal_min_spacing_m",
             "video_fps",
             "video_sample_dt",
             "video_view_frame",

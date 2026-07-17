@@ -479,10 +479,63 @@ def main() -> None:
                 "(Autoware defaults rviz on — both must be off).",
             )
 
+        multi_goal = bool(base.get("multi_goal", False))
+        multi_goal_source = str(base.get("multi_goal_source", "auto"))
+        multi_goal_stop_speed_mps = float(base.get("multi_goal_stop_speed_mps", 0.2))
+        multi_goal_stop_min_sec = float(base.get("multi_goal_stop_min_sec", 8.0))
+        multi_goal_min_spacing_m = float(base.get("multi_goal_min_spacing_m", 15.0))
+
+        if mode == "reproducer":
+            st.subheader("Multi-goal bags")
+            st.caption(
+                "For long bags with bus-stop → arrive → next goal. "
+                "Single-goal bags are unchanged when this is off."
+            )
+            multi_goal = st.checkbox(
+                "Enable multi-goal replay",
+                value=multi_goal,
+                help="Extract multiple destinations and re-set route after each ARRIVED.",
+            )
+            if multi_goal:
+                src_opts = ["auto", "goal_topic", "stop_segments"]
+                if multi_goal_source not in src_opts:
+                    multi_goal_source = "auto"
+                col_m1, col_m2 = st.columns(2)
+                with col_m1:
+                    multi_goal_source = st.selectbox(
+                        "Goal source",
+                        src_opts,
+                        index=src_opts.index(multi_goal_source),
+                        help="auto = use published goal topics if present, else stop segments.",
+                    )
+                    multi_goal_stop_min_sec = st.number_input(
+                        "Stop dwell min [s]",
+                        min_value=2.0,
+                        max_value=120.0,
+                        value=float(multi_goal_stop_min_sec),
+                        step=1.0,
+                    )
+                with col_m2:
+                    multi_goal_stop_speed_mps = st.number_input(
+                        "Stop speed ≤ [m/s]",
+                        min_value=0.05,
+                        max_value=1.0,
+                        value=float(multi_goal_stop_speed_mps),
+                        step=0.05,
+                    )
+                    multi_goal_min_spacing_m = st.number_input(
+                        "Min goal spacing [m]",
+                        min_value=5.0,
+                        max_value=200.0,
+                        value=float(multi_goal_min_spacing_m),
+                        step=5.0,
+                    )
+
         initialize_duration_sec = float(base.get("psim_startup_sec", 120.0))
         scenario_timeout_sec = float(base.get("scenario_timeout_sec", 300.0))
         architecture_type = str(base.get("architecture_type", "awf/universe/20250130"))
         scenario_record_warmup_sec = float(base.get("scenario_record_warmup_sec", 15.0))
+        scenario_repeat_count = int(base.get("scenario_repeat_count", 1))
 
         if mode == "scenario_simulator":
             st.subheader("Scenario Simulator launch")
@@ -521,6 +574,14 @@ def main() -> None:
                     value=float(scenario_record_warmup_sec),
                     step=5.0,
                     help="Wait after SS2 start before ros2 bag record (sim time).",
+                )
+                scenario_repeat_count = st.number_input(
+                    "Runs per scenario file",
+                    min_value=1,
+                    max_value=50,
+                    value=int(scenario_repeat_count),
+                    step=1,
+                    help="How many times to run each selected scenario (separate jobs: …/run01, run02, …).",
                 )
             if selected_scenarios:
                 sample = selected_scenarios[0]
@@ -609,7 +670,15 @@ def main() -> None:
                 cfg_base["architecture_type"] = str(architecture_type).strip()
                 cfg_base["scenario_timeout_sec"] = float(scenario_timeout_sec)
                 cfg_base["scenario_record_warmup_sec"] = float(scenario_record_warmup_sec)
+                cfg_base["scenario_repeat_count"] = (
+                    int(scenario_repeat_count) if mode == "scenario_simulator" else 1
+                )
                 cfg_base["rviz"] = bool(launch_rviz)
+                cfg_base["multi_goal"] = bool(multi_goal) if mode == "reproducer" else False
+                cfg_base["multi_goal_source"] = str(multi_goal_source)
+                cfg_base["multi_goal_stop_speed_mps"] = float(multi_goal_stop_speed_mps)
+                cfg_base["multi_goal_stop_min_sec"] = float(multi_goal_stop_min_sec)
+                cfg_base["multi_goal_min_spacing_m"] = float(multi_goal_min_spacing_m)
                 cfg_base["video_view_frame"] = video_view_frame
                 cfg_base["video_view_range_m"] = float(video_view_range_m)
                 cfg_base["show_planning_factors"] = bool(show_planning_factors)

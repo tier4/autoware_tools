@@ -82,6 +82,7 @@ def run_all(
             if cfg.get("param_template_path")
             else None
         ),
+        scenario_repeat_count=int(cfg.get("scenario_repeat_count", 1)),
     )
     if manifest_path.is_file():
         existing = load_manifest(manifest_path)
@@ -116,6 +117,12 @@ def run_all(
             "perception_ready_timeout_sec",
             "perception_ready_min_objects",
             "perception_ready_stable_sec",
+            "reproducer_search_radius_m",
+            "multi_goal",
+            "multi_goal_source",
+            "multi_goal_stop_speed_mps",
+            "multi_goal_stop_min_sec",
+            "multi_goal_min_spacing_m",
             "stuck_blinker_nudge",
             "stuck_blinker_speed_mps",
             "stuck_blinker_trigger_sec",

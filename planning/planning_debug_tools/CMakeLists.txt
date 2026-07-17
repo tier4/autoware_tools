@@ -45,6 +45,7 @@ rclcpp_components_register_node(stop_reason_visualizer_node
 ament_auto_package(
   INSTALL_TO_SHARE
     launch
+    config
 )
 
 install(PROGRAMS
@@ -57,5 +58,7 @@ install(PROGRAMS
   scripts/perception_replayer/time_manager_widget.py
   scripts/perception_replayer/utils.py
   scripts/update_logger_level.sh
+  scripts/foxglove_overlay_markers.py
+  scripts/foxglove_camera_overlay.sh
   DESTINATION lib/${PROJECT_NAME}
 )
