@@ -728,6 +728,7 @@ function pollProgress() {{
 document.addEventListener("DOMContentLoaded", function() {{
   restoreOpenDetails();
   setInterval(pollProgress, POLL_MS);
+  startLiveDrive();
 }});
 """
     else:
@@ -764,8 +765,128 @@ function toggle(id) {
   saveOpenDetails();
 }
 
-document.addEventListener("DOMContentLoaded", restoreOpenDetails);
+document.addEventListener("DOMContentLoaded", function() {
+  restoreOpenDetails();
+  startLiveDrive();
+});
 """
+
+    live_drive_js = r"""
+function startLiveDrive() {
+  var badge = document.getElementById("live-drive-badge");
+  var meta = document.getElementById("live-drive-meta");
+  var trailEl = document.getElementById("live-drive-trail");
+  var goalsEl = document.getElementById("live-drive-goals");
+  var egoEl = document.getElementById("live-drive-ego");
+  var gridEl = document.getElementById("live-drive-grid");
+  if (!badge || !meta || !trailEl) return;
+  var W = 640, H = 420, PAD = 36;
+
+  function project(points) {
+    var xs = points.map(function(p) { return p.x; });
+    var ys = points.map(function(p) { return p.y; });
+    var minX = Math.min.apply(null, xs), maxX = Math.max.apply(null, xs);
+    var minY = Math.min.apply(null, ys), maxY = Math.max.apply(null, ys);
+    var dx = Math.max(20, maxX - minX), dy = Math.max(20, maxY - minY);
+    var scale = Math.min((W - 2 * PAD) / dx, (H - 2 * PAD) / dy);
+    return function(x, y) {
+      return [
+        PAD + (x - minX) * scale,
+        H - PAD - (y - minY) * scale
+      ];
+    };
+  }
+
+  function render(data) {
+    if (!data) {
+      badge.textContent = "idle";
+      badge.className = "pill-pend";
+      meta.textContent = "Waiting for live_drive.json…";
+      return;
+    }
+    if (data.active) {
+      badge.textContent = "LIVE";
+      badge.className = "pill-run pulse";
+    } else {
+      badge.textContent = "idle";
+      badge.className = "pill-pend";
+    }
+    var speed = (data.speed_mps == null) ? "?" : Number(data.speed_mps).toFixed(2);
+    var xy = (data.x == null) ? "x=?, y=?" :
+      ("x=" + Number(data.x).toFixed(1) + ", y=" + Number(data.y).toFixed(1));
+    var leg = "";
+    if (data.leg_idx != null) {
+      leg = " · leg " + data.leg_idx + "/" + (data.leg_total || "?");
+    }
+    meta.textContent =
+      (data.bag_key || data.job_id || "?") + " · " + (data.phase || "") + leg +
+      " · " + xy + " · v=" + speed + " m/s · " + (data.updated_iso || "") +
+      (data.note ? (" · " + data.note) : "");
+
+    var pts = (data.trail || []).slice();
+    (data.goals || []).forEach(function(g) {
+      if (g && g.x != null && g.y != null) pts.push({x: g.x, y: g.y});
+    });
+    if (data.x != null && data.y != null) pts.push({x: data.x, y: data.y});
+    if (pts.length < 1) {
+      trailEl.setAttribute("points", "");
+      goalsEl.innerHTML = "";
+      egoEl.innerHTML = "";
+      return;
+    }
+    var toXY = project(pts);
+    var trail = (data.trail || []).map(function(p) {
+      var xy2 = toXY(p.x, p.y); return xy2[0].toFixed(1) + "," + xy2[1].toFixed(1);
+    }).join(" ");
+    trailEl.setAttribute("points", trail);
+
+    var ghtml = "";
+    (data.goals || []).forEach(function(g, i) {
+      if (!g || g.x == null) return;
+      var p = toXY(g.x, g.y);
+      ghtml += '<circle class="goal-dot" cx="' + p[0].toFixed(1) + '" cy="' + p[1].toFixed(1) + '" r="4"/>';
+      ghtml += '<text class="goal-label" x="' + (p[0] + 6).toFixed(1) + '" y="' + (p[1] - 6).toFixed(1) + '">' +
+        (g.label || ("G" + (i + 1))) + "</text>";
+    });
+    goalsEl.innerHTML = ghtml;
+
+    if (data.x != null && data.y != null) {
+      var ep = toXY(data.x, data.y);
+      var yaw = (data.yaw == null) ? 0 : data.yaw;
+      // map yaw (CCW from +X) to SVG rotate (CW from +X), and Y is flipped in project.
+      var deg = -yaw * 180 / Math.PI;
+      egoEl.innerHTML =
+        '<g transform="translate(' + ep[0].toFixed(1) + " " + ep[1].toFixed(1) +
+        ") rotate(" + deg.toFixed(1) + ')">' +
+        '<polygon class="ego-arrow" points="14,0 -8,-7 -8,7"/>' +
+        "</g>";
+    } else {
+      egoEl.innerHTML = "";
+    }
+
+    // light grid
+    var grid = "";
+    for (var i = 1; i < 4; i++) {
+      var x = (W * i / 4); var y = (H * i / 4);
+      grid += '<line class="grid-line" x1="' + x + '" y1="0" x2="' + x + '" y2="' + H + '"/>';
+      grid += '<line class="grid-line" x1="0" y1="' + y + '" x2="' + W + '" y2="' + y + '"/>';
+    }
+    if (gridEl) gridEl.innerHTML = grid;
+  }
+
+  function pollLive() {
+    fetch("live_drive.json", { cache: "no-store" })
+      .then(function(r) { return r.ok ? r.json() : null; })
+      .then(render)
+      .catch(function() { render(null); });
+  }
+  pollLive();
+  setInterval(pollLive, 2000);
+}
+"""
+
+    # Always include live-drive poller (cheap; only reads a small JSON file).
+    poll_js = live_drive_js + "\n" + poll_js
 
     page = f"""<!DOCTYPE html>
 <html lang="en">
@@ -797,6 +918,15 @@ code {{ font-size: 11px; }}
 .pill-run {{ background: #3d3414; color: #ffd866; }}
 .pill-pend {{ background: #1c2430; color: #9eb4c8; }}
 .pill-fail {{ background: #4a1c1c; color: #ffb4b4; }}
+.live-drive {{ margin: 18px 0 28px; padding: 14px 16px; border: 1px solid #2a3440; border-radius: 8px; background: #121820; }}
+.live-drive h2 {{ margin: 0 0 6px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }}
+.live-meta {{ color: #9bb0c7; font-size: 13px; margin: 0 0 10px; font-family: ui-monospace, monospace; white-space: pre-wrap; }}
+svg.live-drive-svg {{ background: #0f1419; border-radius: 6px; border: 1px solid #2a3440; max-width: 100%; height: auto; display: block; }}
+svg.live-drive-svg .plot-bg {{ fill: #0f1419; }}
+svg.live-drive-svg .grid-line {{ stroke: #1e2a38; stroke-width: 1; }}
+svg.live-drive-svg .goal-dot {{ fill: #ffd866; stroke: #0f1419; stroke-width: 1; }}
+svg.live-drive-svg .goal-label {{ fill: #c9d4e0; font-size: 11px; }}
+svg.live-drive-svg .ego-arrow {{ fill: #3dffa6; stroke: #0f1419; stroke-width: 1.2; }}
 .live {{ color: #ffd866; }}
 .done {{ color: #9eb4c8; }}
 .pulse {{ animation: pulse 1.5s ease-in-out infinite; }}
@@ -894,6 +1024,20 @@ svg.stop-scatter .axis-title, svg.stop-scatter .axis-title-y {{
   <span class="pill-fail">failed {counts['failed']}</span>
 </div>
 <div class="progress-wrap"><div class="progress-bar" style="width:{done_frac * 100:.1f}%"></div></div>
+
+<section class="live-drive" id="live-drive">
+  <h2>Live drive <span id="live-drive-badge" class="pill-pend">idle</span></h2>
+  <p class="hint">Low-CPU ego trail (samples ~every 2s). Open this <code>dashboard.html</code> while a job is driving —
+  no RViz / rosbridge. Polls <code>live_drive.json</code>.</p>
+  <div id="live-drive-meta" class="live-meta">Waiting for live_drive.json…</div>
+  <svg id="live-drive-svg" class="live-drive-svg" viewBox="0 0 640 420" width="640" height="420">
+    <rect class="plot-bg" x="0" y="0" width="640" height="420"/>
+    <g id="live-drive-grid"></g>
+    <polyline id="live-drive-trail" fill="none" stroke="#2d7dd2" stroke-width="2.5"/>
+    <g id="live-drive-goals"></g>
+    <g id="live-drive-ego"></g>
+  </svg>
+</section>
 
 <h2>Per-model summary</h2>
 <table class="summary">

@@ -36,18 +36,43 @@ rviz: false
 end_condition: route_arrived
 bag_duration_margin_sec: 30.0
 route_timeout_sec: 300.0
-psim_startup_sec: 120.0
+psim_startup_sec: 180.0
 route_setup_timeout_sec: 90.0
 auto_engage_timeout_sec: 60.0
 perception_warmup_sec: 5.0
 perception_ready_timeout_sec: 45.0
 perception_ready_min_objects: 1
 perception_ready_stable_sec: 2.0
-# perception_reproducer -r [m]. 0 = nearest only (can flicker); 1.5 = tool default
-reproducer_search_radius_m: 1.5
+# Wait for full-bag perception_reproducer load (no slim bag). Budget ≈
+# bag_load_base_sec + bag_duration * bag_load_duration_factor (capped).
+require_perception_ready: true
+bag_load_base_sec: 120.0
+bag_load_duration_factor: 1.0
+bag_load_timeout_cap_sec: 3600.0
+# perception_reproducer -r [m]. 0 = always nearest (recommended when ego may diverge)
+reproducer_search_radius_m: 0.0
+reproducer_cool_down_sec: 80.0
 # Multi-goal bag replay: bus stop → ARRIVED → next goal (single-goal bags still work).
+# Off by default. When on: extract legs from goal topics, stop segments, or stop_points.csv.
 multi_goal: false
-multi_goal_source: auto   # auto | goal_topic | stop_segments
+multi_goal_source: stop_points   # stop_points | auto | goal_topic | stop_segments
+# Ordered stop names from {map_path}/stop_points.csv (used when source=stop_points)
+multi_goal_stop_order:
+  - 平塚駅南口
+  - 商工会議所前（往路）
+  - 教会前（往路）
+  - 松風公園入口
+  - 花水小学校前
+  - すみれ平
+  - 松風町
+  - 八間通り入口
+  - 袖ヶ浜
+  - 湘南海岸公園前
+  - なぎさプロムナード
+  - 教会前（復路）
+  - 商工会議所前（復路）
+  - 平塚駅南口
+stop_points_csv: stop_points.csv
 multi_goal_stop_speed_mps: 0.2
 multi_goal_stop_min_sec: 8.0
 multi_goal_min_spacing_m: 15.0
@@ -59,6 +84,14 @@ stuck_blinker_speed_mps: 0.15
 stuck_blinker_trigger_sec: 12.0
 stuck_blinker_hold_sec: 3.0
 stuck_blinker_cooldown_sec: 25.0
+stuck_abort_sec: 90.0
+stuck_reposition_trigger_sec: 30.0
+stuck_reposition_forward_m: 5.0
+stuck_reposition_max_count: 0
+multi_goal_arrival_tolerance_m: 5.0
+multi_goal_leg_timeout_sec: 300.0
+live_web_monitor: true
+live_web_sample_sec: 2.0
 
 # --- Scenario Simulator mode ---
 # Matches a typical working local launch:
@@ -70,8 +103,7 @@ stuck_blinker_cooldown_sec: 25.0
 # scenario_dir: /home/takahikohasegawa/Documents/scenario_sim/_run
 architecture_type: awf/universe/20250130
 planning_setting: diffusion_planner
-# initialize_duration → psim_startup_sec; global_timeout → scenario_timeout_sec
-psim_startup_sec: 120.0
+# initialize_duration reuses psim_startup_sec above; global_timeout → scenario_timeout_sec
 scenario_timeout_sec: 300.0
 scenario_record_warmup_sec: 15.0
 # How many times to run each scenario file (creates …/run01, run02, … jobs when > 1)

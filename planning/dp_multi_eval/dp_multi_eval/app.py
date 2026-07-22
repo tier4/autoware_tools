@@ -17,6 +17,7 @@ from dp_multi_eval.build_dashboard import (
     collect_stop_scatter_points,
     render_stop_scatter_section,
 )
+from dp_multi_eval.live_monitor import live_drive_map_html
 from dp_multi_eval.path_picker import pick_folder
 from dp_multi_eval.process_utils import cleanup_evaluation_processes, stop_pid_group
 from dp_multi_eval.scenario_sim import (
@@ -37,6 +38,44 @@ except ImportError as exc:  # pragma: no cover
 DEFAULT_CONFIG = Path.home() / "dp_multi_eval_pipeline.yaml"
 STATE_FILE_NAME = ".gui_run_state.json"
 SESSION_KEYS = ("models_dir", "rosbag_dir", "scenario_dir", "results_root")
+
+
+def _render_live_drive_map(run_dir: Path) -> None:
+    """Show ego trail map inline on Live Progress (auto-refreshed by fragment)."""
+    st.markdown("#### Live drive map")
+    live_path = run_dir / "live_drive.json"
+    if not live_path.is_file():
+        candidates = sorted(
+            run_dir.glob("*/live_drive.json"),
+            key=lambda p: p.stat().st_mtime,
+        )
+        if candidates:
+            live_path = candidates[-1]
+
+    live: dict[str, Any] | None = None
+    if live_path.is_file():
+        try:
+            live = json.loads(live_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            live = None
+
+    if live is None:
+        st.info(
+            "Waiting for live pose… The map appears once the job has set a route "
+            "(during bag load and while driving). Auto-refreshes every 2s."
+        )
+        return
+
+    c_a, c_b, c_c, c_d = st.columns(4)
+    c_a.metric("Active", "yes" if live.get("active") else "no")
+    c_b.metric(
+        "Speed [m/s]",
+        f"{float(live['speed_mps']):.2f}" if live.get("speed_mps") is not None else "—",
+    )
+    c_c.metric("Leg", f"{live.get('leg_idx') or '—'}/{live.get('leg_total') or '—'}")
+    c_d.metric("Bag", str(live.get("bag_key") or "—"))
+    st.components.v1.html(live_drive_map_html(live), height=480, scrolling=False)
+    st.caption(f"Source: `{live_path}` · updates ~every 2s")
 
 
 def _widget_key(session_key: str) -> str:
@@ -152,6 +191,9 @@ def discover_model_configs(models_dir: Path) -> list[tuple[str, Path]]:
 def discover_bag_dirs(rosbag_dir: Path) -> list[Path]:
     if not rosbag_dir.is_dir():
         return []
+    # Parent path is itself one bag (chunked *.db3 + metadata.yaml)
+    if (rosbag_dir / "metadata.yaml").exists():
+        return [rosbag_dir]
     bags: list[Path] = []
     for child in sorted(rosbag_dir.iterdir()):
         if child.is_dir():
@@ -484,11 +526,18 @@ def main() -> None:
         multi_goal_stop_speed_mps = float(base.get("multi_goal_stop_speed_mps", 0.2))
         multi_goal_stop_min_sec = float(base.get("multi_goal_stop_min_sec", 8.0))
         multi_goal_min_spacing_m = float(base.get("multi_goal_min_spacing_m", 15.0))
+        multi_goal_stop_order = [
+            str(n).strip()
+            for n in (base.get("multi_goal_stop_order") or [])
+            if str(n).strip()
+        ]
+        stop_points_csv = str(base.get("stop_points_csv", "stop_points.csv"))
 
         if mode == "reproducer":
             st.subheader("Multi-goal bags")
             st.caption(
                 "For long bags with bus-stop → arrive → next goal. "
+                "With stop_points: starts from the stop nearest bag ego, then follows your order. "
                 "Single-goal bags are unchanged when this is off."
             )
             multi_goal = st.checkbox(
@@ -497,39 +546,138 @@ def main() -> None:
                 help="Extract multiple destinations and re-set route after each ARRIVED.",
             )
             if multi_goal:
-                src_opts = ["auto", "goal_topic", "stop_segments"]
+                src_opts = ["stop_points", "auto", "goal_topic", "stop_segments"]
                 if multi_goal_source not in src_opts:
-                    multi_goal_source = "auto"
+                    multi_goal_source = "stop_points"
                 col_m1, col_m2 = st.columns(2)
                 with col_m1:
                     multi_goal_source = st.selectbox(
                         "Goal source",
                         src_opts,
                         index=src_opts.index(multi_goal_source),
-                        help="auto = use published goal topics if present, else stop segments.",
+                        help=(
+                            "stop_points = choose ordered stops from map stop_points.csv. "
+                            "auto = published goals if present, else stop segments."
+                        ),
                     )
-                    multi_goal_stop_min_sec = st.number_input(
-                        "Stop dwell min [s]",
-                        min_value=2.0,
-                        max_value=120.0,
-                        value=float(multi_goal_stop_min_sec),
-                        step=1.0,
+                if multi_goal_source == "stop_points":
+                    from dp_multi_eval.multi_goal import (
+                        load_stop_point_names,
+                        resolve_stop_points_csv,
                     )
-                with col_m2:
-                    multi_goal_stop_speed_mps = st.number_input(
-                        "Stop speed ≤ [m/s]",
-                        min_value=0.05,
-                        max_value=1.0,
-                        value=float(multi_goal_stop_speed_mps),
-                        step=0.05,
+
+                    stop_points_csv = st.text_input(
+                        "stop_points.csv",
+                        value=stop_points_csv,
+                        help="Filename under Map path, or an absolute path.",
                     )
-                    multi_goal_min_spacing_m = st.number_input(
-                        "Min goal spacing [m]",
-                        min_value=5.0,
-                        max_value=200.0,
-                        value=float(multi_goal_min_spacing_m),
-                        step=5.0,
+                    csv_path = resolve_stop_points_csv(
+                        Path(str(map_path).strip() or "/opt/autoware/maps"),
+                        stop_points_csv,
                     )
+                    available_stops: list[str] = []
+                    try:
+                        available_stops = load_stop_point_names(csv_path)
+                        st.caption(f"Loaded {len(available_stops)} stops from `{csv_path}`")
+                    except Exception as exc:  # noqa: BLE001
+                        st.error(f"Could not load stop points: {exc}")
+
+                    order_key = "multi_goal_stop_order_ui"
+                    if order_key not in st.session_state:
+                        st.session_state[order_key] = [
+                            n for n in multi_goal_stop_order if n in available_stops
+                        ] or list(multi_goal_stop_order)
+
+                    if st.button("Use Hiratsuka default loop order"):
+                        default_order = [
+                            "平塚駅南口",
+                            "商工会議所前（往路）",
+                            "教会前（往路）",
+                            "松風公園入口",
+                            "花水小学校前",
+                            "すみれ平",
+                            "松風町",
+                            "八間通り入口",
+                            "袖ヶ浜",
+                            "湘南海岸公園前",
+                            "なぎさプロムナード",
+                            "教会前（復路）",
+                            "商工会議所前（復路）",
+                            "平塚駅南口",
+                        ]
+                        st.session_state[order_key] = [
+                            n for n in default_order if n in available_stops
+                        ]
+                        st.rerun()
+
+                    add_col, btn_col = st.columns([3, 1])
+                    with add_col:
+                        to_add = st.selectbox(
+                            "Add stop to route",
+                            options=[""] + available_stops,
+                            index=0,
+                            help="Append a stop; use ↑↓ below to reorder.",
+                        )
+                    with btn_col:
+                        st.write("")  # align with selectbox
+                        st.write("")
+                        if st.button("Add", disabled=not to_add) and to_add:
+                            st.session_state[order_key] = list(
+                                st.session_state.get(order_key) or []
+                            ) + [to_add]
+                            st.rerun()
+
+                    order = list(st.session_state.get(order_key) or [])
+                    if order:
+                        st.markdown("**Route goal order**")
+                        for i, name in enumerate(order):
+                            c_name, c_up, c_dn, c_rm = st.columns([5, 1, 1, 1])
+                            c_name.write(f"{i + 1}. {name}")
+                            if c_up.button("↑", key=f"stop_up_{i}", disabled=i == 0):
+                                order[i - 1], order[i] = order[i], order[i - 1]
+                                st.session_state[order_key] = order
+                                st.rerun()
+                            if c_dn.button(
+                                "↓", key=f"stop_dn_{i}", disabled=i >= len(order) - 1
+                            ):
+                                order[i + 1], order[i] = order[i], order[i + 1]
+                                st.session_state[order_key] = order
+                                st.rerun()
+                            if c_rm.button("✕", key=f"stop_rm_{i}"):
+                                order.pop(i)
+                                st.session_state[order_key] = order
+                                st.rerun()
+                        if st.button("Clear goal order"):
+                            st.session_state[order_key] = []
+                            st.rerun()
+                    else:
+                        st.warning("Add at least one stop for stop_points goals.")
+
+                    multi_goal_stop_order = list(st.session_state.get(order_key) or [])
+                else:
+                    with col_m1:
+                        multi_goal_stop_min_sec = st.number_input(
+                            "Stop dwell min [s]",
+                            min_value=2.0,
+                            max_value=120.0,
+                            value=float(multi_goal_stop_min_sec),
+                            step=1.0,
+                        )
+                    with col_m2:
+                        multi_goal_stop_speed_mps = st.number_input(
+                            "Stop speed ≤ [m/s]",
+                            min_value=0.05,
+                            max_value=1.0,
+                            value=float(multi_goal_stop_speed_mps),
+                            step=0.05,
+                        )
+                        multi_goal_min_spacing_m = st.number_input(
+                            "Min goal spacing [m]",
+                            min_value=5.0,
+                            max_value=200.0,
+                            value=float(multi_goal_min_spacing_m),
+                            step=5.0,
+                        )
 
         initialize_duration_sec = float(base.get("psim_startup_sec", 120.0))
         scenario_timeout_sec = float(base.get("scenario_timeout_sec", 300.0))
@@ -679,6 +827,8 @@ def main() -> None:
                 cfg_base["multi_goal_stop_speed_mps"] = float(multi_goal_stop_speed_mps)
                 cfg_base["multi_goal_stop_min_sec"] = float(multi_goal_stop_min_sec)
                 cfg_base["multi_goal_min_spacing_m"] = float(multi_goal_min_spacing_m)
+                cfg_base["multi_goal_stop_order"] = list(multi_goal_stop_order)
+                cfg_base["stop_points_csv"] = str(stop_points_csv).strip() or "stop_points.csv"
                 cfg_base["video_view_frame"] = video_view_frame
                 cfg_base["video_view_range_m"] = float(video_view_range_m)
                 cfg_base["show_planning_factors"] = bool(show_planning_factors)
@@ -686,76 +836,84 @@ def main() -> None:
                 cfg_base["render_video"] = True
                 import shutil
 
-                if mode == "reproducer":
-                    run_input_root = results_root / run_name / "_selected_bags"
-                    if run_input_root.exists():
-                        shutil.rmtree(run_input_root)
-                    run_input_root.mkdir(parents=True)
-                    for bag in selected_bags:
-                        link = run_input_root / bag.name
-                        if not link.exists():
-                            link.symlink_to(bag, target_is_directory=bag.is_dir())
-                    cfg_path = write_run_config(
-                        cfg_base,
-                        run_name=run_name,
-                        models=selected_models,
-                        rosbag_dir=run_input_root,
-                        selected_bags=selected_bags,
-                    )
+                if (
+                    mode == "reproducer"
+                    and cfg_base["multi_goal"]
+                    and cfg_base["multi_goal_source"] == "stop_points"
+                    and not cfg_base["multi_goal_stop_order"]
+                ):
+                    st.error("Select at least one stop in Goal order (stop_points.csv).")
                 else:
-                    run_input_root = results_root / run_name / "_selected_scenarios"
-                    if run_input_root.exists():
-                        shutil.rmtree(run_input_root)
-                    run_input_root.mkdir(parents=True)
-                    for scn in selected_scenarios:
-                        # Preserve relative key via flat unique names
-                        link = run_input_root / scn.name
-                        n = 1
-                        while link.exists():
-                            link = run_input_root / f"{scn.stem}_{n}{scn.suffix}"
-                            n += 1
-                        link.symlink_to(scn)
-                    cfg_path = write_run_config(
-                        cfg_base,
-                        run_name=run_name,
-                        models=selected_models,
-                        scenario_dir=run_input_root,
-                        selected_scenarios=selected_scenarios,
+                    if mode == "reproducer":
+                        run_input_root = results_root / run_name / "_selected_bags"
+                        if run_input_root.exists():
+                            shutil.rmtree(run_input_root)
+                        run_input_root.mkdir(parents=True)
+                        for bag in selected_bags:
+                            link = run_input_root / bag.name
+                            if not link.exists():
+                                link.symlink_to(bag, target_is_directory=bag.is_dir())
+                        cfg_path = write_run_config(
+                            cfg_base,
+                            run_name=run_name,
+                            models=selected_models,
+                            rosbag_dir=run_input_root,
+                            selected_bags=selected_bags,
+                        )
+                    else:
+                        run_input_root = results_root / run_name / "_selected_scenarios"
+                        if run_input_root.exists():
+                            shutil.rmtree(run_input_root)
+                        run_input_root.mkdir(parents=True)
+                        for scn in selected_scenarios:
+                            # Preserve relative key via flat unique names
+                            link = run_input_root / scn.name
+                            n = 1
+                            while link.exists():
+                                link = run_input_root / f"{scn.stem}_{n}{scn.suffix}"
+                                n += 1
+                            link.symlink_to(scn)
+                        cfg_path = write_run_config(
+                            cfg_base,
+                            run_name=run_name,
+                            models=selected_models,
+                            scenario_dir=run_input_root,
+                            selected_scenarios=selected_scenarios,
+                        )
+                    log_path = results_root / run_name / "run_all.log"
+                    log_path.parent.mkdir(parents=True, exist_ok=True)
+                    log_f = open(log_path, "w", encoding="utf-8")  # noqa: SIM115
+                    proc = subprocess.Popen(
+                        [
+                            sys.executable,
+                            "-m",
+                            "dp_multi_eval.run_all",
+                            "-c",
+                            str(cfg_path),
+                            "--max_workers",
+                            str(int(max_workers)),
+                        ],
+                        stdout=log_f,
+                        stderr=subprocess.STDOUT,
+                        start_new_session=True,
                     )
-                log_path = results_root / run_name / "run_all.log"
-                log_path.parent.mkdir(parents=True, exist_ok=True)
-                log_f = open(log_path, "w", encoding="utf-8")  # noqa: SIM115
-                proc = subprocess.Popen(
-                    [
-                        sys.executable,
-                        "-m",
-                        "dp_multi_eval.run_all",
-                        "-c",
-                        str(cfg_path),
-                        "--max_workers",
-                        str(int(max_workers)),
-                    ],
-                    stdout=log_f,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                )
-                state_path.parent.mkdir(parents=True, exist_ok=True)
-                state_path.write_text(
-                    json.dumps(
-                        {
-                            "pid": proc.pid,
-                            "run_name": run_name,
-                            "config": str(cfg_path),
-                            "manifest": str(results_root / run_name / "manifest.json"),
-                            "log": str(log_path),
-                            "started": time.time(),
-                        },
-                        indent=2,
+                    state_path.parent.mkdir(parents=True, exist_ok=True)
+                    state_path.write_text(
+                        json.dumps(
+                            {
+                                "pid": proc.pid,
+                                "run_name": run_name,
+                                "config": str(cfg_path),
+                                "manifest": str(results_root / run_name / "manifest.json"),
+                                "log": str(log_path),
+                                "started": time.time(),
+                            },
+                            indent=2,
+                        )
+                        + "\n",
+                        encoding="utf-8",
                     )
-                    + "\n",
-                    encoding="utf-8",
-                )
-                st.success(f"Started run “{run_name}”. Open Live Progress.")
+                    st.success(f"Started run “{run_name}”. Open Live Progress.")
 
     with tab_progress:
         st.subheader("Progress")
@@ -849,9 +1007,20 @@ def main() -> None:
                     )
                 st.dataframe(rows, width="stretch")
 
-            if st.button("Refresh now"):
-                st.rerun()
-            st.caption("This page does not auto-refresh in all Streamlit versions — click Refresh.")
+            refresh_col, hint_col = st.columns([1, 4])
+            with refresh_col:
+                if st.button("Refresh now", key="progress_refresh_now"):
+                    st.rerun()
+            with hint_col:
+                st.caption(
+                    "Refreshes job table / phase. Live map below auto-updates every 2s."
+                )
+
+            @st.fragment(run_every=2.0)
+            def _live_drive_fragment() -> None:
+                _render_live_drive_map(manifest_path.parent)
+
+            _live_drive_fragment()
 
     with tab_results:
         st.subheader("Results")
@@ -863,6 +1032,11 @@ def main() -> None:
             manifest_path = manifests[-1]
             run_dir = manifest_path.parent
             st.caption(f"Latest run: `{run_dir}`")
+            @st.fragment(run_every=2.0)
+            def _results_live_drive() -> None:
+                _render_live_drive_map(run_dir)
+
+            _results_live_drive()
             try:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):

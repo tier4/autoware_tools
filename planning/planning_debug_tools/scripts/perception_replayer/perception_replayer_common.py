@@ -90,18 +90,44 @@ class PerceptionReplayerCommon(Node):
         )
 
         # load rosbag
-        print("Stared loading rosbag")
-        if os.path.isdir(args.bag):
+        print("Started loading rosbag", flush=True)
+        if os.path.isdir(args.bag) and os.path.isfile(os.path.join(args.bag, "metadata.yaml")):
+            # One SequentialReader on the bag directory uses sqlite topic indexes +
+            # StorageFilter. Opening each split .db3 separately forces a near-full
+            # scan of multi‑hundred‑GB bags (pointclouds etc.) and can take hours.
+            print(
+                f"loading bag directory once: {args.bag} "
+                f"(metadata.yaml present; topic-filtered)",
+                flush=True,
+            )
+            self.load_rosbag(args.bag)
+        elif os.path.isdir(args.bag):
             bags = [
                 os.path.join(args.bag, base_name)
                 for base_name in os.listdir(args.bag)
                 if base_name.endswith(args.rosbag_format)
             ]
-            for bag_file in sorted(bags, key=get_starting_time):
+            bags = sorted(bags, key=get_starting_time)
+            print(
+                f"[warn] no metadata.yaml — falling back to {len(bags)} split files "
+                "(slow on large bags)",
+                flush=True,
+            )
+            for i, bag_file in enumerate(bags, start=1):
+                print(
+                    f"[{i}/{len(bags)}] loading {os.path.basename(bag_file)}",
+                    flush=True,
+                )
                 self.load_rosbag(bag_file)
         else:
             self.load_rosbag(args.bag)
-        print("Ended loading rosbag")
+        print(
+            "Ended loading rosbag "
+            f"(objects={len(self.rosbag_objects_data)} "
+            f"odom={len(self.rosbag_ego_odom_data)} "
+            f"signals={len(self.rosbag_traffic_signals_data)})",
+            flush=True,
+        )
 
         # wait for ready to publish/subscribe
         time.sleep(1.0)

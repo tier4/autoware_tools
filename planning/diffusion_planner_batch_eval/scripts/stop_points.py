@@ -106,20 +106,21 @@ def resolve_stop_points_path(map_path: Path, filename: str = "stop_points.csv") 
     return map_path / filename
 
 
-# Hiratsuka loop (waterfront section supports ID5: なぎさ → 教会前)
+# Hiratsuka loop (往路 / 復路 naming in current stop_points.csv)
 DEFAULT_HIRATSUKA_ROUTE_ORDER = [
     "平塚駅南口",
-    "商工会議所前（東側）",
-    "湘南海岸公園前",
-    "なぎさプロムナード",
-    "教会前（東側）",
-    "教会前（西側）",
-    "商工会議所前（西側）",
-    "松風町",
+    "商工会議所前（往路）",
+    "教会前（往路）",
+    "松風公園入口",
     "花水小学校前",
     "すみれ平",
+    "松風町",
     "八間通り入口",
     "袖ヶ浜",
+    "湘南海岸公園前",
+    "なぎさプロムナード",
+    "教会前（復路）",
+    "商工会議所前（復路）",
 ]
 
 
@@ -130,24 +131,45 @@ def stops_by_name(stops: list[MapStopPoint]) -> dict[str, MapStopPoint]:
 def route_segment_stop_names(
     start_name: str, goal_name: str, route_order: list[str]
 ) -> list[str]:
-    """Intermediate stop names along the shorter direction on the loop (exclusive of start/goal)."""
-    if start_name == goal_name or start_name not in route_order or goal_name not in route_order:
+    """Intermediate stop names along the shorter direction on the loop (exclusive of start/goal).
+
+    Duplicate terminal names (e.g. loop ending at the same stop) are collapsed so
+    index lookup uses the first occurrence of start and the nearest later goal.
+    """
+    if start_name == goal_name:
         return []
 
-    count = len(route_order)
-    start_index = route_order.index(start_name)
-    goal_index = route_order.index(goal_name)
+    # Collapse consecutive duplicate names while preserving order for routing.
+    compact: list[str] = []
+    for name in route_order:
+        if not compact or compact[-1] != name:
+            compact.append(name)
+
+    if start_name not in compact or goal_name not in compact:
+        return []
+
+    count = len(compact)
+    start_index = compact.index(start_name)
+    # Prefer the next occurrence of goal after start (forward along the list).
+    goal_index = None
+    for offset in range(1, count):
+        idx = (start_index + offset) % count
+        if compact[idx] == goal_name:
+            goal_index = idx
+            break
+    if goal_index is None:
+        goal_index = compact.index(goal_name)
 
     forward: list[str] = []
     index = (start_index + 1) % count
     while index != goal_index:
-        forward.append(route_order[index])
+        forward.append(compact[index])
         index = (index + 1) % count
 
     backward: list[str] = []
     index = (start_index - 1) % count
     while index != goal_index:
-        backward.append(route_order[index])
+        backward.append(compact[index])
         index = (index - 1) % count
 
     return forward if len(forward) <= len(backward) else backward

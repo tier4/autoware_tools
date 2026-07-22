@@ -60,8 +60,8 @@ def close_log_handle(proc: subprocess.Popen[Any] | None) -> None:
 def stop_process_group(proc: subprocess.Popen[Any] | None, grace_sec: float = 8.0) -> None:
     if proc is None:
         return
-    if proc.poll() is not None:
-        return
+    # The ros2/launch parent may exit before its child nodes. Always target its
+    # process group, even when Popen.poll() says the parent is already gone.
     stop_pid_group(proc.pid, grace_sec=grace_sec)
     try:
         proc.wait(timeout=5.0)
@@ -70,13 +70,17 @@ def stop_process_group(proc: subprocess.Popen[Any] | None, grace_sec: float = 8.
 
 
 def stop_pid_group(pid: int, grace_sec: float = 8.0) -> bool:
-    """Send SIGTERM then SIGKILL to the process group led by pid."""
+    """Send SIGTERM then SIGKILL to the process group containing pid."""
     if pid <= 0:
         return False
+    try:
+        pgid = os.getpgid(pid)
+    except ProcessLookupError:
+        pgid = pid
     sent = False
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
-            os.killpg(pid, sig)
+            os.killpg(pgid, sig)
             sent = True
         except ProcessLookupError:
             try:
@@ -104,16 +108,37 @@ def cleanup_evaluation_processes() -> None:
         "perception_reproducer.py",
         "scenario_test_runner",
         "openscenario_interpreter",
+        "simple_planning_simulator",
+        "rosbridge_websocket",
         "ros2 bag record",
         "dp_multi_eval.run_single_job",
     )
+    groups: set[int] = set()
+    own_group = os.getpgrp()
     for pattern in patterns:
-        subprocess.run(
-            ["pkill", "-f", pattern],
+        result = subprocess.run(
+            ["pgrep", "-f", pattern],
             check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
         )
+        for text_pid in result.stdout.split():
+            try:
+                pid = int(text_pid)
+                pgid = os.getpgid(pid)
+            except (ValueError, ProcessLookupError):
+                continue
+            if pgid != own_group:
+                groups.add(pgid)
+
+    for sig, delay in ((signal.SIGTERM, 2.0), (signal.SIGKILL, 0.0)):
+        for pgid in groups:
+            try:
+                os.killpg(pgid, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+        if delay:
+            time.sleep(delay)
 
 
 def wait_with_timeout(proc: subprocess.Popen[Any], timeout_sec: float) -> int | None:

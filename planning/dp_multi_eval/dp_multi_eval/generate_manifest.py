@@ -28,6 +28,10 @@ def discover_bags(rosbag_dir: Path) -> list[Path]:
     if not rosbag_dir.is_dir():
         raise FileNotFoundError(f"rosbag_dir missing: {rosbag_dir}")
 
+    # rosbag_dir itself is one bag (metadata.yaml + chunked *.db3 files)
+    if (rosbag_dir / "metadata.yaml").exists():
+        return [rosbag_dir]
+
     # Prefer directories that contain metadata.yaml or *.db3
     for child in sorted(rosbag_dir.iterdir()):
         if child.is_dir():

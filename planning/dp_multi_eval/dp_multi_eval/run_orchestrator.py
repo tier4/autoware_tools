@@ -116,17 +116,44 @@ def _job_config_from_payload(job: dict[str, Any], opts: dict[str, Any], domain_i
         perception_ready_timeout_sec=float(opts.get("perception_ready_timeout_sec", 45.0)),
         perception_ready_min_objects=int(opts.get("perception_ready_min_objects", 1)),
         perception_ready_stable_sec=float(opts.get("perception_ready_stable_sec", 2.0)),
-        reproducer_search_radius_m=float(opts.get("reproducer_search_radius_m", 1.5)),
+        require_perception_ready=bool(opts.get("require_perception_ready", True)),
+        bag_load_base_sec=float(opts.get("bag_load_base_sec", 120.0)),
+        bag_load_duration_factor=float(opts.get("bag_load_duration_factor", 1.0)),
+        bag_load_timeout_cap_sec=float(opts.get("bag_load_timeout_cap_sec", 3600.0)),
+        reproducer_search_radius_m=float(opts.get("reproducer_search_radius_m", 0.0)),
+        reproducer_cool_down_sec=float(opts.get("reproducer_cool_down_sec", 80.0)),
         multi_goal=bool(opts.get("multi_goal", False)),
         multi_goal_source=str(opts.get("multi_goal_source", "auto")),
         multi_goal_stop_speed_mps=float(opts.get("multi_goal_stop_speed_mps", 0.2)),
         multi_goal_stop_min_sec=float(opts.get("multi_goal_stop_min_sec", 8.0)),
         multi_goal_min_spacing_m=float(opts.get("multi_goal_min_spacing_m", 15.0)),
+        multi_goal_stop_order=[
+            str(n).strip()
+            for n in (opts.get("multi_goal_stop_order") or [])
+            if str(n).strip()
+        ]
+        or None,
+        stop_points_csv=str(opts.get("stop_points_csv", "stop_points.csv")),
         stuck_blinker_nudge=bool(opts.get("stuck_blinker_nudge", True)),
         stuck_blinker_speed_mps=float(opts.get("stuck_blinker_speed_mps", 0.15)),
         stuck_blinker_trigger_sec=float(opts.get("stuck_blinker_trigger_sec", 12.0)),
         stuck_blinker_hold_sec=float(opts.get("stuck_blinker_hold_sec", 3.0)),
         stuck_blinker_cooldown_sec=float(opts.get("stuck_blinker_cooldown_sec", 25.0)),
+        stuck_abort_sec=float(opts.get("stuck_abort_sec", 90.0)),
+        stuck_reposition_trigger_sec=float(opts.get("stuck_reposition_trigger_sec", 30.0)),
+        stuck_reposition_forward_m=float(opts.get("stuck_reposition_forward_m", 5.0)),
+        stuck_reposition_max_count=int(opts.get("stuck_reposition_max_count", 0)),
+        multi_goal_arrival_tolerance_m=float(
+            opts.get("multi_goal_arrival_tolerance_m", 5.0)
+        ),
+        multi_goal_leg_timeout_sec=float(opts.get("multi_goal_leg_timeout_sec", 300.0)),
+        live_web_monitor=bool(opts.get("live_web_monitor", True)),
+        live_web_sample_sec=float(opts.get("live_web_sample_sec", 2.0)),
+        live_drive_root=(
+            Path(opts["results_root"])
+            if opts.get("results_root")
+            else (Path(job["results_root"]) if job.get("results_root") else None)
+        ),
         architecture_type=str(opts.get("architecture_type", "awf/universe/20250130")),
         scenario_timeout_sec=float(opts.get("scenario_timeout_sec", 300.0)),
         scenario_record_warmup_sec=float(opts.get("scenario_record_warmup_sec", 15.0)),
@@ -386,12 +413,19 @@ def main(argv: list[str] | None = None) -> int:
             "perception_ready_timeout_sec",
             "perception_ready_min_objects",
             "perception_ready_stable_sec",
+            "require_perception_ready",
+            "bag_load_base_sec",
+            "bag_load_duration_factor",
+            "bag_load_timeout_cap_sec",
             "reproducer_search_radius_m",
+            "reproducer_cool_down_sec",
             "multi_goal",
             "multi_goal_source",
             "multi_goal_stop_speed_mps",
             "multi_goal_stop_min_sec",
             "multi_goal_min_spacing_m",
+            "multi_goal_stop_order",
+            "stop_points_csv",
             "video_fps",
             "video_sample_dt",
             "video_view_frame",

@@ -51,6 +51,7 @@ from rclpy.qos import QoSReliabilityPolicy
 from rclpy.serialization import deserialize_message
 from rosidl_runtime_py.utilities import get_message
 from rosbag2_py import SequentialReader
+from rosbag2_py import StorageFilter
 from tier4_localization_msgs.srv import InitializeLocalization
 from tier4_planning_msgs.msg import RouteState as MissionRouteState
 from tier4_planning_msgs.srv import ClearRoute as MissionClearRoute
@@ -164,6 +165,49 @@ def _poses_from_tf(reader: SequentialReader, type_map: dict[str, str], min_move_
     return poses
 
 
+def get_start_pose_from_bag(bag_path: Path) -> Pose:
+    """Read only the first ego pose, avoiding a full scan of large bags."""
+    reader = open_bag_reader(bag_path)
+    type_map = {topic.name: topic.type for topic in reader.get_all_topics_and_types()}
+
+    topic = "/localization/kinematic_state"
+    if topic in type_map:
+        reader.set_filter(StorageFilter(topics=[topic]))
+        if reader.has_next():
+            _topic, data, _ = reader.read_next()
+            msg_type = get_message(type_map[topic])
+            odom: Odometry = deserialize_message(data, msg_type)
+            return odom.pose.pose
+
+    topic = "/tf"
+    if topic in type_map:
+        reader = open_bag_reader(bag_path)
+        type_map = {item.name: item.type for item in reader.get_all_topics_and_types()}
+        reader.set_filter(StorageFilter(topics=[topic]))
+        msg_type = get_message(type_map[topic])
+        while reader.has_next():
+            _topic, data, _ = reader.read_next()
+            msg = deserialize_message(data, msg_type)
+            for transform in msg.transforms:
+                if transform.child_frame_id != "base_link":
+                    continue
+                trans = transform.transform.translation
+                rot = transform.transform.rotation
+                pose = Pose()
+                pose.position.x = trans.x
+                pose.position.y = trans.y
+                pose.position.z = trans.z
+                pose.orientation.x = rot.x
+                pose.orientation.y = rot.y
+                pose.orientation.z = rot.z
+                pose.orientation.w = rot.w
+                return pose
+
+    raise ValueError(
+        f"No poses found in {bag_path}. Need /localization/kinematic_state or /tf (base_link)."
+    )
+
+
 def yaw_to_quaternion(yaw: float) -> tuple[float, float, float, float]:
     """Return (x, y, z, w) for a pure yaw rotation."""
     half = 0.5 * yaw
@@ -250,7 +294,7 @@ def _build_adapi_set_route_yaml(
                 "stamp": {"sec": int(stamp_sec), "nanosec": int(stamp_nanosec)},
                 "frame_id": "map",
             },
-            "option": {"allow_goal_modification": False},
+            "option": {"allow_goal_modification": True},
             "goal": _pose_to_dict(goal_pose),
             "waypoints": [_pose_to_dict(wp) for wp in waypoints],
         }
@@ -1004,6 +1048,10 @@ class RouteSetupNode(Node):
             request.header.stamp = self.get_clock().now().to_msg()
             request.goal = goal_pose
             request.waypoints = route_waypoints
+            if hasattr(request, "option") and hasattr(
+                request.option, "allow_goal_modification"
+            ):
+                request.option.allow_goal_modification = True
         else:
             client = self.mission_set_route_client
             request = SetWaypointRoute.Request()
@@ -1217,13 +1265,139 @@ class RouteSetupNode(Node):
             prefix = "" if goal_snapped else "goal_from_bag; "
             return False, f"{prefix}{message}"
 
-        intermediate_names = route_segment_stop_names(
-            spawn_stop.name, goal_stop.name, route_stop_order
+        # Some map stops are not valid routing goals (empty lanelet path) but work
+        # as waypoints to a later stop. Walk forward along route_stop_order until
+        # set_route succeeds.
+        ok, lookahead_message = self._try_route_along_stop_order(
+            spawn_pose=spawn_pose,
+            spawn_stop=spawn_stop,
+            intended_goal_stop=goal_stop,
+            stops=stops,
+            route_stop_order=route_stop_order,
+            timeout_sec=timeout_sec,
+            prior_message=message,
         )
-        if not intermediate_names:
-            prefix = "" if goal_snapped else "goal_from_bag; "
-            return False, message if goal_snapped else f"{prefix}{message}"
+        if ok:
+            return True, lookahead_message
+        prefix = "" if goal_snapped else "goal_from_bag; "
+        return False, f"{prefix}{lookahead_message}"
 
+    def _try_route_along_stop_order(
+        self,
+        *,
+        spawn_pose: Pose,
+        spawn_stop: MapStopPoint,
+        intended_goal_stop: MapStopPoint,
+        stops: list[MapStopPoint],
+        route_stop_order: list[str],
+        timeout_sec: float,
+        prior_message: str,
+    ) -> tuple[bool, str]:
+        """Try intended goal, then later stops with earlier ones as waypoints."""
+        compact: list[str] = []
+        for name in route_stop_order:
+            if not compact or compact[-1] != name:
+                compact.append(name)
+        if spawn_stop.name not in compact or intended_goal_stop.name not in compact:
+            # Fall back to classic shorter-path intermediates between spawn/goal.
+            intermediate_names = route_segment_stop_names(
+                spawn_stop.name, intended_goal_stop.name, route_stop_order
+            )
+            if not intermediate_names:
+                return False, prior_message
+            return self._set_route_with_named_waypoints(
+                spawn_pose,
+                intended_goal_stop,
+                intermediate_names,
+                stops,
+                timeout_sec,
+                prior_message,
+            )
+
+        spawn_idx = compact.index(spawn_stop.name)
+        # intended goal: first occurrence after spawn
+        intended_idx = None
+        for offset in range(1, len(compact)):
+            idx = (spawn_idx + offset) % len(compact)
+            if compact[idx] == intended_goal_stop.name:
+                intended_idx = idx
+                break
+        if intended_idx is None:
+            intended_idx = compact.index(intended_goal_stop.name)
+
+        stop_lookup = stops_by_name(stops)
+        last_error = prior_message
+        # Walk forward from intended goal along the ordered list (no wrap for
+        # the first attempt window — wrap only if list is a pure loop without
+        # duplicate terminal).
+        max_offset = len(compact) - 1
+        for offset in range(0, max_offset):
+            goal_idx = (intended_idx + offset) % len(compact)
+            if goal_idx == spawn_idx:
+                continue
+            goal_name = compact[goal_idx]
+            if goal_name not in stop_lookup:
+                continue
+            # Waypoints: stops strictly after spawn up to (not including) goal,
+            # along forward direction.
+            waypoint_names: list[str] = []
+            idx = (spawn_idx + 1) % len(compact)
+            while idx != goal_idx:
+                waypoint_names.append(compact[idx])
+                idx = (idx + 1) % len(compact)
+                if len(waypoint_names) > len(compact):
+                    break
+            goal = stop_lookup[goal_name]
+            waypoint_poses = [
+                stop_point_to_pose(stop_lookup[n])
+                for n in waypoint_names
+                if n in stop_lookup
+            ]
+            self.get_logger().warn(
+                f"Trying route spawn='{spawn_stop.name}' -> goal='{goal_name}' "
+                f"waypoints={waypoint_names or '[]'}"
+            )
+            clear_ok, clear_message = self._clear_route_if_needed(timeout_sec)
+            if not clear_ok:
+                last_error = f"{prior_message}; lookahead_clear_failed: {clear_message}"
+                continue
+            time.sleep(0.3)
+            ok, route_message = self._set_route_with_retry(
+                spawn_pose,
+                stop_point_to_pose(goal),
+                timeout_sec,
+                waypoints=waypoint_poses,
+            )
+            if ok:
+                # Stops from intended goal up to (not including) effective goal
+                # were not usable as goals and were passed as waypoints instead.
+                intended_skip: list[str] = []
+                if goal_name != intended_goal_stop.name:
+                    idx = intended_idx
+                    while idx != goal_idx:
+                        intended_skip.append(compact[idx])
+                        idx = (idx + 1) % len(compact)
+                skipped_note = (
+                    f"skipped_goals={'|'.join(intended_skip)}; "
+                    if intended_skip
+                    else ""
+                )
+                return True, (
+                    f"effective_goal={goal_name}; {skipped_note}"
+                    f"waypoints={len(waypoint_poses)}; {route_message}"
+                )
+            last_error = f"{prior_message}; lookahead_failed[{goal_name}]: {route_message}"
+        return False, last_error
+
+    def _set_route_with_named_waypoints(
+        self,
+        spawn_pose: Pose,
+        goal_stop: MapStopPoint,
+        intermediate_names: list[str],
+        stops: list[MapStopPoint],
+        timeout_sec: float,
+        prior_message: str,
+    ) -> tuple[bool, str]:
         stop_lookup = stops_by_name(stops)
         waypoint_poses = [
             stop_point_to_pose(stop_lookup[name])
@@ -1231,17 +1405,15 @@ class RouteSetupNode(Node):
             if name in stop_lookup
         ]
         if not waypoint_poses:
-            return False, message
-
+            return False, prior_message
         self.get_logger().warn(
             f"Direct route empty; retrying with waypoints "
             f"{' -> '.join(intermediate_names)} -> {goal_stop.name}"
         )
         clear_ok, clear_message = self._clear_route_if_needed(timeout_sec)
         if not clear_ok:
-            return False, f"{message}; waypoint_clear_failed: {clear_message}"
+            return False, f"{prior_message}; waypoint_clear_failed: {clear_message}"
         time.sleep(0.5)
-
         ok, waypoint_message = self._set_route_with_retry(
             spawn_pose,
             stop_point_to_pose(goal_stop),
@@ -1253,7 +1425,7 @@ class RouteSetupNode(Node):
                 f"waypoint_route={'->'.join(intermediate_names)};"
                 f"goal={goal_stop.name}; {waypoint_message}"
             )
-        return False, f"{message}; waypoint_route_failed: {waypoint_message}"
+        return False, f"{prior_message}; waypoint_route_failed: {waypoint_message}"
 
     def _try_set_route_with_stop_fallback(
         self,
@@ -1523,7 +1695,16 @@ class RouteSetupNode(Node):
             self._warmup_route_subscriptions(timeout_sec=5.0)
 
             try:
-                bag_start_pose, bag_goal_pose = get_poses_from_bag(bag_path, min_move_m=min_move_m)
+                if goal_pose is not None:
+                    self.get_logger().info(
+                        "Goal pose supplied; reading only the first bag pose"
+                    )
+                    bag_start_pose = get_start_pose_from_bag(bag_path)
+                    bag_goal_pose = goal_pose
+                else:
+                    bag_start_pose, bag_goal_pose = get_poses_from_bag(
+                        bag_path, min_move_m=min_move_m
+                    )
             except ValueError as error:
                 return False, str(error)
             if goal_pose is None:
@@ -1589,6 +1770,19 @@ class RouteSetupNode(Node):
             self.get_logger().warn(
                 f"Proceeding with route reset despite disengage warning: {disengage_msg}"
             )
+
+        # Snap spawn onto the nearest map stop when close — bag ego is often
+        # ~1m off-lane and causes "planned route is empty".
+        stops = self._load_map_stops(map_path, stop_points_csv)
+        if stops:
+            nearest_stop, nearest_dist = find_nearest_stop_point(initial_pose, stops)
+            if nearest_dist <= max(stop_point_snap_goal_m, 5.0):
+                snapped = stop_point_to_pose(nearest_stop)
+                self.get_logger().info(
+                    f"Snapping spawn to map stop '{nearest_stop.name}' "
+                    f"({nearest_dist:.1f}m from bag start)"
+                )
+                initial_pose = snapped
 
         ok, step_message = self._initialize_localization(initial_pose, timeout_sec)
         if not ok:
@@ -1772,6 +1966,60 @@ def setup_route_for_bag(
         node.destroy_node()
 
 
+def shift_ego_longitudinal(
+    offset_m: float,
+    *,
+    timeout_sec: float = 30.0,
+) -> tuple[bool, str]:
+    """Reinitialize planning-simulator ego along its current heading."""
+    if not rclpy.ok():
+        rclpy.init()
+
+    node = RouteSetupNode()
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
+    stop_spin = threading.Event()
+
+    def _spin_executor() -> None:
+        while not stop_spin.is_set() and rclpy.ok():
+            if node._executor_pause.is_set():
+                time.sleep(0.05)
+                continue
+            executor.spin_once(timeout_sec=0.1)
+
+    spin_thread = threading.Thread(target=_spin_executor, daemon=True)
+    spin_thread.start()
+    node._executor = executor
+    node._executor_spinning = True
+
+    try:
+        pose_deadline = time.time() + min(timeout_sec, 10.0)
+        while node.ego_pose is None and time.time() < pose_deadline and rclpy.ok():
+            time.sleep(0.1)
+        if node.ego_pose is None:
+            return False, "stuck_reposition_failed: no ego pose"
+
+        original = node.ego_pose
+        shifted = offset_pose_longitudinal(original, float(offset_m))
+        node.get_logger().warn(
+            "Stuck recovery: shifting ego "
+            f"{float(offset_m):.1f}m forward "
+            f"{node._format_pose_xy(original)} -> {node._format_pose_xy(shifted)}"
+        )
+        node._disengage_and_wait_stopped(min(timeout_sec, 10.0))
+        ok, message = node._initialize_localization(shifted, timeout_sec)
+        if not ok:
+            return False, f"stuck_reposition_failed: {message}"
+        return True, f"stuck_repositioned_{float(offset_m):.1f}m: {message}"
+    finally:
+        node._executor_spinning = False
+        node._executor = None
+        stop_spin.set()
+        spin_thread.join(timeout=2.0)
+        executor.remove_node(node)
+        node.destroy_node()
+
+
 def advance_route_to_goal(
     goal_pose: Pose,
     *,
@@ -1783,6 +2031,7 @@ def advance_route_to_goal(
     stop_point_snap_goal_m: float = 2.0,
     stop_point_goal_min_dist_m: float = 0.5,
     stop_point_waypoint_fallback: bool = True,
+    route_stop_order: list[str] | None = None,
 ) -> tuple[bool, str]:
     """Clear current route (after ARRIVED) and set a new goal without re-localizing."""
     if not rclpy.ok():
@@ -1831,7 +2080,7 @@ def advance_route_to_goal(
             stop_points_csv="stop_points.csv",
             stop_point_goal_min_dist_m=stop_point_goal_min_dist_m,
             stop_point_snap_goal_m=stop_point_snap_goal_m,
-            route_stop_order=[],
+            route_stop_order=route_stop_order or DEFAULT_HIRATSUKA_ROUTE_ORDER,
             stop_point_waypoint_fallback=stop_point_waypoint_fallback,
         )
         if not ok:
