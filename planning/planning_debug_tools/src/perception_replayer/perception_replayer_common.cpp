@@ -33,6 +33,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace
@@ -328,6 +329,20 @@ PerceptionReplayerCommon::PerceptionReplayerCommon(
   }
   std::cout << "Ended loading rosbag" << std::endl;
 
+  // Assume kinematic ~50 Hz, perception 10 Hz: keep every 5th odom sample.
+  constexpr size_t k_ego_odom_downsample_stride = 5;
+  {
+    const size_t before = rosbag_ego_odom_data_.size();
+    std::vector<utils::DataStamped<Odometry>> downsampled;
+    downsampled.reserve((before + k_ego_odom_downsample_stride - 1) / k_ego_odom_downsample_stride);
+    for (size_t i = 0; i < before; i += k_ego_odom_downsample_stride) {
+      downsampled.push_back(std::move(rosbag_ego_odom_data_[i]));
+    }
+    rosbag_ego_odom_data_ = std::move(downsampled);
+    std::cout << "Downsampled ego_odom: " << before << " -> " << rosbag_ego_odom_data_.size()
+              << " (stride=" << k_ego_odom_downsample_stride << ")" << std::endl;
+  }
+
   // define topic names
   const std::string ego_odom_topic = "/localization/kinematic_state";
   const auto objects_topic = [&]() -> std::string {
@@ -556,53 +571,8 @@ void PerceptionReplayerCommon::publish_route_at_timestamp(
 void PerceptionReplayerCommon::publish_recorded_ego_pose(rclcpp::Time bag_timestamp)
 {
   const auto ego_odom = find_ego_odom_by_timestamp(bag_timestamp);
-
-  PoseWithCovarianceStamped initialpose;
-  initialpose.header.stamp = this->get_clock()->now();
-  initialpose.header.frame_id = "map";
-  initialpose.pose.pose = ego_odom.pose.pose;
-
-  // clang-format off
-  initialpose.pose.covariance = {
-    0.25,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.25,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.06853892326654787,
-  };
-  // clang-format on
-
+  const auto initialpose =
+    utils::make_map_initial_pose(ego_odom.pose.pose, this->get_clock()->now());
   recorded_ego_as_initialpose_pub_->publish(initialpose);
 
   RCLCPP_INFO(get_logger(), "Published recorded ego pose as /initialpose");

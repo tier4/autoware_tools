@@ -20,6 +20,7 @@
 #include <rosbag2_cpp/reader.hpp>
 
 #include <geometry_msgs/msg/pose.hpp>
+#include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/quaternion.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
@@ -114,6 +115,25 @@ inline double get_yaw_from_quaternion(const geometry_msgs::msg::Quaternion & qua
   return yaw;
 }
 
+// normalize angle to [-pi, pi]
+inline double normalize_radian(double rad)
+{
+  while (rad > M_PI) {
+    rad -= 2.0 * M_PI;
+  }
+  while (rad < -M_PI) {
+    rad += 2.0 * M_PI;
+  }
+  return rad;
+}
+
+// absolute yaw difference in [0, pi]
+inline double absolute_yaw_difference(
+  const geometry_msgs::msg::Quaternion & q1, const geometry_msgs::msg::Quaternion & q2)
+{
+  return std::abs(normalize_radian(get_yaw_from_quaternion(q1) - get_yaw_from_quaternion(q2)));
+}
+
 // get quaternion from yaw
 inline geometry_msgs::msg::Quaternion get_quaternion_from_yaw(const double yaw)
 {
@@ -133,6 +153,27 @@ inline double calculate_distance_2d(
   const geometry_msgs::msg::Point & p1, const geometry_msgs::msg::Point & p2)
 {
   return std::sqrt(std::pow(p1.x - p2.x, 2.0) + std::pow(p1.y - p2.y, 2.0));
+}
+
+// Build PoseWithCovarianceStamped in map frame with the fixed initial-pose covariance.
+inline geometry_msgs::msg::PoseWithCovarianceStamped make_map_initial_pose(
+  const geometry_msgs::msg::Pose & pose, const rclcpp::Time & stamp)
+{
+  geometry_msgs::msg::PoseWithCovarianceStamped initialpose;
+  initialpose.header.stamp = stamp;
+  initialpose.header.frame_id = "map";
+  initialpose.pose.pose = pose;
+  // clang-format off
+  initialpose.pose.covariance = {
+    0.25, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.25, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.06853892326654787,
+  };
+  // clang-format on
+  return initialpose;
 }
 
 // translate objects coordinate from log ego pose to current ego pose

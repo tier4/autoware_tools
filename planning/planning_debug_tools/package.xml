@@ -27,12 +27,14 @@
   <depend>autoware_motion_utils</depend>
   <depend>autoware_perception_msgs</depend>
   <depend>autoware_planning_msgs</depend>
+  <depend>autoware_system_msgs</depend>
   <depend>autoware_universe_utils</depend>
   <depend>geometry_msgs</depend>
   <depend>libqt5-core</depend>
   <depend>libqt5-gui</depend>
   <depend>libqt5-widgets</depend>
   <depend>nav_msgs</depend>
+  <depend>nlohmann-json-dev</depend>
   <depend>qtbase5-dev</depend>
   <depend>rclcpp</depend>
   <depend>rclcpp_components</depend>
@@ -41,6 +43,7 @@
   <depend>rosbag2_transport</depend>
   <depend>sensor_msgs</depend>
   <depend>std_srvs</depend>
+  <depend>tier4_metric_msgs</depend>
   <depend>tier4_planning_msgs</depend>
 
   <test_depend>ament_lint_auto</test_depend>
