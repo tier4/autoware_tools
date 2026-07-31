@@ -42,6 +42,7 @@
   <depend>rosbag2_storage</depend>
   <depend>rosbag2_transport</depend>
   <depend>sensor_msgs</depend>
+  <depend>std_srvs</depend>
   <depend>tier4_metric_msgs</depend>
   <depend>tier4_planning_msgs</depend>
 

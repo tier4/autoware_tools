@@ -294,6 +294,14 @@ Example usage with route replaying:
 ros2 run planning_debug_tools perception_reproducer -b <bag-file> --replay-route
 ```
 
+While the node is running, you can republish localization and route without restarting:
+
+```bash
+ros2 service call /perception_reproducer/republish_route std_srvs/srv/Trigger {}
+```
+
+This publishes `/initialpose` from the rosbag start and `/planning/mission_planning/goal` from the rosbag end, same as the `-p` option at startup. The reproduce cool-down state is also reset.
+
 ## Perception replayer
 
 A part of the feature is under development.

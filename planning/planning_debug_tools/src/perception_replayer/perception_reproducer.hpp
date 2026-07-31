@@ -23,11 +23,13 @@
 #include <autoware_system_msgs/msg/autoware_state.hpp>
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
+#include <std_srvs/srv/trigger.hpp>
 #include <tier4_metric_msgs/msg/metric.hpp>
 #include <tier4_metric_msgs/msg/metric_array.hpp>
 
 #include <atomic>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -61,6 +63,9 @@ public:
 private:
   void on_timer();
   void on_pose_reset(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg);
+  void on_republish_route_service(
+    const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+    const std::shared_ptr<std_srvs::srv::Trigger::Response> response);
   void on_autoware_state(const autoware_system_msgs::msg::AutowareState::SharedPtr msg);
 
   // find nearest ego odom index by position (same-heading preferred)
@@ -127,6 +132,9 @@ private:
   std::atomic<bool> just_expanded_{false};
   std::atomic<bool> pending_perturb_apply_{false};
   std::atomic<size_t> pending_perturb_target_idx_{0};
+
+  // service
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr republish_route_srv_;
 
   // state management
   std::deque<size_t> reproduce_sequence_indices_;

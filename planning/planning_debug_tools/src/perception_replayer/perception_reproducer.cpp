@@ -78,12 +78,13 @@ PerceptionReproducer::PerceptionReproducer(
     this, get_clock(), std::chrono::duration<double>(timer_period_s),
     std::bind(&PerceptionReproducer::on_timer, this), timer_callback_group_);
 
+  republish_route_srv_ = this->create_service<std_srvs::srv::Trigger>(
+    "~/republish_route", std::bind(
+                           &PerceptionReproducer::on_republish_route_service, this,
+                           std::placeholders::_1, std::placeholders::_2));
+
   if (param_.publish_route) {
-    publish_recorded_ego_pose(get_bag_start_time());
-    // temporarily add a sleep because sometimes the route is not generated correctly without it.
-    // Need to consider a proper solution.
-    rclcpp::sleep_for(std::chrono::seconds(2));
-    publish_goal_pose();
+    publish_localization_and_route();
   }
 
   RCLCPP_INFO(
@@ -178,6 +179,41 @@ void PerceptionReproducer::on_pose_reset(
   stuck_since_.reset();
 
   RCLCPP_INFO(get_logger(), "Cool down indices and last sequenced pose cleared by /initialpose3d");
+}
+
+void PerceptionReproducer::on_republish_route_service(
+  const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+  const std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+{
+  if (rosbag_ego_odom_data_.empty()) {
+    response->success = false;
+    response->message = "No ego odom data loaded from rosbag.";
+    return;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    reset_reproduce_tracking(std::nullopt);
+    tried_expand_while_stopped_ = false;
+    stuck_since_.reset();
+  }
+
+  if (param_.publish_route) {
+    publish_localization_and_route();
+    response->message = "Republished /initialpose and /planning/mission_planning/goal from rosbag.";
+  }
+
+  if (param_.replay_route) {
+    publish_recorded_ego_pose(get_bag_start_time());
+
+    const auto bag_timestamp = rosbag_ego_odom_data_.front().first;
+    publish_route_at_timestamp(bag_timestamp, this->get_clock()->now());
+    response->message =
+      "Republished /initialpose and /planning/mission_planning/route from rosbag.";
+  }
+
+  response->success = true;
+  RCLCPP_INFO(get_logger(), "%s", response->message.c_str());
 }
 
 std::optional<size_t> PerceptionReproducer::find_perturb_index_along_bag(

@@ -98,6 +98,11 @@ public:
    */
   void publish_goal_pose();
 
+  /**
+   * @brief Publish initial pose from bag start and goal pose from bag end
+   */
+  void publish_localization_and_route();
+
   std::optional<Odometry> get_latest_ego_odom() const
   {
     return ego_odom_ ? std::make_optional<Odometry>(*ego_odom_) : std::nullopt;

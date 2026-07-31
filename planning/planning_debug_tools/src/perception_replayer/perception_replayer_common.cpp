@@ -591,6 +591,15 @@ void PerceptionReplayerCommon::publish_goal_pose()
   RCLCPP_INFO(get_logger(), "Published last recorded ego pose as /planning/mission_planning/goal");
 }
 
+void PerceptionReplayerCommon::publish_localization_and_route()
+{
+  publish_recorded_ego_pose(get_bag_start_time());
+  // temporarily add a sleep because sometimes the route is not generated correctly without it.
+  // Need to consider a proper solution.
+  rclcpp::sleep_for(std::chrono::seconds(2));
+  publish_goal_pose();
+}
+
 void PerceptionReplayerCommon::on_ego_odom(const Odometry::SharedPtr msg)
 {
   ego_odom_ = msg;
