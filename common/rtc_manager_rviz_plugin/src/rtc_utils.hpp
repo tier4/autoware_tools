@@ -28,10 +28,12 @@
 #include <tier4_rtc_msgs/msg/cooperate_response.hpp>
 #include <tier4_rtc_msgs/msg/cooperate_status.hpp>
 #include <tier4_rtc_msgs/msg/cooperate_status_array.hpp>
+#include <tier4_rtc_msgs/msg/creep_command.hpp>
 #include <tier4_rtc_msgs/msg/module.hpp>
 #include <tier4_rtc_msgs/msg/state.hpp>
 #include <tier4_rtc_msgs/srv/auto_mode.hpp>
 #include <tier4_rtc_msgs/srv/cooperate_commands.hpp>
+#include <tier4_rtc_msgs/srv/creep_commands.hpp>
 
 #include <string>
 #endif
@@ -45,10 +47,12 @@ using tier4_rtc_msgs::msg::CooperateCommand;
 using tier4_rtc_msgs::msg::CooperateResponse;
 using tier4_rtc_msgs::msg::CooperateStatus;
 using tier4_rtc_msgs::msg::CooperateStatusArray;
+using tier4_rtc_msgs::msg::CreepCommand;
 using tier4_rtc_msgs::msg::Module;
 using tier4_rtc_msgs::msg::State;
 using tier4_rtc_msgs::srv::AutoMode;
 using tier4_rtc_msgs::srv::CooperateCommands;
+using tier4_rtc_msgs::srv::CreepCommands;
 
 // Style constants
 inline const QString bg_blue = "background-color: #3dffff;";    // NOLINT

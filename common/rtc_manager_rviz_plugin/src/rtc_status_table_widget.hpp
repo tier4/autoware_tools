@@ -43,6 +43,8 @@ public:
     Command,
     AutoMode,
     State,
+    CreepSupported,
+    CreepTriggered,
     StartDistance,
     FinishDistance,
     Count  // Must be last

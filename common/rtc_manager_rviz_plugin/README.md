@@ -27,10 +27,11 @@ The purpose of this RViz plugin is to provide a graphical interface for managing
 
 ### Output
 
-| Name                             | Type                                     | Description                                            |
-| -------------------------------- | ---------------------------------------- | ------------------------------------------------------ |
-| `/api/external/set/rtc_commands` | `tier4_rtc_msgs::srv::CooperateCommands` | The Cooperate Commands for each planning               |
-| `/planning/enable_auto_mode/*`   | `tier4_rtc_msgs::srv::AutoMode`          | The service to switch Auto/Manual mode for each module |
+| Name                                   | Type                                     | Description                                            |
+| -------------------------------------- | ---------------------------------------- | ------------------------------------------------------ |
+| `/api/external/set/rtc_commands`       | `tier4_rtc_msgs::srv::CooperateCommands` | The Cooperate Commands for each planning               |
+| `/api/external/set/rtc_creep_commands` | `tier4_rtc_msgs::srv::CreepCommands`     | The Creep Commands for each planning                   |
+| `/planning/enable_auto_mode/*`         | `tier4_rtc_msgs::srv::AutoMode`          | The service to switch Auto/Manual mode for each module |
 
 ## HowToUse
 

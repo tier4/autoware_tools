@@ -56,6 +56,12 @@ RTCManagerPanel::RTCManagerPanel(QWidget * parent) : rviz_common::Panel(parent)
     activate_button_, &RTCCommandButton::clicked, this, &RTCManagerPanel::on_click_activate_front);
   main_layout->addWidget(activate_button_);
 
+  // Creep button (text will be updated dynamically)
+  creep_button_ = new RTCCommandButton("Creep", bg_blue, this);
+  creep_button_->set_enabled(false);
+  connect(creep_button_, &RTCCommandButton::clicked, this, &RTCManagerPanel::on_click_creep);
+  main_layout->addWidget(creep_button_);
+
   setLayout(main_layout);
 }
 
@@ -65,6 +71,8 @@ void RTCManagerPanel::onInitialize()
 
   client_rtc_commands_ =
     raw_node_->create_client<CooperateCommands>("/api/external/set/rtc_commands");
+  client_creep_commands_ =
+    raw_node_->create_client<CreepCommands>("/api/external/set/rtc_creep_commands");
 
   auto_mode_table_->initialize_clients(raw_node_, AUTO_MODE_SERVICE_NAMESPACE);
 
@@ -102,6 +110,7 @@ void RTCManagerPanel::on_rtc_status(const CooperateStatusArray::ConstSharedPtr m
   cooperate_statuses_ptr_ = std::make_shared<CooperateStatusArray>(*msg);
   status_table_->update_statuses(msg);
   update_front_module_button();
+  update_creep_button();
 }
 
 void RTCManagerPanel::on_auto_mode_status(const AutoModeStatusArray::ConstSharedPtr msg)
@@ -136,6 +145,21 @@ const CooperateStatus * RTCManagerPanel::find_activatable_module() const
   return front;
 }
 
+const CooperateStatus * RTCManagerPanel::find_creepable_module() const
+{
+  auto front = find_activatable_module();
+  if (!front) {
+    return nullptr;
+  }
+  if (!front->creep_supported) {
+    return nullptr;
+  }
+  if (front->creep_triggered) {
+    return nullptr;
+  }
+  return front;
+}
+
 void RTCManagerPanel::update_front_module_button()
 {
   const auto * activatable = find_activatable_module();
@@ -146,6 +170,19 @@ void RTCManagerPanel::update_front_module_button()
   } else {
     activate_button_->update_module_name("N/A");
     activate_button_->set_enabled(false);
+  }
+}
+
+void RTCManagerPanel::update_creep_button()
+{
+  const auto * creepable = find_creepable_module();
+
+  if (creepable) {
+    creep_button_->update_module_name(get_module_name(creepable->module.type));
+    creep_button_->set_enabled(true);
+  } else {
+    creep_button_->update_module_name("N/A");
+    creep_button_->set_enabled(false);
   }
 }
 
@@ -165,6 +202,24 @@ void RTCManagerPanel::send_command_to(const CooperateStatus & status, uint8_t co
   client_rtc_commands_->async_send_request(request);
 }
 
+void RTCManagerPanel::send_creep_command_to(const CooperateStatus & status, bool creep_enable)
+{
+  if (!cooperate_statuses_ptr_) {
+    return;
+  }
+
+  auto request = std::make_shared<CreepCommands::Request>();
+  request->stamp = cooperate_statuses_ptr_->stamp;
+
+  CreepCommand creep_command;
+  creep_command.uuid = status.uuid;
+  creep_command.module = status.module;
+  creep_command.creep_enable = creep_enable;
+  request->commands.emplace_back(creep_command);
+
+  client_creep_commands_->async_send_request(request);
+}
+
 void RTCManagerPanel::on_click_activate_front()
 {
   const auto * front = find_activatable_module();
@@ -172,6 +227,15 @@ void RTCManagerPanel::on_click_activate_front()
     return;
   }
   send_command_to(*front, Command::ACTIVATE);
+}
+
+void RTCManagerPanel::on_click_creep()
+{
+  const auto * creepable = find_creepable_module();
+  if (!creepable) {
+    return;
+  }
+  send_creep_command_to(*creepable, true);
 }
 
 }  // namespace rviz_plugins
