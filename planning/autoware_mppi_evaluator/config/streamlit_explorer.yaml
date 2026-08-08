@@ -1,9 +1,12 @@
 topics:
-  reference_trajectory: /planning/scenario_planning/trajectory
-  odometry: /localization/kinematic_state
+  reference_trajectory: /planning/trajectory_generator/neural_network_based_planner/diffusion_planner_node/debug/mppi/reference_trajectory
+  odometry: /localization/kinematic_state"
+  acceleration: /localization/acceleration
+  steering: /vehicle/status/steering_status
   tracked_objects: /perception/object_recognition/tracking/objects
-  road_borders: /planning/scenario_planning/lane_driving/behavior_planning/path_with_lane_id
-  vehicle_status: /vehicle/status/steering_status # Optional: for initial steer/accel
+  lanelet_map: /map/vector_map
+  route: /planning/route
 
 thresholds:
-  stale_warning_ms: 100.0 # Show warning if odometry/perception is older than 100ms
+  required_stale_ms: 100.0
+  optional_stale_ms: 250.0

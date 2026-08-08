@@ -10,89 +10,156 @@
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
-# limitations under the License.# mcap_reader.py
+# limitations under the License.
+
+"""Index the MPPI input topics in a ROS 2 MCAP file."""
+
+from bisect import bisect_right
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict
+from typing import Iterator
 from typing import List
 from typing import Optional
 from typing import Tuple
 
-from rosbags.rosbag2 import Reader
-from rosbags.serde import deserialize_cdr
+import rosbag2_py
 import yaml
 
 
+@dataclass(frozen=True)
+class SerializedRecord:
+    timestamp_ns: int
+    data: bytes
+
+
+@dataclass(frozen=True)
+class SynchronizedFrame:
+    index: int
+    timestamp_ns: int
+    messages: Dict[str, bytes]
+    ages_ms: Dict[str, Optional[float]]
+    warnings: List[str]
+    is_usable: bool
+
+    @property
+    def frame_id(self) -> str:
+        return f"frame_{self.timestamp_ns}"
+
+
 class McapZohSynchronizer:
+    """Synchronize MPPI inputs against each reference trajectory timestamp."""
+
+    _STATIC_KEYS = ("lanelet_map", "route")
+    _REQUIRED_ZOH_KEYS = ("odometry", "tracked_objects")
+    _OPTIONAL_ZOH_KEYS = ("acceleration", "steering")
+
     def __init__(self, bag_path: str, topics_config_path: str):
-        self.bag_path = Path(bag_path)
-        with open(topics_config_path, "r") as f:
-            self.config = yaml.safe_load(f)
+        self.bag_path = Path(bag_path).expanduser().resolve()
+        self.config_path = Path(topics_config_path).expanduser().resolve()
+        with self.config_path.open(encoding="utf-8") as stream:
+            self.config = yaml.safe_load(stream) or {}
 
-        self.topic_map = self.config["topics"]
-        self.stale_threshold_ns = self.config["thresholds"]["stale_warning_ms"] * 1e6
-
-        # Caches for indexed messages
-        self.ref_timestamps: List[int] = []
-        self.ref_messages: Dict[int, any] = {}
-        self.history: Dict[str, List[Tuple[int, any]]] = {"odom": [], "objects": [], "borders": []}
-
+        self.topic_map: Dict[str, str] = self.config["topics"]
+        thresholds = self.config.get("thresholds", {})
+        self.required_stale_ms = float(thresholds.get("required_stale_ms", 100.0))
+        self.optional_stale_ms = float(thresholds.get("optional_stale_ms", 250.0))
+        self.topic_types: Dict[str, str] = {}
+        self.records: Dict[str, List[SerializedRecord]] = {key: [] for key in self.topic_map}
+        self._timestamps: Dict[str, List[int]] = {key: [] for key in self.topic_map}
         self._index_bag()
 
-    def _index_bag(self):
-        """Pass through the bag once to cache timestamps and message histories."""
-        with Reader(self.bag_path) as reader:
-            for connection, timestamp, rawdata in reader.messages():
-                msg = deserialize_cdr(rawdata, connection.msgtype)
+        reference_key = "reference_trajectory"
+        self.ref_timestamps = self._timestamps[reference_key]
+        if not self.ref_timestamps:
+            raise ValueError(f"The bag contains no messages for {self.topic_map[reference_key]}")
 
-                if connection.topic == self.topic_map["reference_trajectory"]:
-                    self.ref_timestamps.append(timestamp)
-                    self.ref_messages[timestamp] = msg
-                elif connection.topic == self.topic_map["odometry"]:
-                    self.history["odom"].append((timestamp, msg))
-                elif connection.topic == self.topic_map["tracked_objects"]:
-                    self.history["objects"].append((timestamp, msg))
-                elif connection.topic == self.topic_map["road_borders"]:
-                    self.history["borders"].append((timestamp, msg))
+    def _index_bag(self) -> None:
+        if not self.bag_path.exists():
+            raise FileNotFoundError(self.bag_path)
 
-        self.ref_timestamps.sort()
-        for key in self.history:
-            self.history[key].sort(key=lambda x: x[0])
+        storage_options = rosbag2_py.StorageOptions(uri=str(self.bag_path), storage_id="mcap")
+        converter_options = rosbag2_py.ConverterOptions(
+            input_serialization_format="cdr", output_serialization_format="cdr"
+        )
+        reader = rosbag2_py.SequentialReader()
+        reader.open(storage_options, converter_options)
 
-    def _get_latest_before(self, history_key: str, target_ts: int) -> Tuple[Optional[any], float]:
-        """Find the latest message where t_msg <= target_ts (Zero-Order Hold)."""
-        records = self.history[history_key]
-        best_msg = None
-        best_ts = 0
-        for ts, msg in records:
-            if ts <= target_ts:
-                best_msg, best_ts = msg, ts
-            else:
-                break
+        bag_topics = {item.name: item.type for item in reader.get_all_topics_and_types()}
+        required_keys = (
+            "reference_trajectory",
+            *self._STATIC_KEYS,
+            *self._REQUIRED_ZOH_KEYS,
+        )
+        missing = [
+            self.topic_map[key] for key in required_keys if self.topic_map[key] not in bag_topics
+        ]
+        if missing:
+            raise ValueError(f"The bag does not contain configured topics: {missing}")
 
-        lag_ms = (target_ts - best_ts) / 1e6 if best_msg else float("inf")
-        return best_msg, lag_ms
-
-    def get_synchronized_frame(self, index: int) -> Dict:
-        """Return the fully synchronized frame and data-lags for UI warnings."""
-        target_ts = self.ref_timestamps[index]
-        ref_traj = self.ref_messages[target_ts]
-
-        odom, odom_lag = self._get_latest_before("odom", target_ts)
-        objects, obj_lag = self._get_latest_before("objects", target_ts)
-        borders, border_lag = self._get_latest_before("borders", target_ts)
-
-        # Check if perception or odom is too stale
-        warnings = []
-        if odom_lag > (self.stale_threshold_ns / 1e6):
-            warnings.append(f"Odometry stale by {odom_lag:.1f} ms")
-        if obj_lag > (self.stale_threshold_ns / 1e6):
-            warnings.append(f"TrackedObjects stale by {obj_lag:.1f} ms")
-
-        return {
-            "timestamp_ns": target_ts,
-            "reference_trajectory": ref_traj,
-            "odometry": odom,
-            "tracked_objects": objects,
-            "road_borders": borders,
-            "warnings": warnings,
+        reverse_topics = {
+            topic: key for key, topic in self.topic_map.items() if topic in bag_topics
         }
+        self.topic_types = {key: bag_topics[topic] for topic, key in reverse_topics.items()}
+        reader.set_filter(rosbag2_py.StorageFilter(topics=list(reverse_topics)))
+        while reader.has_next():
+            topic, data, timestamp_ns = reader.read_next()
+            key = reverse_topics[topic]
+            self.records[key].append(SerializedRecord(timestamp_ns, bytes(data)))
+
+        for key, records in self.records.items():
+            records.sort(key=lambda record: record.timestamp_ns)
+            self._timestamps[key] = [record.timestamp_ns for record in records]
+
+    def __len__(self) -> int:
+        return len(self.ref_timestamps)
+
+    def _latest_at_or_before(
+        self, key: str, timestamp_ns: int
+    ) -> Tuple[Optional[SerializedRecord], Optional[float]]:
+        timestamps = self._timestamps[key]
+        position = bisect_right(timestamps, timestamp_ns)
+        if position == 0:
+            return None, None
+        record = self.records[key][position - 1]
+        return record, (timestamp_ns - record.timestamp_ns) / 1.0e6
+
+    def get_synchronized_frame(self, index: int) -> SynchronizedFrame:
+        if index < 0 or index >= len(self):
+            raise IndexError(index)
+
+        reference = self.records["reference_trajectory"][index]
+        timestamp_ns = reference.timestamp_ns
+        messages = {"reference_trajectory": reference.data}
+        ages_ms: Dict[str, Optional[float]] = {"reference_trajectory": 0.0}
+        warnings: List[str] = []
+        is_usable = True
+
+        for key in self._STATIC_KEYS + self._REQUIRED_ZOH_KEYS + self._OPTIONAL_ZOH_KEYS:
+            record, age_ms = self._latest_at_or_before(key, timestamp_ns)
+            ages_ms[key] = age_ms
+            if record is not None:
+                messages[key] = record.data
+            elif key in self._STATIC_KEYS + self._REQUIRED_ZOH_KEYS:
+                warnings.append(f"No {key} message exists at or before this frame")
+                is_usable = False
+            else:
+                warnings.append(f"No optional {key} message exists at or before this frame")
+
+            if age_ms is None:
+                continue
+            if key in self._REQUIRED_ZOH_KEYS and age_ms > self.required_stale_ms:
+                warnings.append(f"{key} is stale by {age_ms:.1f} ms")
+                is_usable = False
+            if key in self._OPTIONAL_ZOH_KEYS and age_ms > self.optional_stale_ms:
+                warnings.append(f"{key} is stale by {age_ms:.1f} ms and will be omitted")
+                messages.pop(key, None)
+
+        return SynchronizedFrame(index, timestamp_ns, messages, ages_ms, warnings, is_usable)
+
+    def iter_frames(
+        self, start: int = 0, stop: Optional[int] = None
+    ) -> Iterator[SynchronizedFrame]:
+        final = len(self) if stop is None else min(stop, len(self))
+        for index in range(max(0, start), final):
+            yield self.get_synchronized_frame(index)

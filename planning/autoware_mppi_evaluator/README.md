@@ -1,186 +1,156 @@
-# MPPI Frame Explorer
+# Autoware MPPI Evaluator
 
-An interactive web-based visualization and dataset curation tool for the Autoware **First-Order Dubins MPPI Trajectory Planner**.
+This package evaluates `autoware_mppi_optimizer` against synchronized frames from ROS 2 MCAP files.
 
-Built with **Streamlit**, **Plotly**, and **pybind11**, this application bridges the gap between raw `.mcap` ROS 2 driving logs and deterministic, isolated C++ unit test / evaluation datasets. It enables autonomous driving engineers to inspect reference trajectories, evaluate MPPI configurations on-the-fly via C++17/CUDA bindings, and curate edge-case test frames with synchronized multi-topic state.
+It provides a native batch API, a command-line evaluator, and an interactive Streamlit explorer.
 
----
+## Input contract
 
-## Features
+The recorded MPPI reference trajectory defines the evaluation clock.
 
-- **MCAP Bag Exploration:** Direct zero-order-hold (ZOH) indexing and scrubbing of Autoware `.mcap` ROS 2 recordings without manual pre-conversion.
-- **Zero-Order-Hold Synchronization:** Uses the `reference_trajectory` timestamp as the trigger clock and retrieves the latest available odometry, tracked objects, and road borders within user-configured stale thresholds.
-- **Live C++/CUDA Re-Optimization:** Embeds the native C++17 `FirstOrderDubinsMppiInterface` via Python bindings (`pybind11`), enabling ~1–3 ms live trajectory re-optimization when adjusting GUI sliders.
-- **Interactive BEV Canvas:** Plotly-powered Bird's-Eye View displaying:
-- Ego vehicle pose and odometry footprint
-- Raw Reference Trajectory (gray dashed)
-- Optimized MPPI Trajectory (green, or red if rejected by safety margins)
-- Tracked obstacles and road border geometry
+The evaluator selects the newest input message whose bag timestamp does not exceed the reference timestamp.
 
-- **One-Click Dataset Curation:** Export synchronized frames as individual JSON test fixtures (`frame_<timestamp>.json`) and automatically register them with tags into `dataset/manifest.yaml`.
+The required inputs are:
 
----
+- `autoware_planning_msgs/msg/Trajectory`
+- `nav_msgs/msg/Odometry`
+- `autoware_perception_msgs/msg/TrackedObjects`
+- `autoware_map_msgs/msg/LaneletMapBin`
+- `autoware_planning_msgs/msg/LaneletRoute`
 
-## Architecture
+Acceleration and steering reports are optional.
 
-```text
-                  ┌─────────────────────────────────────┐
-                  │          topics.yaml                │
-                  │   (User-Configurable ROS 2 Topics)  │
-                  └──────────────────┬──────────────────┘
-                                     │
-┌─────────────────────────┐          ▼           ┌────────────────────────┐
-│   MCAP Recording (.bag) │ ──► McapZohSync ───► │ Streamlit UI / Plotly  │
-└─────────────────────────┘     (mcap_reader.py) │   • Timeline Scrubber  │
-                                                 │   • Parameter Sliders  │
-                                                 │   • BEV Canvas         │
-                                                 └───────────┬────────────┘
-                                                             │
-                                                             ▼
-                                                 ┌────────────────────────┐
-                                                 │ pybind11 C++/CUDA Mod  │
-                                                 │  mppi_optimizer_py     │
-                                                 └───────────┬────────────┘
-                                                             │
-                                                             ▼
-                                                 ┌────────────────────────┐
-                                                 │ Curated Dataset Output │
-                                                 │  • /dataset/curated/*.json
-                                                 │  • /dataset/manifest.yaml
-                                                 └────────────────────────┘
+The default topic configuration uses the diffusion planner MPPI reference debug topic.
 
-```
+This topic preserves the exact trajectory that entered the recorded MPPI call.
 
-### Key Components
+See `config/streamlit_explorer.yaml` for all topic names and stale-data limits.
 
-- `app.py`: Streamlit frontend providing the timeline scrubber, parameter controls, BEV plotting, and dataset export buttons.
-- `mcap_reader.py`: Implements `McapZohSynchronizer` using the `rosbags` library to index timestamps and synchronize asynchronous ROS 2 topics with data-lag monitoring.
-- `pybind_mppi.cpp`: C++ wrapper exposing `FirstOrderDubinsMppiInterface`, cost parameters, and runtime options to Python.
-- `topics.yaml`: External configuration file mapping standard or custom ROS 2 topic names to logical MPPI input structures.
+## Map preparation
 
----
+The package constructs `ExtendedRouteHandler` from the recorded map and route.
 
-## Prerequisites
+It creates the extended route map once for each map and route pair.
 
-- **OS:** Ubuntu 22.04 / 24.04 (Linux x86_64 or ARM64)
-- **C++ Standard:** C++17
-- **GPU Runtime:** NVIDIA CUDA Toolkit (required for GPU MPPI rollouts)
-- **Python:** 3.10+
-- **ROS 2:** Humble / Jazzy (or standard Autoware message definitions)
+It queries nearby road borders and drivable-area boundaries for every reference trajectory.
 
----
+The query margin contains the vehicle front extent plus one configurable meter.
 
-## Installation & Setup
+Chronological mode also uses `TrackedObjectSelector` from `autoware_avoidance_target_detector`.
 
-### 1. Clone & Install Python Dependencies
+## Evaluation modes
+
+`isolated` creates a new MPPI optimizer for each frame.
+
+This mode removes warm-start state and permits random frame access.
+
+This mode passes all tracked objects because one frame cannot reconstruct the detector history.
+
+`chronological` preserves the MPPI warm start and the tracked-object filter state.
+
+Frames must use timestamps in strict ascending order for this mode.
+
+The explorer replays earlier frames when the selected index moves backward.
+
+## Parameters
+
+Provide these ROS parameter files:
+
+- The MPPI optimizer parameter file
+- The vehicle information parameter file
+- The simulator model parameter file
+
+The evaluator converts vehicle dimensions with the same formulas as `makeVehicleParams()`.
+
+The native parameter structures provide defaults when a file omits a value.
+
+## Build
+
+Install the two Python user-interface dependencies:
 
 ```bash
-git clone https://github.com/your-org/mppi_frame_explorer.git
-cd mppi_frame_explorer
-
-# Create a virtual environment
-python3 -m venv venv
-source venv/bin/activate
-
-# Install requirements
-pip install -r requirements.txt
-
+python3 -m pip install -r src/tools/planning/autoware_mppi_evaluator/requirements.txt
 ```
 
-#### Example `requirements.txt`
-
-```text
-streamlit>=1.30.0
-plotly>=5.18.0
-pyyaml>=6.0
-rosbags>=0.9.15
-pybind11>=2.11.0
-
-```
-
-### 2. Build C++/CUDA PyBind11 Module
-
-Ensure your Autoware environment or ROS 2 workspace is sourced so dependency headers (e.g., `autoware_planning_msgs`) are available:
+Build the package in a sourced Autoware workspace with CUDA and TensorRT available:
 
 ```bash
-mkdir build && cd build
-cmake .. -DBUILD_PYBIND_MODULE=ON -DCMAKE_BUILD_TYPE=Release
-make -j$(nproc)
-
-# Add the compiled library (.so) to your Python path
-export PYTHONPATH=$PYTHONPATH:$(pwd)
-cd ..
-
+colcon build --symlink-install --packages-up-to autoware_mppi_evaluator
+source install/setup.bash
 ```
 
----
+## Explorer
 
-## Configuration
-
-Modify `topics.yaml` to match the topic names recorded in your `.mcap` files:
-
-```yaml
-topics:
-  reference_trajectory: "/planning/scenario_planning/trajectory"
-  odometry: "/localization/kinematic_state"
-  tracked_objects: "/perception/object_recognition/tracking/objects"
-  road_borders: "/planning/scenario_planning/lane_driving/behavior_planning/path_with_lane_id"
-  vehicle_status: "/vehicle/status/steering_status"
-
-thresholds:
-  stale_warning_ms: 100.0 # Display UI warning if perception/odometry lags target timestamp
-```
-
----
-
-## Usage
-
-### 1. Launch the Explorer
+Start the explorer:
 
 ```bash
-source venv/bin/activate
-export PYTHONPATH=$PYTHONPATH:$(pwd)/build
-streamlit run app.py
-
+ros2 run autoware_mppi_evaluator mppi_streamlit_explorer.py
 ```
 
-### 2. Exploring & Tuning
+Select the MCAP path and parameter files in the sidebar.
 
-1. **Load Bag:** In the sidebar, specify the path to your `.mcap` file and `topics.yaml`.
-2. **Scrub Timeline:** Use the **Trajectory Timeline Scrubber** to move across reference trajectory messages. The application automatically pulls synchronized odometry, object, and border states for that exact timestamp.
-3. **Adjust MPPI Parameters:** Drag the sliders for:
-   - **Boundary Threshold (`boundary_threshold`)**
-   - **Obstacle Collision Margin (`obstacle_collision_margin`)**
-   - **Road Border Margin (`road_border_collision_margin`)**
-4. **Inspect BEV Plot:** Watch the optimized trajectory dynamically re-compute and display over the reference path and obstacle bounding boxes.
+Use `Evaluate frame` for an isolated frame.
 
-### 3. Saving a Curated Frame
+Use `Replay through frame` for production-like history.
 
-1. Apply relevant categorical tags from the UI (e.g., `cut_in`, `sharp_turn`, `tight_borders`, `emergency_stop`).
-2. Click **Save Frame to Dataset**.
-3. The tool generates an isolated input fixture at `dataset/curated/frame_<timestamp_ns>.json` and registers the path and tags in `dataset/manifest.yaml`.
+## Batch command
 
----
+Evaluate one configuration:
 
-## Dataset Format
-
-Saved JSON frames are self-contained and directly digestible by the offline `MppiBatchEvaluator`:
-
-```json
-{
-  "frame_id": "frame_1723107284000000000",
-  "timestamp_ns": 1723107284000000000,
-  "tags": ["sharp_turn", "tight_borders"],
-  "reference_trajectory": { ... },
-  "odometry": { ... },
-  "tracked_objects": { ... },
-  "road_borders": [ ... ]
-}
-
+```bash
+ros2 run autoware_mppi_evaluator mppi_evaluate_bag.py BAG_PATH \
+  --topics TOPICS.yaml \
+  --optimizer-config baseline=MPPI.yaml \
+  --vehicle-info VEHICLE_INFO.yaml \
+  --simulator-model SIMULATOR_MODEL.yaml \
+  --mode chronological \
+  --output results/mppi
 ```
 
----
+Repeat `--optimizer-config NAME=PATH` to compare configurations.
 
-## License
+The command writes a frame CSV file and a JSON file with aggregate latency and rejection counts.
 
-Licensed under the Apache License, Version 2.0. See [LICENSE](https://www.google.com/search?q=LICENSE) for details.
+`--output-stride` reduces output rows but still evaluates every chronological frame.
+
+Evaluate a curated dataset:
+
+```bash
+ros2 run autoware_mppi_evaluator mppi_evaluate_bag.py dataset \
+  --input-format dataset \
+  --optimizer-config baseline=MPPI.yaml \
+  --vehicle-info VEHICLE_INFO.yaml \
+  --simulator-model SIMULATOR_MODEL.yaml \
+  --output results/curated
+```
+
+## Dataset format
+
+The explorer stores each curated frame as versioned JSON.
+
+The JSON preserves each ROS message as base64-encoded CDR data.
+
+It also stores topic names, message types, data ages, timestamps, and tags.
+
+Manifest updates replace duplicate frame identifiers and use atomic file replacement.
+
+## Metrics
+
+The evaluator reports:
+
+- MPPI execution time
+- Baseline cost
+- Rejection and invalidity details
+- Effective sample size
+- Maximum importance weight
+- Maximum and mean cross-track error
+- Maximum lateral acceleration
+- Maximum acceleration-command rate
+- Maximum steering-state rate
+- Obstacle and boundary clearance
+
+The acceleration trajectory field contains an MPPI command, not the simulated acceleration state.
+
+The obstacle clearance uses conservative circumscribed circles around each vehicle box.
+
+The boundary clearance uses a conservative circle around the centered ego vehicle box.
