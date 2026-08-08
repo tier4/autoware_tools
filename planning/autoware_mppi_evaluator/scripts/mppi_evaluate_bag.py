@@ -139,11 +139,19 @@ def main() -> int:
         if not arguments.topics:
             parser.error("--topics is required for MCAP input")
         frame_source = McapZohSynchronizer(arguments.input, arguments.topics)
-        all_frames = list(frame_source.iter_frames())
+        frame_count = len(frame_source)
+
+        def selected_frames(start, stop):
+            return frame_source.iter_frames(start, stop)
+
     else:
         all_frames = load_dataset(arguments.input)
+        frame_count = len(all_frames)
 
-    stop = len(all_frames) if arguments.stop is None else min(arguments.stop, len(all_frames))
+        def selected_frames(start, stop):
+            return iter(all_frames[start:stop])
+
+    stop = frame_count if arguments.stop is None else min(arguments.stop, frame_count)
     if arguments.start < 0 or arguments.start >= stop:
         parser.error("The selected frame range is empty")
 
@@ -158,7 +166,7 @@ def main() -> int:
         )
         session = None
         environment_key = None
-        for frame in all_frames[arguments.start : stop]:
+        for frame in selected_frames(arguments.start, stop):
             if not frame.is_usable:
                 rows.append(
                     {

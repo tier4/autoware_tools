@@ -15,16 +15,6 @@ pybind11_add_module(mppi_optimizer_py MODULE
   src/mppi_pybind.cpp
 )
 target_link_libraries(mppi_optimizer_py PRIVATE ${PROJECT_NAME})
-ament_target_dependencies(mppi_optimizer_py
-  autoware_map_msgs
-  autoware_perception_msgs
-  autoware_planning_msgs
-  autoware_vehicle_msgs
-  geometry_msgs
-  nav_msgs
-  rclcpp
-  tf2
-)
 
 install(TARGETS mppi_optimizer_py
   LIBRARY DESTINATION lib/${PROJECT_NAME}
@@ -50,6 +40,14 @@ if(BUILD_TESTING)
     test/test_mppi_metrics.cpp
   )
   target_link_libraries(test_mppi_metrics ${PROJECT_NAME})
+
+  add_test(
+    NAME test_mcap_reader
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_mcap_reader.py
+  )
+  set_tests_properties(test_mcap_reader PROPERTIES
+    ENVIRONMENT "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/streamlit_explorer"
+  )
 endif()
 
 ament_auto_package(INSTALL_TO_SHARE config)

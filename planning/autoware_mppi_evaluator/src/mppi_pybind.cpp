@@ -184,6 +184,7 @@ PYBIND11_MODULE(mppi_optimizer_py, module)
 {
   using autoware::mppi_evaluator::deserialize_message;
   using autoware::mppi_evaluator::deserialize_optional_message;
+  using autoware::mppi_evaluator::EvaluatedFrameResult;
   using autoware::mppi_evaluator::MppiConfiguration;
   using autoware::mppi_evaluator::MppiEnvironment;
   using autoware::mppi_evaluator::MppiEvaluationSession;
