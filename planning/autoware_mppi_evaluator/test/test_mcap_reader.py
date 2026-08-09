@@ -29,9 +29,9 @@ except ModuleNotFoundError:
     rosbag2_py.StorageFilter = StorageFilter
     sys.modules["rosbag2_py"] = rosbag2_py
 
-from mcap_reader import McapZohSynchronizer
-from mcap_reader import MessageReference
-from mcap_reader import SerializedRecord
+from autoware_mppi_evaluator.mcap_reader import McapZohSynchronizer
+from autoware_mppi_evaluator.mcap_reader import MessageReference
+from autoware_mppi_evaluator.mcap_reader import SerializedRecord
 
 
 class FakeReader:

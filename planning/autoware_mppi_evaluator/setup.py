@@ -13,20 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Start the installed MPPI Streamlit application."""
+from setuptools import setup
 
-from pathlib import Path
-import sys
-
-import autoware_mppi_evaluator
-from streamlit.web import cli
-
-
-def main() -> int:
-    application = Path(autoware_mppi_evaluator.__file__).with_name("app.py")
-    sys.argv = ["streamlit", "run", str(application), *sys.argv[1:]]
-    return cli.main()
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+setup(
+    name="autoware_mppi_evaluator",
+    version="0.1.0",
+    packages=["autoware_mppi_evaluator"],
+    package_dir={"autoware_mppi_evaluator": "streamlit_explorer"},
+    scripts=[
+        "scripts/mppi_evaluate_bag.py",
+        "scripts/mppi_streamlit_explorer.py",
+    ],
+)

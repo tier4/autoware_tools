@@ -23,14 +23,14 @@ from typing import List
 from typing import Tuple
 
 from ament_index_python.packages import get_package_share_directory
-from dataset_io import save_frame
-from evaluator_config import make_configuration
-from mcap_reader import McapZohSynchronizer
+from autoware_mppi_evaluator.dataset_io import save_frame
+from autoware_mppi_evaluator.evaluator_config import make_configuration
+from autoware_mppi_evaluator.mcap_reader import McapZohSynchronizer
 import plotly.graph_objects as go
 import streamlit as st
 
 try:
-    import mppi_optimizer_py as mppi_cpp
+    from autoware_mppi_evaluator import mppi_optimizer_py as mppi_cpp
 
     BACKEND_ERROR = None
 except ImportError as error:

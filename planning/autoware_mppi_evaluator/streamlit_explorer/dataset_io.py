@@ -23,7 +23,7 @@ from typing import Dict
 from typing import Iterable
 from typing import List
 
-from mcap_reader import SynchronizedFrame
+from autoware_mppi_evaluator.mcap_reader import SynchronizedFrame
 import yaml
 
 SCHEMA_VERSION = 1

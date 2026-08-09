@@ -29,10 +29,10 @@ from typing import Iterable
 from typing import List
 from typing import Tuple
 
-from dataset_io import load_dataset
-from evaluator_config import make_configuration
-from mcap_reader import McapZohSynchronizer
-import mppi_optimizer_py as mppi_cpp
+from autoware_mppi_evaluator import mppi_optimizer_py as mppi_cpp
+from autoware_mppi_evaluator.dataset_io import load_dataset
+from autoware_mppi_evaluator.evaluator_config import make_configuration
+from autoware_mppi_evaluator.mcap_reader import McapZohSynchronizer
 
 
 def parse_named_path(value: str) -> Tuple[str, str]:
