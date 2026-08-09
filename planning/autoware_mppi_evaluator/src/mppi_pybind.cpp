@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "autoware/avoidance_target_detector/object_filtering.hpp"
 #include "autoware/mppi_evaluator/mppi_batch_evaluator.hpp"
 #include "autoware/mppi_optimizer/predicted_objects_obstacles.hpp"
 
@@ -214,6 +215,18 @@ PYBIND11_MODULE(mppi_optimizer_py, module)
         deserialize_message<autoware_perception_msgs::msg::TrackedObjects>(cdr_bytes));
     },
     py::arg("cdr_bytes"));
+
+  module.def(
+    "deserialize_tracked_objects_in_range",
+    [](const py::bytes & objects_cdr, const py::bytes & trajectory_cdr, const double margin) {
+      const auto objects =
+        deserialize_message<autoware_perception_msgs::msg::TrackedObjects>(objects_cdr);
+      const auto trajectory =
+        deserialize_message<autoware_planning_msgs::msg::Trajectory>(trajectory_cdr);
+      return objects_to_list(
+        autoware::avoidance_target_detector::filter_objects_in_range(objects, trajectory, margin));
+    },
+    py::arg("objects_cdr"), py::arg("trajectory_cdr"), py::arg("margin"));
 
   py::class_<FirstOrderDubinsMppiCostParams>(module, "CostParams")
     .def(py::init<>())

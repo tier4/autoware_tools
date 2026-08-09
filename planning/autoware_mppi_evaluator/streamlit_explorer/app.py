@@ -89,6 +89,15 @@ def box_outline(
     return [point[0] for point in corners], [point[1] for point in corners]
 
 
+def object_filter_margin(configuration) -> float:
+    vehicle = configuration.vehicle_params
+    max_longitudinal_offset = abs(float(vehicle.ego_axle_to_box_center)) + 0.5 * float(
+        vehicle.ego_length
+    )
+    vehicle_radius = math.hypot(max_longitudinal_offset, 0.5 * float(vehicle.ego_width))
+    return vehicle_radius + float(configuration.cost_params.boundary_threshold)
+
+
 def add_segments(figure: go.Figure, segments: Iterable, name: str, color: str) -> None:
     first = True
     for x0, y0, x1, y1 in segments:
@@ -311,8 +320,10 @@ with plot_column:
                 add_trajectory_arrays(figure, xs, ys, name, color, dash)
 
         if "tracked_objects" in frame.messages:
-            tracked_objects = mppi_cpp.deserialize_tracked_objects(
-                frame.messages["tracked_objects"]
+            tracked_objects = mppi_cpp.deserialize_tracked_objects_in_range(
+                frame.messages["tracked_objects"],
+                frame.messages["reference_trajectory"],
+                object_filter_margin(configuration),
             )
             for object_index, tracked_object in enumerate(tracked_objects):
                 xs_box, ys_box = box_outline(
@@ -354,7 +365,7 @@ with metric_column:
 st.subheader("Dataset curation")
 dataset_directory = st.text_input("Dataset directory", "dataset")
 tags = st.multiselect(
-    "Tags", ("cut_in", "sharp_turn", "tight_borders", "high_speed", "emergency_stop")
+    "Tags", ("challenging", "avoidance", "cut_in", "sharp_turn", "high_speed", "kinematic_limit")
 )
 custom_tag = st.text_input("Custom tag")
 if st.button("Save synchronized frame", disabled=not frame.is_usable):

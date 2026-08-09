@@ -248,18 +248,26 @@ struct MppiEvaluationSession::Impl
 
   mppi_optimizer::TrackedObjects select_objects(const MppiInputFrame & frame)
   {
+    const double half_length = 0.5 * static_cast<double>(configuration.vehicle_params.ego_length);
+    const double half_width = 0.5 * static_cast<double>(configuration.vehicle_params.ego_width);
+    const double max_longitudinal_offset =
+      std::abs(static_cast<double>(configuration.vehicle_params.ego_axle_to_box_center)) +
+      half_length;
+    const double margin = std::hypot(max_longitudinal_offset, half_width) +
+                          configuration.cost_params.boundary_threshold;
+    const auto objects_in_range = avoidance_target_detector::filter_objects_in_range(
+      frame.tracked_objects, frame.reference_trajectory, margin);
+
     if (mode == EvaluationMode::isolated) {
-      return frame.tracked_objects;
+      return objects_in_range;
     }
 
     const auto current_time = rclcpp::Time(static_cast<std::int64_t>(frame.timestamp_ns));
     object_selector.update_objects(
-      current_time, frame.tracked_objects, frame.reference_trajectory, *route_handler);
+      current_time, objects_in_range, frame.reference_trajectory, *route_handler);
     auto avoidance_targets = object_selector.get_avoidance_targets(
-      frame.tracked_objects, frame.reference_trajectory,
-      route_handler->get_extended_route_bounds());
-    const auto driving_along_targets =
-      object_selector.get_driving_along_vehicles(frame.tracked_objects);
+      objects_in_range, frame.reference_trajectory, route_handler->get_extended_route_bounds());
+    const auto driving_along_targets = object_selector.get_driving_along_vehicles(objects_in_range);
     avoidance_targets.objects.insert(
       avoidance_targets.objects.end(), driving_along_targets.objects.begin(),
       driving_along_targets.objects.end());
