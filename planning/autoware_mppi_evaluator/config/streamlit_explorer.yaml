@@ -1,5 +1,6 @@
 topics:
   reference_trajectory: /planning/trajectory_generator/neural_network_based_planner/diffusion_planner_node/debug/mppi/reference_trajectory
+  original_trajectory: /planning/trajectory_generator/neural_network_based_planner/diffusion_planner_node/debug/mppi/optimized_trajectory
   odometry: /localization/kinematic_state
   acceleration: /localization/acceleration
   steering: /vehicle/status/steering_status

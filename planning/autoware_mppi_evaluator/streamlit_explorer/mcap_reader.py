@@ -62,7 +62,7 @@ class McapZohSynchronizer:
 
     _STATIC_KEYS = ("lanelet_map", "route")
     _REQUIRED_ZOH_KEYS = ("odometry", "tracked_objects")
-    _OPTIONAL_ZOH_KEYS = ("acceleration", "steering")
+    _OPTIONAL_ZOH_KEYS = ("acceleration", "steering", "original_trajectory")
     _PAYLOAD_CACHE_SIZE = 128
 
     def __init__(self, bag_path: str, topics_config_path: str):

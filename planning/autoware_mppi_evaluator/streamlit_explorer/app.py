@@ -27,6 +27,8 @@ from dataset_io import save_frame
 from evaluator_config import make_configuration
 from mcap_reader import McapZohSynchronizer
 import plotly.graph_objects as go
+from rclpy.serialization import deserialize_message
+from rosidl_runtime_py.utilities import get_message
 import streamlit as st
 
 try:
@@ -43,6 +45,12 @@ def package_file(package: str, relative: str) -> str:
         return str(Path(get_package_share_directory(package)) / relative)
     except Exception:
         return ""
+
+
+def deserialize_cdr(cdr_bytes: bytes, msg_type_name: str):
+    """Deserialize raw CDR bytes using native ROS 2 Python libraries."""
+    msg_type = get_message(msg_type_name)
+    return deserialize_message(cdr_bytes, msg_type)
 
 
 @st.cache_resource(show_spinner="Index the selected MCAP file")
@@ -107,18 +115,26 @@ def add_segments(figure: go.Figure, segments: Iterable, name: str, color: str) -
         first = False
 
 
-def add_trajectory(figure: go.Figure, trajectory: Dict, name: str, color: str, dash: str) -> None:
-    points = trajectory["points"]
+def add_trajectory_arrays(
+    figure: go.Figure, xs: List[float], ys: List[float], name: str, color: str, dash: str
+) -> None:
     figure.add_trace(
         go.Scatter(
-            x=[point["x"] for point in points],
-            y=[point["y"] for point in points],
+            x=xs,
+            y=ys,
             mode="lines+markers",
             name=name,
             line={"color": color, "width": 3, "dash": dash},
             marker={"size": 4},
         )
     )
+
+
+def add_trajectory(figure: go.Figure, trajectory: Dict, name: str, color: str, dash: str) -> None:
+    points = trajectory["points"]
+    xs = [point["x"] for point in points]
+    ys = [point["y"] for point in points]
+    add_trajectory_arrays(figure, xs, ys, name, color, dash)
 
 
 st.set_page_config(page_title="MPPI Frame Explorer", layout="wide")
@@ -185,6 +201,7 @@ border_margin = st.sidebar.slider(
 skip_if_invalid = st.sidebar.checkbox(
     "Reject an invalid result", value=configuration.runtime_options.skip_if_invalid
 )
+auto_evaluate = st.sidebar.checkbox("Auto-evaluate on select", value=False)
 
 if not bag_path or not Path(bag_path).expanduser().exists():
     st.info("Select an MCAP file to start.")
@@ -228,44 +245,59 @@ if st.session_state.get("session_key") != session_key:
     st.session_state.result = None
 
 button_label = "Evaluate frame" if mode == "isolated" else "Replay through frame"
-if st.button(button_label, type="primary", disabled=not frame.is_usable):
-    try:
-        if mode == "isolated":
-            st.session_state.result = evaluate(st.session_state.evaluator, frame)
-            st.session_state.last_evaluated_index = frame_index
-        else:
-            if frame_index <= st.session_state.last_evaluated_index:
-                st.session_state.evaluator.reset()
-                st.session_state.last_evaluated_index = -1
-            progress = st.progress(0.0)
-            start = st.session_state.last_evaluated_index + 1
-            usable_count = max(1, frame_index - start + 1)
-            for offset, replay_index in enumerate(range(start, frame_index + 1)):
-                replay_frame = synchronizer.get_synchronized_frame(replay_index)
-                if replay_frame.is_usable:
-                    st.session_state.result = evaluate(st.session_state.evaluator, replay_frame)
-                progress.progress((offset + 1) / usable_count)
-            progress.empty()
-            st.session_state.last_evaluated_index = frame_index
-    except Exception as error:
-        st.error(f"The evaluation failed: {error}")
+needs_eval = auto_evaluate and st.session_state.last_evaluated_index != frame_index
+if st.button(button_label, type="primary", disabled=not frame.is_usable) or needs_eval:
+    if frame.is_usable:
+        try:
+            if mode == "isolated":
+                st.session_state.result = evaluate(st.session_state.evaluator, frame)
+                st.session_state.last_evaluated_index = frame_index
+            else:
+                if frame_index <= st.session_state.last_evaluated_index:
+                    st.session_state.evaluator.reset()
+                    st.session_state.last_evaluated_index = -1
+                progress = st.progress(0.0)
+                start = st.session_state.last_evaluated_index + 1
+                usable_count = max(1, frame_index - start + 1)
+                for offset, replay_index in enumerate(range(start, frame_index + 1)):
+                    replay_frame = synchronizer.get_synchronized_frame(replay_index)
+                    if replay_frame.is_usable:
+                        st.session_state.result = evaluate(st.session_state.evaluator, replay_frame)
+                    progress.progress((offset + 1) / usable_count)
+                progress.empty()
+                st.session_state.last_evaluated_index = frame_index
+        except Exception as error:
+            st.error(f"The evaluation failed: {error}")
 
 result = st.session_state.get("result")
-if result and result["timestamp_ns"] == frame.timestamp_ns:
-    plot_column, metric_column = st.columns([3, 1])
-    with plot_column:
-        figure = go.Figure()
+is_evaluated = result and result["timestamp_ns"] == frame.timestamp_ns
+
+plot_column, metric_column = st.columns([3, 1])
+with plot_column:
+    figure = go.Figure()
+
+    if is_evaluated:
         add_trajectory(figure, result["reference_trajectory"], "Reference", "gray", "dash")
+
+        if "original_trajectory" in frame.messages:
+            msg = deserialize_cdr(
+                frame.messages["original_trajectory"],
+                synchronizer.topic_types["original_trajectory"],
+            )
+            xs = [p.pose.position.x for p in msg.points]
+            ys = [p.pose.position.y for p in msg.points]
+            add_trajectory_arrays(figure, xs, ys, "Original (Recorded)", "#1f77b4", "dot")
+
         output_color = "red" if result["metrics"]["was_rejected"] else "green"
         add_trajectory(figure, result["optimized_trajectory"], "Optimized", output_color, "solid")
         add_segments(figure, result["road_borders"], "Road borders", "firebrick")
         add_segments(figure, result["drivable_area"], "Drivable bounds", "darkorange")
         for object_index, tracked_object in enumerate(result["selected_objects"]):
-            xs, ys = box_outline(**tracked_object)
+            xs_box, ys_box = box_outline(**tracked_object)
             figure.add_trace(
                 go.Scatter(
-                    x=xs,
-                    y=ys,
+                    x=xs_box,
+                    y=ys_box,
                     mode="lines",
                     name="Selected objects",
                     legendgroup="Selected objects",
@@ -274,20 +306,64 @@ if result and result["timestamp_ns"] == frame.timestamp_ns:
                     line={"color": "purple"},
                 )
             )
-        figure.update_layout(
-            title=f"Frame {frame.timestamp_ns}",
-            xaxis_title="Map X (m)",
-            yaxis_title="Map Y (m)",
-            yaxis={"scaleanchor": "x", "scaleratio": 1},
-            height=700,
+    else:
+        st.info(
+            'ℹ️ Preview Mode — Showing recorded bag data. Click "Evaluate" to run the MPPI optimizer.'
         )
-        st.plotly_chart(figure, use_container_width=True)
 
-    with metric_column:
-        st.subheader("Metrics")
+        for traj_key, name, color, dash in [
+            ("reference_trajectory", "Reference", "gray", "dash"),
+            ("original_trajectory", "Original (Recorded)", "#1f77b4", "dot"),
+        ]:
+            if traj_key in frame.messages:
+                msg = deserialize_cdr(
+                    frame.messages[traj_key],
+                    synchronizer.topic_types[traj_key],
+                )
+                xs = [p.pose.position.x for p in msg.points]
+                ys = [p.pose.position.y for p in msg.points]
+                add_trajectory_arrays(figure, xs, ys, name, color, dash)
+
+        if "tracked_objects" in frame.messages:
+            msg = deserialize_cdr(
+                frame.messages["tracked_objects"],
+                synchronizer.topic_types["tracked_objects"],
+            )
+            for object_index, obj in enumerate(msg.objects):
+                pose = obj.kinematics.pose_with_covariance.pose
+                length = obj.shape.dimensions.x or 4.0
+                width = obj.shape.dimensions.y or 2.0
+                q = pose.orientation
+                yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+                xs_box, ys_box = box_outline(pose.position.x, pose.position.y, yaw, length, width)
+                figure.add_trace(
+                    go.Scatter(
+                        x=xs_box,
+                        y=ys_box,
+                        mode="lines",
+                        name="Tracked objects",
+                        legendgroup="Tracked objects",
+                        showlegend=object_index == 0,
+                        fill="toself",
+                        line={"color": "gray"},
+                    )
+                )
+
+    figure.update_layout(
+        title=f"Frame {frame.timestamp_ns}",
+        xaxis_title="Map X (m)",
+        yaxis_title="Map Y (m)",
+        yaxis={"scaleanchor": "x", "scaleratio": 1},
+        height=700,
+    )
+    st.plotly_chart(figure, use_container_width=True)
+
+with metric_column:
+    st.subheader("Metrics")
+    if is_evaluated:
         st.json(result["metrics"])
-else:
-    st.info("Evaluate the selected frame to display a result.")
+    else:
+        st.info("Evaluate the selected frame to compute metrics.")
 
 st.subheader("Dataset curation")
 dataset_directory = st.text_input("Dataset directory", "dataset")
