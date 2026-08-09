@@ -219,161 +219,173 @@ configuration.cost_params.obstacle_collision_margin = obstacle_margin
 configuration.cost_params.road_border_collision_margin = border_margin
 configuration.runtime_options.skip_if_invalid = skip_if_invalid
 
-frame_index = st.slider("Frame index", 0, len(synchronizer) - 1, len(synchronizer) // 2)
-frame = synchronizer.get_synchronized_frame(frame_index)
-for warning in frame.warnings:
-    st.warning(warning)
 
-session_key = (
-    str(Path(bag_path).expanduser().resolve()),
-    mode,
-    optimizer_path,
-    vehicle_path,
-    simulator_path,
-    boundary_threshold,
-    obstacle_margin,
-    border_margin,
-    skip_if_invalid,
-    hash(frame.messages["lanelet_map"]),
-    hash(frame.messages["route"]),
-)
-if st.session_state.get("session_key") != session_key:
-    st.session_state.evaluator = mppi_cpp.EvaluationSession(
-        frame.messages["lanelet_map"], frame.messages["route"], configuration, mode
+@st.fragment
+def render_main_explorer() -> None:
+    frame_index = st.slider("Frame index", 0, len(synchronizer) - 1, len(synchronizer) // 2)
+    frame = synchronizer.get_synchronized_frame(frame_index)
+    for warning in frame.warnings:
+        st.warning(warning)
+
+    session_key = (
+        str(Path(bag_path).expanduser().resolve()),
+        mode,
+        optimizer_path,
+        vehicle_path,
+        simulator_path,
+        boundary_threshold,
+        obstacle_margin,
+        border_margin,
+        skip_if_invalid,
+        hash(frame.messages["lanelet_map"]),
+        hash(frame.messages["route"]),
     )
-    st.session_state.session_key = session_key
-    st.session_state.last_evaluated_index = -1
-    st.session_state.result = None
-
-button_label = "Evaluate frame" if mode == "isolated" else "Replay through frame"
-needs_eval = auto_evaluate and st.session_state.last_evaluated_index != frame_index
-if st.button(button_label, type="primary", disabled=not frame.is_usable) or needs_eval:
-    if frame.is_usable:
-        try:
-            if mode == "isolated":
-                st.session_state.result = evaluate(st.session_state.evaluator, frame)
-                st.session_state.last_evaluated_index = frame_index
-            else:
-                if frame_index <= st.session_state.last_evaluated_index:
-                    st.session_state.evaluator.reset()
-                    st.session_state.last_evaluated_index = -1
-                progress = st.progress(0.0)
-                start = st.session_state.last_evaluated_index + 1
-                usable_count = max(1, frame_index - start + 1)
-                for offset, replay_index in enumerate(range(start, frame_index + 1)):
-                    replay_frame = synchronizer.get_synchronized_frame(replay_index)
-                    if replay_frame.is_usable:
-                        st.session_state.result = evaluate(st.session_state.evaluator, replay_frame)
-                    progress.progress((offset + 1) / usable_count)
-                progress.empty()
-                st.session_state.last_evaluated_index = frame_index
-        except Exception as error:
-            st.error(f"The evaluation failed: {error}")
-
-result = st.session_state.get("result")
-is_evaluated = result and result["timestamp_ns"] == frame.timestamp_ns
-
-plot_column, metric_column = st.columns([3, 1])
-with plot_column:
-    figure = go.Figure()
-
-    if is_evaluated:
-        add_trajectory(figure, result["reference_trajectory"], "Reference", "gray", "dash")
-
-        if "original_trajectory" in frame.messages:
-            trajectory = mppi_cpp.deserialize_trajectory(frame.messages["original_trajectory"])
-            xs = [point["x"] for point in trajectory["points"]]
-            ys = [point["y"] for point in trajectory["points"]]
-            add_trajectory_arrays(figure, xs, ys, "Original (Recorded)", "#1f77b4", "dot")
-
-        output_color = "red" if result["metrics"]["was_rejected"] else "green"
-        add_trajectory(figure, result["optimized_trajectory"], "Optimized", output_color, "solid")
-        add_segments(figure, result["road_borders"], "Road borders", "firebrick")
-        add_segments(figure, result["drivable_area"], "Drivable bounds", "darkorange")
-        for object_index, tracked_object in enumerate(result["selected_objects"]):
-            xs_box, ys_box = box_outline(**tracked_object)
-            figure.add_trace(
-                go.Scatter(
-                    x=xs_box,
-                    y=ys_box,
-                    mode="lines",
-                    name="Selected objects",
-                    legendgroup="Selected objects",
-                    showlegend=object_index == 0,
-                    fill="toself",
-                    line={"color": "purple"},
-                )
-            )
-    else:
-        st.info(
-            'ℹ️ Preview Mode — Showing recorded bag data. Click "Evaluate" to run the MPPI optimizer.'
+    if st.session_state.get("session_key") != session_key:
+        st.session_state.evaluator = mppi_cpp.EvaluationSession(
+            frame.messages["lanelet_map"], frame.messages["route"], configuration, mode
         )
+        st.session_state.session_key = session_key
+        st.session_state.last_evaluated_index = -1
+        st.session_state.result = None
 
-        for traj_key, name, color, dash in [
-            ("reference_trajectory", "Reference", "gray", "dash"),
-            ("original_trajectory", "Original (Recorded)", "#1f77b4", "dot"),
-        ]:
-            if traj_key in frame.messages:
-                trajectory = mppi_cpp.deserialize_trajectory(frame.messages[traj_key])
+    button_label = "Evaluate frame" if mode == "isolated" else "Replay through frame"
+    needs_eval = auto_evaluate and st.session_state.last_evaluated_index != frame_index
+    if st.button(button_label, type="primary", disabled=not frame.is_usable) or needs_eval:
+        if frame.is_usable:
+            try:
+                if mode == "isolated":
+                    st.session_state.result = evaluate(st.session_state.evaluator, frame)
+                    st.session_state.last_evaluated_index = frame_index
+                else:
+                    if frame_index <= st.session_state.last_evaluated_index:
+                        st.session_state.evaluator.reset()
+                        st.session_state.last_evaluated_index = -1
+                    progress = st.progress(0.0)
+                    start = st.session_state.last_evaluated_index + 1
+                    usable_count = max(1, frame_index - start + 1)
+                    for offset, replay_index in enumerate(range(start, frame_index + 1)):
+                        replay_frame = synchronizer.get_synchronized_frame(replay_index)
+                        if replay_frame.is_usable:
+                            st.session_state.result = evaluate(
+                                st.session_state.evaluator, replay_frame
+                            )
+                        progress.progress((offset + 1) / usable_count)
+                    progress.empty()
+                    st.session_state.last_evaluated_index = frame_index
+            except Exception as error:
+                st.error(f"The evaluation failed: {error}")
+
+    result = st.session_state.get("result")
+    is_evaluated = result and result["timestamp_ns"] == frame.timestamp_ns
+
+    plot_column, metric_column = st.columns([3, 1])
+    with plot_column:
+        figure = go.Figure()
+
+        if is_evaluated:
+            add_trajectory(figure, result["reference_trajectory"], "Reference", "gray", "dash")
+
+            if "original_trajectory" in frame.messages:
+                trajectory = mppi_cpp.deserialize_trajectory(frame.messages["original_trajectory"])
                 xs = [point["x"] for point in trajectory["points"]]
                 ys = [point["y"] for point in trajectory["points"]]
-                add_trajectory_arrays(figure, xs, ys, name, color, dash)
+                add_trajectory_arrays(figure, xs, ys, "Original (Recorded)", "#1f77b4", "dot")
 
-        if "tracked_objects" in frame.messages:
-            tracked_objects = mppi_cpp.deserialize_tracked_objects_in_range(
-                frame.messages["tracked_objects"],
-                frame.messages["reference_trajectory"],
-                object_filter_margin(configuration),
+            output_color = "red" if result["metrics"]["was_rejected"] else "green"
+            add_trajectory(
+                figure, result["optimized_trajectory"], "Optimized", output_color, "solid"
             )
-            for object_index, tracked_object in enumerate(tracked_objects):
-                xs_box, ys_box = box_outline(
-                    tracked_object["x"],
-                    tracked_object["y"],
-                    tracked_object["yaw"],
-                    tracked_object["length"],
-                    tracked_object["width"],
-                )
+            add_segments(figure, result["road_borders"], "Road borders", "firebrick")
+            add_segments(figure, result["drivable_area"], "Drivable bounds", "darkorange")
+            for object_index, tracked_object in enumerate(result["selected_objects"]):
+                xs_box, ys_box = box_outline(**tracked_object)
                 figure.add_trace(
                     go.Scatter(
                         x=xs_box,
                         y=ys_box,
                         mode="lines",
-                        name="Tracked objects",
-                        legendgroup="Tracked objects",
+                        name="Selected objects",
+                        legendgroup="Selected objects",
                         showlegend=object_index == 0,
                         fill="toself",
-                        line={"color": "gray"},
+                        line={"color": "purple"},
                     )
                 )
+        else:
+            st.info(
+                'ℹ️ Preview Mode — Showing recorded bag data. Click "Evaluate" to run the MPPI optimizer.'
+            )
 
-    figure.update_layout(
-        title=f"Frame {frame.timestamp_ns}",
-        xaxis_title="Map X (m)",
-        yaxis_title="Map Y (m)",
-        yaxis={"scaleanchor": "x", "scaleratio": 1},
-        height=700,
+            for traj_key, name, color, dash in [
+                ("reference_trajectory", "Reference", "gray", "dash"),
+                ("original_trajectory", "Original (Recorded)", "#1f77b4", "dot"),
+            ]:
+                if traj_key in frame.messages:
+                    trajectory = mppi_cpp.deserialize_trajectory(frame.messages[traj_key])
+                    xs = [point["x"] for point in trajectory["points"]]
+                    ys = [point["y"] for point in trajectory["points"]]
+                    add_trajectory_arrays(figure, xs, ys, name, color, dash)
+
+            if "tracked_objects" in frame.messages:
+                tracked_objects = mppi_cpp.deserialize_tracked_objects_in_range(
+                    frame.messages["tracked_objects"],
+                    frame.messages["reference_trajectory"],
+                    object_filter_margin(configuration),
+                )
+                for object_index, tracked_object in enumerate(tracked_objects):
+                    xs_box, ys_box = box_outline(
+                        tracked_object["x"],
+                        tracked_object["y"],
+                        tracked_object["yaw"],
+                        tracked_object["length"],
+                        tracked_object["width"],
+                    )
+                    figure.add_trace(
+                        go.Scatter(
+                            x=xs_box,
+                            y=ys_box,
+                            mode="lines",
+                            name="Tracked objects",
+                            legendgroup="Tracked objects",
+                            showlegend=object_index == 0,
+                            fill="toself",
+                            line={"color": "gray"},
+                        )
+                    )
+
+        figure.update_layout(
+            title=f"Frame {frame.timestamp_ns}",
+            xaxis_title="Map X (m)",
+            yaxis_title="Map Y (m)",
+            yaxis={"scaleanchor": "x", "scaleratio": 1},
+            height=700,
+            uirevision="constant",
+        )
+        st.plotly_chart(figure, use_container_width=True, key="mppi_frame_plot")
+
+    with metric_column:
+        st.subheader("Metrics")
+        if is_evaluated:
+            st.json(result["metrics"])
+        else:
+            st.info("Evaluate the selected frame to compute metrics.")
+
+    st.subheader("Dataset curation")
+    dataset_directory = st.text_input("Dataset directory", "dataset")
+    tags = st.multiselect(
+        "Tags",
+        ("challenging", "avoidance", "cut_in", "sharp_turn", "high_speed", "kinematic_limit"),
     )
-    st.plotly_chart(figure, use_container_width=True)
+    custom_tag = st.text_input("Custom tag")
+    if st.button("Save synchronized frame", disabled=not frame.is_usable):
+        selected_tags = list(tags)
+        if custom_tag.strip():
+            selected_tags.append(custom_tag.strip())
+        try:
+            saved_path = save_frame(frame, synchronizer, dataset_directory, selected_tags)
+            st.success(f"Saved {saved_path}")
+        except Exception as error:
+            st.error(f"The dataset write failed: {error}")
 
-with metric_column:
-    st.subheader("Metrics")
-    if is_evaluated:
-        st.json(result["metrics"])
-    else:
-        st.info("Evaluate the selected frame to compute metrics.")
 
-st.subheader("Dataset curation")
-dataset_directory = st.text_input("Dataset directory", "dataset")
-tags = st.multiselect(
-    "Tags", ("challenging", "avoidance", "cut_in", "sharp_turn", "high_speed", "kinematic_limit")
-)
-custom_tag = st.text_input("Custom tag")
-if st.button("Save synchronized frame", disabled=not frame.is_usable):
-    selected_tags = list(tags)
-    if custom_tag.strip():
-        selected_tags.append(custom_tag.strip())
-    try:
-        saved_path = save_frame(frame, synchronizer, dataset_directory, selected_tags)
-        st.success(f"Saved {saved_path}")
-    except Exception as error:
-        st.error(f"The dataset write failed: {error}")
+render_main_explorer()
