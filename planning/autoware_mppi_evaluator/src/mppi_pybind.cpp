@@ -189,13 +189,31 @@ PYBIND11_MODULE(mppi_optimizer_py, module)
   using autoware::mppi_evaluator::MppiEnvironment;
   using autoware::mppi_evaluator::MppiEvaluationSession;
   using autoware::mppi_evaluator::MppiInputFrame;
+  using autoware::mppi_evaluator::objects_to_list;
   using autoware::mppi_evaluator::parse_mode;
   using autoware::mppi_evaluator::result_to_dict;
+  using autoware::mppi_evaluator::trajectory_to_dict;
   using autoware::mppi_optimizer::FirstOrderDubinsMppiCostParams;
   using autoware::mppi_optimizer::FirstOrderDubinsMppiRuntimeOptions;
   using autoware::mppi_optimizer::FirstOrderDubinsMppiVehicleParams;
 
   module.doc() = "Native bindings for offline Autoware MPPI evaluation";
+
+  module.def(
+    "deserialize_trajectory",
+    [](const py::bytes & cdr_bytes) {
+      return trajectory_to_dict(
+        deserialize_message<autoware_planning_msgs::msg::Trajectory>(cdr_bytes));
+    },
+    py::arg("cdr_bytes"));
+
+  module.def(
+    "deserialize_tracked_objects",
+    [](const py::bytes & cdr_bytes) {
+      return objects_to_list(
+        deserialize_message<autoware_perception_msgs::msg::TrackedObjects>(cdr_bytes));
+    },
+    py::arg("cdr_bytes"));
 
   py::class_<FirstOrderDubinsMppiCostParams>(module, "CostParams")
     .def(py::init<>())

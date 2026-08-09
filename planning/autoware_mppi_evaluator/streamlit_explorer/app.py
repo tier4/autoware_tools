@@ -27,8 +27,6 @@ from dataset_io import save_frame
 from evaluator_config import make_configuration
 from mcap_reader import McapZohSynchronizer
 import plotly.graph_objects as go
-from rclpy.serialization import deserialize_message
-from rosidl_runtime_py.utilities import get_message
 import streamlit as st
 
 try:
@@ -45,12 +43,6 @@ def package_file(package: str, relative: str) -> str:
         return str(Path(get_package_share_directory(package)) / relative)
     except Exception:
         return ""
-
-
-def deserialize_cdr(cdr_bytes: bytes, msg_type_name: str):
-    """Deserialize raw CDR bytes using native ROS 2 Python libraries."""
-    msg_type = get_message(msg_type_name)
-    return deserialize_message(cdr_bytes, msg_type)
 
 
 @st.cache_resource(show_spinner="Index the selected MCAP file")
@@ -280,12 +272,9 @@ with plot_column:
         add_trajectory(figure, result["reference_trajectory"], "Reference", "gray", "dash")
 
         if "original_trajectory" in frame.messages:
-            msg = deserialize_cdr(
-                frame.messages["original_trajectory"],
-                synchronizer.topic_types["original_trajectory"],
-            )
-            xs = [p.pose.position.x for p in msg.points]
-            ys = [p.pose.position.y for p in msg.points]
+            trajectory = mppi_cpp.deserialize_trajectory(frame.messages["original_trajectory"])
+            xs = [point["x"] for point in trajectory["points"]]
+            ys = [point["y"] for point in trajectory["points"]]
             add_trajectory_arrays(figure, xs, ys, "Original (Recorded)", "#1f77b4", "dot")
 
         output_color = "red" if result["metrics"]["was_rejected"] else "green"
@@ -316,26 +305,23 @@ with plot_column:
             ("original_trajectory", "Original (Recorded)", "#1f77b4", "dot"),
         ]:
             if traj_key in frame.messages:
-                msg = deserialize_cdr(
-                    frame.messages[traj_key],
-                    synchronizer.topic_types[traj_key],
-                )
-                xs = [p.pose.position.x for p in msg.points]
-                ys = [p.pose.position.y for p in msg.points]
+                trajectory = mppi_cpp.deserialize_trajectory(frame.messages[traj_key])
+                xs = [point["x"] for point in trajectory["points"]]
+                ys = [point["y"] for point in trajectory["points"]]
                 add_trajectory_arrays(figure, xs, ys, name, color, dash)
 
         if "tracked_objects" in frame.messages:
-            msg = deserialize_cdr(
-                frame.messages["tracked_objects"],
-                synchronizer.topic_types["tracked_objects"],
+            tracked_objects = mppi_cpp.deserialize_tracked_objects(
+                frame.messages["tracked_objects"]
             )
-            for object_index, obj in enumerate(msg.objects):
-                pose = obj.kinematics.pose_with_covariance.pose
-                length = obj.shape.dimensions.x or 4.0
-                width = obj.shape.dimensions.y or 2.0
-                q = pose.orientation
-                yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
-                xs_box, ys_box = box_outline(pose.position.x, pose.position.y, yaw, length, width)
+            for object_index, tracked_object in enumerate(tracked_objects):
+                xs_box, ys_box = box_outline(
+                    tracked_object["x"],
+                    tracked_object["y"],
+                    tracked_object["yaw"],
+                    tracked_object["length"],
+                    tracked_object["width"],
+                )
                 figure.add_trace(
                     go.Scatter(
                         x=xs_box,
