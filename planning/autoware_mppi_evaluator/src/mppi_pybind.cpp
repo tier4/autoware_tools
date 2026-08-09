@@ -209,6 +209,43 @@ PYBIND11_MODULE(mppi_optimizer_py, module)
     py::arg("cdr_bytes"));
 
   module.def(
+    "deserialize_cdr",
+    [](const py::bytes & cdr_bytes, const std::string & message_type) {
+      py::dict result;
+      if (message_type == "nav_msgs/msg/Odometry") {
+        const auto message = deserialize_message<nav_msgs::msg::Odometry>(cdr_bytes);
+        py::dict linear;
+        linear["x"] = message.twist.twist.linear.x;
+        py::dict twist_value;
+        twist_value["linear"] = std::move(linear);
+        py::dict twist;
+        twist["twist"] = std::move(twist_value);
+        result["twist"] = std::move(twist);
+        return result;
+      }
+      if (message_type == "geometry_msgs/msg/AccelWithCovarianceStamped") {
+        const auto message =
+          deserialize_message<geometry_msgs::msg::AccelWithCovarianceStamped>(cdr_bytes);
+        py::dict linear;
+        linear["x"] = message.accel.accel.linear.x;
+        py::dict accel_value;
+        accel_value["linear"] = std::move(linear);
+        py::dict accel;
+        accel["accel"] = std::move(accel_value);
+        result["accel"] = std::move(accel);
+        return result;
+      }
+      if (message_type == "autoware_vehicle_msgs/msg/SteeringReport") {
+        const auto message =
+          deserialize_message<autoware_vehicle_msgs::msg::SteeringReport>(cdr_bytes);
+        result["steering_tire_angle"] = message.steering_tire_angle;
+        return result;
+      }
+      throw std::invalid_argument("Unsupported ROS message type: " + message_type);
+    },
+    py::arg("cdr_bytes"), py::arg("message_type"));
+
+  module.def(
     "deserialize_tracked_objects",
     [](const py::bytes & cdr_bytes) {
       return objects_to_list(

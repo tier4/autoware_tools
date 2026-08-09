@@ -11,3 +11,11 @@ topics:
 thresholds:
   required_stale_ms: 100.0
   optional_stale_ms: 250.0
+
+parameter_files:
+  vehicle_information:
+    package: j6_gen2_description
+    path: config/vehicle_info.param.yaml
+  vehicle_dynamics:
+    package: j6_gen2_description
+    path: config/simulator_model.param.yaml

@@ -87,7 +87,10 @@ Start the explorer:
 ros2 run autoware_mppi_evaluator mppi_streamlit_explorer.py
 ```
 
-Select the MCAP path and parameter files in the sidebar.
+Select the MCAP directory and optimizer parameters in the sidebar.
+
+The explorer reads its topic, vehicle-information, and vehicle-dynamics configuration from
+`config/streamlit_explorer.yaml`.
 
 Use `Evaluate frame` for an isolated frame.
 

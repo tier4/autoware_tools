@@ -27,7 +27,9 @@ from autoware_mppi_evaluator.dataset_io import save_frame
 from autoware_mppi_evaluator.evaluator_config import make_configuration
 from autoware_mppi_evaluator.mcap_reader import McapZohSynchronizer
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
+import yaml
 
 try:
     from autoware_mppi_evaluator import mppi_optimizer_py as mppi_cpp
@@ -43,6 +45,11 @@ def package_file(package: str, relative: str) -> str:
         return str(Path(get_package_share_directory(package)) / relative)
     except Exception:
         return ""
+
+
+def configured_package_file(configuration: Dict, key: str) -> str:
+    file_configuration = configuration["parameter_files"][key]
+    return package_file(file_configuration["package"], file_configuration["path"])
 
 
 @st.cache_resource(show_spinner="Index the selected MCAP file")
@@ -138,19 +145,84 @@ def add_trajectory(figure: go.Figure, trajectory: Dict, name: str, color: str, d
     add_trajectory_arrays(figure, xs, ys, name, color, dash)
 
 
+def trajectory_profile(trajectory: Dict, field: str) -> Tuple[List[float], List[float]]:
+    points = trajectory["points"]
+    times = [float(point["time_from_start_ns"]) / 1.0e9 for point in points]
+    values = [float(point[field]) for point in points]
+    return times, values
+
+
+def add_longitudinal_profile(figure: go.Figure, trajectory: Dict, name: str, color: str) -> None:
+    times, velocities = trajectory_profile(trajectory, "velocity_mps")
+    _, accelerations = trajectory_profile(trajectory, "acceleration_mps2")
+    figure.add_trace(
+        go.Scatter(
+            x=times,
+            y=velocities,
+            mode="lines",
+            name=f"{name} velocity",
+            legendgroup=name,
+            line={"color": color, "width": 3},
+        ),
+        secondary_y=False,
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=times,
+            y=accelerations,
+            mode="lines",
+            name=f"{name} acceleration",
+            legendgroup=name,
+            line={"color": color, "width": 3, "dash": "dash"},
+        ),
+        secondary_y=True,
+    )
+
+
+def add_lateral_profile(figure: go.Figure, trajectory: Dict, name: str, color: str) -> None:
+    times, steering_angles = trajectory_profile(trajectory, "front_wheel_angle_rad")
+    figure.add_trace(
+        go.Scatter(
+            x=times,
+            y=steering_angles,
+            mode="lines",
+            name=name,
+            line={"color": color, "width": 3},
+        )
+    )
+
+
 st.set_page_config(page_title="MPPI Frame Explorer", layout="wide")
 st.sidebar.title("MPPI Frame Explorer")
 
-default_topics = package_file("autoware_mppi_evaluator", "config/streamlit_explorer.yaml")
+explorer_config_path = package_file("autoware_mppi_evaluator", "config/streamlit_explorer.yaml")
 default_optimizer = package_file("autoware_mppi_optimizer", "config/mppi_optimizer.param.yaml")
-default_vehicle = package_file("j6_gen2_description", "config/vehicle_info.param.yaml")
-default_simulator = package_file("j6_gen2_description", "config/simulator_model.param.yaml")
 
-bag_path = st.sidebar.text_input("MCAP path")
-topics_path = st.sidebar.text_input("Topic configuration", default_topics)
+try:
+    with Path(explorer_config_path).open(encoding="utf-8") as stream:
+        explorer_config = yaml.safe_load(stream) or {}
+    vehicle_path = configured_package_file(explorer_config, "vehicle_information")
+    simulator_path = configured_package_file(explorer_config, "vehicle_dynamics")
+except (KeyError, OSError, TypeError) as error:
+    st.error(f"The explorer configuration load failed: {error}")
+    st.stop()
+
+st.sidebar.subheader("Dataset Selection")
+bag_dir = st.sidebar.text_input("MCAP directory", ".")
+bag_dir_path = Path(bag_dir).expanduser().resolve()
+bag_path = ""
+
+if bag_dir_path.exists() and bag_dir_path.is_dir():
+    mcap_files = sorted(bag_dir_path.glob("*.mcap"))
+    if mcap_files:
+        selected_file = st.sidebar.selectbox(
+            "Select MCAP", mcap_files, format_func=lambda p: p.name
+        )
+        bag_path = str(selected_file)
+    else:
+        st.sidebar.warning("No .mcap files found in this directory.")
+
 optimizer_path = st.sidebar.text_input("Optimizer parameters", default_optimizer)
-vehicle_path = st.sidebar.text_input("Vehicle information", default_vehicle)
-simulator_path = st.sidebar.text_input("Vehicle dynamics", default_simulator)
 mode = st.sidebar.radio("Evaluation mode", ("isolated", "chronological"))
 
 if BACKEND_ERROR:
@@ -177,51 +249,54 @@ except Exception as error:
     st.error(f"The parameter load failed: {error}")
     st.stop()
 
-st.sidebar.subheader("Cost overrides")
-boundary_threshold = st.sidebar.slider(
-    "Boundary threshold (m)",
-    0.1,
-    3.0,
-    min(3.0, max(0.1, float(configuration.cost_params.boundary_threshold))),
-    0.05,
-)
-obstacle_margin = st.sidebar.slider(
-    "Obstacle margin (m)",
-    0.0,
-    1.0,
-    min(1.0, max(0.0, float(configuration.cost_params.obstacle_collision_margin))),
-    0.05,
-)
-border_margin = st.sidebar.slider(
-    "Road-border margin (m)",
-    0.0,
-    1.0,
-    min(1.0, max(0.0, float(configuration.cost_params.road_border_collision_margin))),
-    0.05,
-)
-skip_if_invalid = st.sidebar.checkbox(
-    "Reject an invalid result", value=configuration.runtime_options.skip_if_invalid
-)
-auto_evaluate = st.sidebar.checkbox("Auto-evaluate on select", value=False)
+
+# Initialize session state for isolated cost overrides
+if "boundary_threshold" not in st.session_state:
+    st.session_state.boundary_threshold = min(
+        3.0, max(0.1, float(configuration.cost_params.boundary_threshold))
+    )
+    st.session_state.obstacle_margin = min(
+        1.0, max(0.0, float(configuration.cost_params.obstacle_collision_margin))
+    )
+    st.session_state.border_margin = min(
+        1.0, max(0.0, float(configuration.cost_params.road_border_collision_margin))
+    )
+    st.session_state.skip_if_invalid = configuration.runtime_options.skip_if_invalid
+    st.session_state.auto_evaluate = False
+
+
+@st.fragment
+def render_cost_overrides():
+    """Isolated fragment so adjusting sliders does not reload the main canvas."""
+    st.sidebar.subheader("Cost overrides")
+    st.sidebar.slider("Boundary threshold (m)", 0.1, 3.0, step=0.05, key="boundary_threshold")
+    st.sidebar.slider("Obstacle margin (m)", 0.0, 1.0, step=0.05, key="obstacle_margin")
+    st.sidebar.slider("Road-border margin (m)", 0.0, 1.0, step=0.05, key="border_margin")
+    st.sidebar.checkbox("Reject an invalid result", key="skip_if_invalid")
+    st.sidebar.checkbox("Auto-evaluate on select", key="auto_evaluate")
+
+
+render_cost_overrides()
 
 if not bag_path or not Path(bag_path).expanduser().exists():
     st.info("Select an MCAP file to start.")
     st.stop()
 
 try:
-    synchronizer = load_synchronizer(bag_path, topics_path)
+    synchronizer = load_synchronizer(bag_path, explorer_config_path)
 except Exception as error:
     st.error(f"The MCAP index failed: {error}")
     st.stop()
 
-configuration.cost_params.boundary_threshold = boundary_threshold
-configuration.cost_params.obstacle_collision_margin = obstacle_margin
-configuration.cost_params.road_border_collision_margin = border_margin
-configuration.runtime_options.skip_if_invalid = skip_if_invalid
-
 
 @st.fragment
 def render_main_explorer() -> None:
+    # Apply the latest cost overrides from session state before evaluation
+    configuration.cost_params.boundary_threshold = st.session_state.boundary_threshold
+    configuration.cost_params.obstacle_collision_margin = st.session_state.obstacle_margin
+    configuration.cost_params.road_border_collision_margin = st.session_state.border_margin
+    configuration.runtime_options.skip_if_invalid = st.session_state.skip_if_invalid
+
     frame_index = st.slider("Frame index", 0, len(synchronizer) - 1, len(synchronizer) // 2)
     frame = synchronizer.get_synchronized_frame(frame_index)
     for warning in frame.warnings:
@@ -233,10 +308,10 @@ def render_main_explorer() -> None:
         optimizer_path,
         vehicle_path,
         simulator_path,
-        boundary_threshold,
-        obstacle_margin,
-        border_margin,
-        skip_if_invalid,
+        st.session_state.boundary_threshold,
+        st.session_state.obstacle_margin,
+        st.session_state.border_margin,
+        st.session_state.skip_if_invalid,
         hash(frame.messages["lanelet_map"]),
         hash(frame.messages["route"]),
     )
@@ -249,7 +324,9 @@ def render_main_explorer() -> None:
         st.session_state.result = None
 
     button_label = "Evaluate frame" if mode == "isolated" else "Replay through frame"
-    needs_eval = auto_evaluate and st.session_state.last_evaluated_index != frame_index
+    needs_eval = (
+        st.session_state.auto_evaluate and st.session_state.last_evaluated_index != frame_index
+    )
     if st.button(button_label, type="primary", disabled=not frame.is_usable) or needs_eval:
         if frame.is_usable:
             try:
@@ -278,97 +355,174 @@ def render_main_explorer() -> None:
     result = st.session_state.get("result")
     is_evaluated = result and result["timestamp_ns"] == frame.timestamp_ns
 
-    plot_column, metric_column = st.columns([3, 1])
-    with plot_column:
-        figure = go.Figure()
+    reference_trajectory = (
+        result["reference_trajectory"]
+        if is_evaluated
+        else mppi_cpp.deserialize_trajectory(frame.messages["reference_trajectory"])
+    )
+    original_trajectory = None
+    if "original_trajectory" in frame.messages:
+        original_trajectory = mppi_cpp.deserialize_trajectory(frame.messages["original_trajectory"])
+    optimized_trajectory = result["optimized_trajectory"] if is_evaluated else None
+    output_color = "red" if is_evaluated and result["metrics"]["was_rejected"] else "green"
 
-        if is_evaluated:
-            add_trajectory(figure, result["reference_trajectory"], "Reference", "gray", "dash")
-
-            if "original_trajectory" in frame.messages:
-                trajectory = mppi_cpp.deserialize_trajectory(frame.messages["original_trajectory"])
-                xs = [point["x"] for point in trajectory["points"]]
-                ys = [point["y"] for point in trajectory["points"]]
-                add_trajectory_arrays(figure, xs, ys, "Original (Recorded)", "#1f77b4", "dot")
-
-            output_color = "red" if result["metrics"]["was_rejected"] else "green"
-            add_trajectory(
-                figure, result["optimized_trajectory"], "Optimized", output_color, "solid"
-            )
-            add_segments(figure, result["road_borders"], "Road borders", "firebrick")
-            add_segments(figure, result["drivable_area"], "Drivable bounds", "darkorange")
-            for object_index, tracked_object in enumerate(result["selected_objects"]):
-                xs_box, ys_box = box_outline(**tracked_object)
-                figure.add_trace(
-                    go.Scatter(
-                        x=xs_box,
-                        y=ys_box,
-                        mode="lines",
-                        name="Selected objects",
-                        legendgroup="Selected objects",
-                        showlegend=object_index == 0,
-                        fill="toself",
-                        line={"color": "purple"},
-                    )
-                )
-        else:
-            st.info(
-                'ℹ️ Preview Mode — Showing recorded bag data. Click "Evaluate" to run the MPPI optimizer.'
-            )
-
-            for traj_key, name, color, dash in [
-                ("reference_trajectory", "Reference", "gray", "dash"),
-                ("original_trajectory", "Original (Recorded)", "#1f77b4", "dot"),
-            ]:
-                if traj_key in frame.messages:
-                    trajectory = mppi_cpp.deserialize_trajectory(frame.messages[traj_key])
-                    xs = [point["x"] for point in trajectory["points"]]
-                    ys = [point["y"] for point in trajectory["points"]]
-                    add_trajectory_arrays(figure, xs, ys, name, color, dash)
-
-            if "tracked_objects" in frame.messages:
-                tracked_objects = mppi_cpp.deserialize_tracked_objects_in_range(
-                    frame.messages["tracked_objects"],
-                    frame.messages["reference_trajectory"],
-                    object_filter_margin(configuration),
-                )
-                for object_index, tracked_object in enumerate(tracked_objects):
-                    xs_box, ys_box = box_outline(
-                        tracked_object["x"],
-                        tracked_object["y"],
-                        tracked_object["yaw"],
-                        tracked_object["length"],
-                        tracked_object["width"],
-                    )
-                    figure.add_trace(
-                        go.Scatter(
-                            x=xs_box,
-                            y=ys_box,
-                            mode="lines",
-                            name="Tracked objects",
-                            legendgroup="Tracked objects",
-                            showlegend=object_index == 0,
-                            fill="toself",
-                            line={"color": "gray"},
-                        )
-                    )
-
-        figure.update_layout(
-            title=f"Frame {frame.timestamp_ns}",
-            xaxis_title="Map X (m)",
-            yaxis_title="Map Y (m)",
-            yaxis={"scaleanchor": "x", "scaleratio": 1},
-            height=700,
-            uirevision="constant",
+    ego_velocity = None
+    if "odometry" in frame.messages:
+        odometry = mppi_cpp.deserialize_cdr(frame.messages["odometry"], "nav_msgs/msg/Odometry")
+        ego_velocity = float(odometry["twist"]["twist"]["linear"]["x"])
+    ego_acceleration = None
+    if "acceleration" in frame.messages:
+        acceleration = mppi_cpp.deserialize_cdr(
+            frame.messages["acceleration"],
+            "geometry_msgs/msg/AccelWithCovarianceStamped",
         )
-        st.plotly_chart(figure, use_container_width=True, key="mppi_frame_plot")
+        ego_acceleration = float(acceleration["accel"]["accel"]["linear"]["x"])
+    ego_steering = None
+    if "steering" in frame.messages:
+        steering = mppi_cpp.deserialize_cdr(
+            frame.messages["steering"], "autoware_vehicle_msgs/msg/SteeringReport"
+        )
+        ego_steering = float(steering["steering_tire_angle"])
 
-    with metric_column:
-        st.subheader("Metrics")
+    if not is_evaluated:
+        st.info(
+            'ℹ️ Preview Mode — Showing recorded bag data. Click "Evaluate" to run the MPPI optimizer.'
+        )
+
+    bev_figure = go.Figure()
+    add_trajectory(bev_figure, reference_trajectory, "Reference", "gray", "dash")
+    if original_trajectory is not None:
+        add_trajectory(
+            bev_figure,
+            original_trajectory,
+            "Original (Recorded)",
+            "#1f77b4",
+            "dot",
+        )
+
+    if is_evaluated:
+        add_trajectory(bev_figure, optimized_trajectory, "Optimized", output_color, "solid")
+        add_segments(bev_figure, result["road_borders"], "Road borders", "firebrick")
+        add_segments(bev_figure, result["drivable_area"], "Drivable bounds", "darkorange")
+        objects = result["selected_objects"]
+        object_name = "Selected objects"
+        object_color = "purple"
+    else:
+        objects = []
+        if "tracked_objects" in frame.messages:
+            objects = mppi_cpp.deserialize_tracked_objects_in_range(
+                frame.messages["tracked_objects"],
+                frame.messages["reference_trajectory"],
+                object_filter_margin(configuration),
+            )
+        object_name = "Tracked objects"
+        object_color = "gray"
+
+    for object_index, tracked_object in enumerate(objects):
         if is_evaluated:
-            st.json(result["metrics"])
+            xs_box, ys_box = box_outline(**tracked_object)
         else:
-            st.info("Evaluate the selected frame to compute metrics.")
+            xs_box, ys_box = box_outline(
+                tracked_object["x"],
+                tracked_object["y"],
+                tracked_object["yaw"],
+                tracked_object["length"],
+                tracked_object["width"],
+            )
+        bev_figure.add_trace(
+            go.Scatter(
+                x=xs_box,
+                y=ys_box,
+                mode="lines",
+                name=object_name,
+                legendgroup=object_name,
+                showlegend=object_index == 0,
+                fill="toself",
+                line={"color": object_color},
+            )
+        )
+
+    bev_figure.update_layout(
+        title=f"Frame {frame.timestamp_ns}",
+        xaxis_title="Map X (m)",
+        yaxis_title="Map Y (m)",
+        yaxis={"scaleanchor": "x", "scaleratio": 1},
+        height=780,
+        uirevision="constant",
+    )
+
+    longitudinal_figure = make_subplots(specs=[[{"secondary_y": True}]])
+    add_longitudinal_profile(longitudinal_figure, reference_trajectory, "Reference", "gray")
+    if original_trajectory is not None:
+        add_longitudinal_profile(
+            longitudinal_figure,
+            original_trajectory,
+            "Original (Recorded)",
+            "#1f77b4",
+        )
+    if optimized_trajectory is not None:
+        add_longitudinal_profile(
+            longitudinal_figure, optimized_trajectory, "Optimized", output_color
+        )
+
+    if ego_velocity is not None:
+        longitudinal_figure.add_trace(
+            go.Scatter(
+                x=[0.0],
+                y=[ego_velocity],
+                mode="markers",
+                name="Ego velocity",
+                marker={"color": "black", "size": 14, "symbol": "star"},
+            ),
+            secondary_y=False,
+        )
+    if ego_acceleration is not None:
+        longitudinal_figure.add_trace(
+            go.Scatter(
+                x=[0.0],
+                y=[ego_acceleration],
+                mode="markers",
+                name="Ego acceleration",
+                marker={"color": "darkorange", "size": 14, "symbol": "star"},
+            ),
+            secondary_y=True,
+        )
+    longitudinal_figure.update_xaxes(title_text="Time (s)")
+    longitudinal_figure.update_yaxes(title_text="Velocity (m/s)", secondary_y=False)
+    longitudinal_figure.update_yaxes(title_text="Acceleration (m/s²)", secondary_y=True)
+    longitudinal_figure.update_layout(
+        title="Longitudinal profile", height=380, uirevision="constant"
+    )
+
+    lateral_figure = go.Figure()
+    if original_trajectory is not None:
+        add_lateral_profile(lateral_figure, original_trajectory, "Original (Recorded)", "#1f77b4")
+    if optimized_trajectory is not None:
+        add_lateral_profile(lateral_figure, optimized_trajectory, "Optimized", output_color)
+    if ego_steering is not None:
+        lateral_figure.add_trace(
+            go.Scatter(
+                x=[0.0],
+                y=[ego_steering],
+                mode="markers",
+                name="Ego steering",
+                marker={"color": "black", "size": 14, "symbol": "star"},
+            )
+        )
+    lateral_figure.update_layout(
+        title="Lateral profile",
+        xaxis_title="Time (s)",
+        yaxis_title="Steering angle (rad)",
+        height=380,
+        uirevision="constant",
+    )
+
+    bev_column, profile_column = st.columns([3, 2])
+    with bev_column:
+        st.plotly_chart(bev_figure, use_container_width=True, key="mppi_bev_plot")
+    with profile_column:
+        st.plotly_chart(longitudinal_figure, use_container_width=True, key="mppi_longitudinal_plot")
+        st.plotly_chart(lateral_figure, use_container_width=True, key="mppi_lateral_plot")
 
     st.subheader("Dataset curation")
     dataset_directory = st.text_input("Dataset directory", "dataset")
@@ -386,6 +540,12 @@ def render_main_explorer() -> None:
             st.success(f"Saved {saved_path}")
         except Exception as error:
             st.error(f"The dataset write failed: {error}")
+
+    st.subheader("Metrics")
+    if is_evaluated:
+        st.json(result["metrics"])
+    else:
+        st.info("Evaluate the selected frame to compute metrics.")
 
 
 render_main_explorer()
