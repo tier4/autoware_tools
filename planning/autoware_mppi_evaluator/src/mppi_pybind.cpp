@@ -160,10 +160,10 @@ py::dict result_to_dict(const EvaluatedFrameResult & evaluated)
   result["road_borders"] = segments_to_list(evaluated.road_borders);
   result["drivable_area"] = segments_to_list(evaluated.drivable_area);
   result["selected_objects"] = objects_to_list(evaluated.selected_objects);
-  result["ess_per_iteration"] =
-    evaluated.optimize_result.debug.iteration_diagnostics.ess_per_iteration;
-  result["max_weight_per_iteration"] =
-    evaluated.optimize_result.debug.iteration_diagnostics.max_weight_per_iteration;
+  // result["ess_per_iteration"] =
+  //   evaluated.optimize_result.debug.iteration_diagnostics.ess_per_iteration;
+  // result["max_weight_per_iteration"] =
+  //   evaluated.optimize_result.debug.iteration_diagnostics.max_weight_per_iteration;
   return result;
 }
 
@@ -281,12 +281,12 @@ PYBIND11_MODULE(mppi_optimizer_py, module)
     .def_readwrite("accel_cmd_coeff", &FirstOrderDubinsMppiCostParams::accel_cmd_coeff)
     .def_readwrite("steer_cmd_coeff", &FirstOrderDubinsMppiCostParams::steer_cmd_coeff)
     .def_readwrite("steer_rate_coeff", &FirstOrderDubinsMppiCostParams::steer_rate_coeff)
-    .def_readwrite("steer_rate_l2_coeff", &FirstOrderDubinsMppiCostParams::steer_rate_l2_coeff)
-    .def_readwrite("steer_accel_coeff", &FirstOrderDubinsMppiCostParams::steer_accel_coeff)
-    .def_readwrite("cmd_slew_coeff", &FirstOrderDubinsMppiCostParams::cmd_slew_coeff)
-    .def_readwrite(
-      "nominal_curvature_min_chord_length_m",
-      &FirstOrderDubinsMppiCostParams::nominal_curvature_min_chord_length_m)
+    // .def_readwrite("steer_rate_l2_coeff", &FirstOrderDubinsMppiCostParams::steer_rate_l2_coeff)
+    // .def_readwrite("steer_accel_coeff", &FirstOrderDubinsMppiCostParams::steer_accel_coeff)
+    // .def_readwrite("cmd_slew_coeff", &FirstOrderDubinsMppiCostParams::cmd_slew_coeff)
+    // .def_readwrite(
+    //   "nominal_curvature_min_chord_length_m",
+    //   &FirstOrderDubinsMppiCostParams::nominal_curvature_min_chord_length_m)
     .def_readwrite(
       "lateral_acceleration_coeff", &FirstOrderDubinsMppiCostParams::lateral_acceleration_coeff)
     .def_readwrite("lateral_jerk_coeff", &FirstOrderDubinsMppiCostParams::lateral_jerk_coeff)

@@ -152,12 +152,10 @@ void compute_metrics(
   const auto & debug = evaluated.optimize_result.debug;
   auto & metrics = evaluated.metrics;
   metrics.baseline_cost = debug.baseline_cost;
-  metrics.was_rejected = debug.was_rejected;
-  metrics.is_valid = debug.validation.isValid();
-  metrics.first_invalid_index = debug.validation.first_invalid_index;
-  metrics.invalidity_reasons = static_cast<std::uint8_t>(debug.validation.reasons);
-  metrics.min_effective_sample_size = debug.iteration_diagnostics.min_ess;
-  metrics.max_importance_weight = debug.iteration_diagnostics.max_weight;
+  // metrics.was_rejected = debug.was_rejected;
+  // metrics.is_valid = debug.validation.isValid();
+  // metrics.first_invalid_index = debug.validation.first_invalid_index;
+  // metrics.invalidity_reasons = static_cast<std::uint8_t>(debug.validation.reasons);
   metrics.selected_object_count = evaluated.selected_objects.objects.size();
   metrics.road_border_segment_count = evaluated.road_borders.size();
   metrics.drivable_area_segment_count = evaluated.drivable_area.size();
