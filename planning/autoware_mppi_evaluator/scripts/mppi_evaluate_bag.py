@@ -17,6 +17,7 @@
 
 import argparse
 import csv
+import html
 import json
 import math
 import os
@@ -33,6 +34,10 @@ from autoware_mppi_evaluator import mppi_optimizer_py as mppi_cpp
 from autoware_mppi_evaluator.dataset_io import load_dataset
 from autoware_mppi_evaluator.evaluator_config import make_configuration
 from autoware_mppi_evaluator.mcap_reader import McapZohSynchronizer
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from rclpy.serialization import deserialize_message
+from rosidl_runtime_py.utilities import get_message
 
 
 def parse_named_path(value: str) -> Tuple[str, str]:
@@ -111,6 +116,255 @@ def summarize(rows: List[Dict]) -> Dict:
     return summary
 
 
+def select_visualization_frames(records: List[Dict], limit: int) -> List[Dict]:
+    """Prioritize invalid/rejected frames, then the valid frames with the largest error."""
+    failed_or_rejected = [
+        record
+        for record in records
+        if not record["result"]["metrics"]["is_valid"]
+        or record["result"]["metrics"]["was_rejected"]
+    ]
+    valid = [
+        record
+        for record in records
+        if record["result"]["metrics"]["is_valid"]
+        and not record["result"]["metrics"]["was_rejected"]
+    ]
+
+    def cross_track_error(record: Dict) -> float:
+        value = finite_or_none(record["result"]["metrics"]["max_cross_track_error_m"])
+        return -math.inf if value is None else float(value)
+
+    valid.sort(key=cross_track_error, reverse=True)
+    remaining = max(0, limit - len(failed_or_rejected))
+    return failed_or_rejected[:limit] + valid[:remaining]
+
+
+def box_outline(tracked_object: Dict) -> Tuple[List[float], List[float]]:
+    x = float(tracked_object["x"])
+    y = float(tracked_object["y"])
+    yaw = float(tracked_object["yaw"])
+    half_length = 0.5 * float(tracked_object["length"])
+    half_width = 0.5 * float(tracked_object["width"])
+    cosine = math.cos(yaw)
+    sine = math.sin(yaw)
+    corners = []
+    for longitudinal, lateral in (
+        (half_length, half_width),
+        (half_length, -half_width),
+        (-half_length, -half_width),
+        (-half_length, half_width),
+        (half_length, half_width),
+    ):
+        corners.append(
+            (
+                x + longitudinal * cosine - lateral * sine,
+                y + longitudinal * sine + lateral * cosine,
+            )
+        )
+    return [corner[0] for corner in corners], [corner[1] for corner in corners]
+
+
+def trajectory_values(trajectory: Dict, field: str) -> Tuple[List[float], List[float]]:
+    points = trajectory["points"]
+    times = [float(point["time_from_start_ns"]) / 1.0e9 for point in points]
+    return times, [float(point[field]) for point in points]
+
+
+def add_bev_trajectory(figure, trajectory: Dict, name: str, color: str, dash: str) -> None:
+    points = trajectory["points"]
+    figure.add_trace(
+        go.Scatter(
+            x=[point["x"] for point in points],
+            y=[point["y"] for point in points],
+            mode="lines",
+            name=name,
+            line={"color": color, "width": 3, "dash": dash},
+        ),
+        row=1,
+        col=1,
+    )
+
+
+def add_segments(figure, segments: Iterable, name: str, color: str) -> None:
+    for index, (x0, y0, x1, y1) in enumerate(segments):
+        figure.add_trace(
+            go.Scatter(
+                x=[x0, x1],
+                y=[y0, y1],
+                mode="lines",
+                name=name,
+                legendgroup=name,
+                showlegend=index == 0,
+                line={"color": color, "width": 2},
+                hoverinfo="skip",
+            ),
+            row=1,
+            col=1,
+        )
+
+
+def make_frame_figure(record: Dict):
+    result = record["result"]
+    messages = record["messages"]
+    metrics = result["metrics"]
+    output_color = "red" if metrics["was_rejected"] else "green"
+    figure = make_subplots(
+        rows=1,
+        cols=3,
+        specs=[[{"type": "xy"}, {"secondary_y": True}, {"type": "xy"}]],
+        subplot_titles=("BEV", "Longitudinal", "Lateral"),
+        horizontal_spacing=0.08,
+    )
+
+    reference = result["reference_trajectory"]
+    optimized = result["optimized_trajectory"]
+    add_bev_trajectory(figure, reference, "Reference", "gray", "dash")
+    add_bev_trajectory(figure, optimized, "Optimized", output_color, "solid")
+    add_segments(figure, result["road_borders"], "Road borders", "firebrick")
+    add_segments(figure, result["drivable_area"], "Drivable bounds", "darkorange")
+    for index, tracked_object in enumerate(result["selected_objects"]):
+        xs, ys = box_outline(tracked_object)
+        figure.add_trace(
+            go.Scatter(
+                x=xs,
+                y=ys,
+                mode="lines",
+                name="Selected objects",
+                legendgroup="Selected objects",
+                showlegend=index == 0,
+                fill="toself",
+                line={"color": "purple"},
+            ),
+            row=1,
+            col=1,
+        )
+
+    for trajectory, name, color in (
+        (reference, "Reference", "gray"),
+        (optimized, "Optimized", output_color),
+    ):
+        times, velocities = trajectory_values(trajectory, "velocity_mps")
+        _, accelerations = trajectory_values(trajectory, "acceleration_mps2")
+        figure.add_trace(
+            go.Scatter(
+                x=times,
+                y=velocities,
+                mode="lines",
+                name=f"{name} velocity",
+                legendgroup=name,
+                line={"color": color, "width": 3},
+            ),
+            row=1,
+            col=2,
+            secondary_y=False,
+        )
+        figure.add_trace(
+            go.Scatter(
+                x=times,
+                y=accelerations,
+                mode="lines",
+                name=f"{name} acceleration",
+                legendgroup=name,
+                line={"color": color, "width": 3, "dash": "dash"},
+            ),
+            row=1,
+            col=2,
+            secondary_y=True,
+        )
+
+    odometry_type = get_message("nav_msgs/msg/Odometry")
+    odometry = deserialize_message(messages["odometry"], odometry_type)
+    figure.add_trace(
+        go.Scatter(
+            x=[0.0],
+            y=[odometry.twist.twist.linear.x],
+            mode="markers",
+            name="Ego velocity",
+            marker={"color": "black", "size": 14, "symbol": "star"},
+        ),
+        row=1,
+        col=2,
+        secondary_y=False,
+    )
+    if "acceleration" in messages:
+        acceleration_type = get_message("geometry_msgs/msg/AccelWithCovarianceStamped")
+        acceleration = deserialize_message(messages["acceleration"], acceleration_type)
+        figure.add_trace(
+            go.Scatter(
+                x=[0.0],
+                y=[acceleration.accel.accel.linear.x],
+                mode="markers",
+                name="Ego acceleration",
+                marker={"color": "darkorange", "size": 14, "symbol": "star"},
+            ),
+            row=1,
+            col=2,
+            secondary_y=True,
+        )
+
+    steering_times, steering_angles = trajectory_values(optimized, "front_wheel_angle_rad")
+    figure.add_trace(
+        go.Scatter(
+            x=steering_times,
+            y=steering_angles,
+            mode="lines",
+            name="Optimized steering",
+            line={"color": output_color, "width": 3},
+        ),
+        row=1,
+        col=3,
+    )
+    if "steering" in messages:
+        steering_type = get_message("autoware_vehicle_msgs/msg/SteeringReport")
+        steering = deserialize_message(messages["steering"], steering_type)
+        figure.add_trace(
+            go.Scatter(
+                x=[0.0],
+                y=[steering.steering_tire_angle],
+                mode="markers",
+                name="Ego steering",
+                marker={"color": "black", "size": 14, "symbol": "star"},
+            ),
+            row=1,
+            col=3,
+        )
+
+    figure.update_xaxes(title_text="Map X (m)", row=1, col=1)
+    figure.update_yaxes(title_text="Map Y (m)", scaleanchor="x", scaleratio=1, row=1, col=1)
+    figure.update_xaxes(title_text="Time (s)", row=1, col=2)
+    figure.update_yaxes(title_text="Velocity (m/s)", row=1, col=2, secondary_y=False)
+    figure.update_yaxes(title_text="Acceleration (m/s²)", row=1, col=2, secondary_y=True)
+    figure.update_xaxes(title_text="Time (s)", row=1, col=3)
+    figure.update_yaxes(title_text="Steering angle (rad)", row=1, col=3)
+    figure.update_layout(
+        title=f"{result['config_name']} — {result['frame_id']}",
+        height=650,
+        width=1800,
+    )
+    return figure
+
+
+def make_html_report(records_by_configuration: Dict[str, List[Dict]], average_ms) -> str:
+    average_text = "N/A" if average_ms is None else f"{average_ms:.3f} ms"
+    parts = [
+        '<!doctype html><html><head><meta charset="utf-8">',
+        "<title>MPPI Evaluation Report</title>",
+        '<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>',
+        "</head><body>",
+        "<h1>MPPI Evaluation Report</h1>",
+        f"<p><strong>Average Optimization Time:</strong> {average_text}</p>",
+    ]
+    for config_name, records in records_by_configuration.items():
+        parts.append(f"<h2>{html.escape(config_name)}</h2>")
+        for record in records:
+            frame_id = html.escape(str(record["result"]["frame_id"]))
+            parts.append(f"<h3>{frame_id}</h3>")
+            parts.append(make_frame_figure(record).to_html(full_html=False, include_plotlyjs=False))
+    parts.append("</body></html>\n")
+    return "".join(parts)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input", help="MCAP path or curated dataset path")
@@ -129,11 +383,24 @@ def main() -> int:
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--stop", type=int)
     parser.add_argument("--output-stride", type=int, default=1)
+    parser.add_argument(
+        "--visualize",
+        action="store_true",
+        help="Write a Plotly HTML report for prioritized frames",
+    )
+    parser.add_argument(
+        "--visualize-limit",
+        type=int,
+        default=20,
+        help="Maximum number of frame plots per configuration",
+    )
     parser.add_argument("--output", required=True, help="Output path without an extension")
     arguments = parser.parse_args()
 
     if arguments.output_stride < 1:
         parser.error("--output-stride must be positive")
+    if arguments.visualize_limit < 1:
+        parser.error("--visualize-limit must be positive")
 
     if arguments.input_format == "bag":
         if not arguments.topics:
@@ -156,6 +423,10 @@ def main() -> int:
         parser.error("The selected frame range is empty")
 
     rows: List[Dict] = []
+    optimization_times: List[float] = []
+    visualization_records: Dict[str, List[Dict]] = {
+        config_name: [] for config_name, _ in arguments.optimizer_config
+    }
     for config_name, config_path in arguments.optimizer_config:
         configuration = make_configuration(
             mppi_cpp,
@@ -192,6 +463,20 @@ def main() -> int:
                 environment_key = next_environment_key
             try:
                 result = evaluate_frame(session, frame)
+                execution_time_ms = float(result["metrics"]["execution_time_ms"])
+                if math.isfinite(execution_time_ms):
+                    optimization_times.append(execution_time_ms)
+                if arguments.visualize:
+                    candidates = visualization_records[config_name]
+                    candidates.append(
+                        {
+                            "result": result,
+                            "messages": dict(frame.messages),
+                        }
+                    )
+                    visualization_records[config_name] = select_visualization_frames(
+                        candidates, arguments.visualize_limit
+                    )
                 if (frame.index - arguments.start) % arguments.output_stride == 0:
                     row = {
                         "frame_id": result["frame_id"],
@@ -225,6 +510,11 @@ def main() -> int:
         writer.writerows(rows)
         stream.seek(0)
         atomic_write(output_base.with_suffix(".csv"), stream.read())
+
+    if arguments.visualize:
+        average_ms = statistics.fmean(optimization_times) if optimization_times else None
+        report = make_html_report(visualization_records, average_ms)
+        atomic_write(output_base.with_suffix(".html"), report)
     return 0
 
 

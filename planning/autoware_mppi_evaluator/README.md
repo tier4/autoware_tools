@@ -116,6 +116,10 @@ The command writes a frame CSV file and a JSON file with aggregate latency and r
 
 `--output-stride` reduces output rows but still evaluates every chronological frame.
 
+Add `--visualize` to write a Plotly report to `<output>.html`. The report prioritizes invalid
+or rejected frames, then fills the remaining `--visualize-limit` slots per configuration with
+the valid frames that have the largest cross-track error.
+
 Evaluate a curated dataset:
 
 ```bash
