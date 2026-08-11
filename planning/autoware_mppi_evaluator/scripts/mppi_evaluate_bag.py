@@ -179,6 +179,7 @@ def add_bev_trajectory(figure, trajectory: Dict, name: str, color: str, dash: st
             y=[point["y"] for point in points],
             mode="lines",
             name=name,
+            legendgroup=name,
             line={"color": color, "width": 3, "dash": dash},
         ),
         row=1,
@@ -186,7 +187,7 @@ def add_bev_trajectory(figure, trajectory: Dict, name: str, color: str, dash: st
     )
 
 
-def add_segments(figure, segments: Iterable, name: str, color: str) -> None:
+def add_segments(figure, segments: Iterable, name: str, color: str, dash: str = "solid") -> None:
     for index, (x0, y0, x1, y1) in enumerate(segments):
         figure.add_trace(
             go.Scatter(
@@ -196,7 +197,7 @@ def add_segments(figure, segments: Iterable, name: str, color: str) -> None:
                 name=name,
                 legendgroup=name,
                 showlegend=index == 0,
-                line={"color": color, "width": 2},
+                line={"color": color, "width": 2, "dash": dash},
                 hoverinfo="skip",
             ),
             row=1,
@@ -209,12 +210,20 @@ def make_frame_figure(record: Dict):
     messages = record["messages"]
     metrics = result["metrics"]
     output_color = "red" if metrics["was_rejected"] else "green"
+    execution_time_ms = finite_or_none(float(metrics["execution_time_ms"]))
+    execution_time_text = "N/A" if execution_time_ms is None else f"{execution_time_ms:.3f}"
+    figure_title = (
+        f"{result['config_name']} — {result['frame_id']}<br>"
+        f"<sup>execution_time_ms: {execution_time_text} | "
+        f"is_valid: {metrics['is_valid']} | was_rejected: {metrics['was_rejected']}</sup>"
+    )
     figure = make_subplots(
-        rows=1,
+        rows=2,
         cols=3,
-        specs=[[{"type": "xy"}, {"secondary_y": True}, {"type": "xy"}]],
-        subplot_titles=("BEV", "Longitudinal", "Lateral"),
+        specs=[[{"rowspan": 2}, {}, {"rowspan": 2}], [None, {}, None]],
+        subplot_titles=("BEV", "Velocity", "Lateral", "Acceleration"),
         horizontal_spacing=0.08,
+        vertical_spacing=0.16,
     )
 
     reference = result["reference_trajectory"]
@@ -222,7 +231,7 @@ def make_frame_figure(record: Dict):
     add_bev_trajectory(figure, reference, "Reference", "gray", "dash")
     add_bev_trajectory(figure, optimized, "Optimized", output_color, "solid")
     add_segments(figure, result["road_borders"], "Road borders", "firebrick")
-    add_segments(figure, result["drivable_area"], "Drivable bounds", "darkorange")
+    add_segments(figure, result["drivable_area"], "Drivable bounds", "teal", "dash")
     for index, tracked_object in enumerate(result["selected_objects"]):
         xs, ys = box_outline(tracked_object)
         figure.add_trace(
@@ -240,9 +249,9 @@ def make_frame_figure(record: Dict):
             col=1,
         )
 
-    for trajectory, name, color in (
-        (reference, "Reference", "gray"),
-        (optimized, "Optimized", output_color),
+    for trajectory, name, velocity_color, acceleration_color in (
+        (reference, "Reference", "lightblue", "lightsalmon"),
+        (optimized, "Optimized", "darkblue", "darkred"),
     ):
         times, velocities = trajectory_values(trajectory, "velocity_mps")
         _, accelerations = trajectory_values(trajectory, "acceleration_mps2")
@@ -253,11 +262,10 @@ def make_frame_figure(record: Dict):
                 mode="lines",
                 name=f"{name} velocity",
                 legendgroup=name,
-                line={"color": color, "width": 3},
+                line={"color": velocity_color, "width": 3},
             ),
             row=1,
             col=2,
-            secondary_y=False,
         )
         figure.add_trace(
             go.Scatter(
@@ -266,11 +274,10 @@ def make_frame_figure(record: Dict):
                 mode="lines",
                 name=f"{name} acceleration",
                 legendgroup=name,
-                line={"color": color, "width": 3, "dash": "dash"},
+                line={"color": acceleration_color, "width": 3},
             ),
-            row=1,
+            row=2,
             col=2,
-            secondary_y=True,
         )
 
     odometry_type = get_message("nav_msgs/msg/Odometry")
@@ -281,11 +288,11 @@ def make_frame_figure(record: Dict):
             y=[odometry.twist.twist.linear.x],
             mode="markers",
             name="Ego velocity",
-            marker={"color": "black", "size": 14, "symbol": "star"},
+            legendgroup="Ego state",
+            marker={"color": "darkblue", "size": 14, "symbol": "star"},
         ),
         row=1,
         col=2,
-        secondary_y=False,
     )
     if "acceleration" in messages:
         acceleration_type = get_message("geometry_msgs/msg/AccelWithCovarianceStamped")
@@ -296,11 +303,11 @@ def make_frame_figure(record: Dict):
                 y=[acceleration.accel.accel.linear.x],
                 mode="markers",
                 name="Ego acceleration",
-                marker={"color": "darkorange", "size": 14, "symbol": "star"},
+                legendgroup="Ego state",
+                marker={"color": "darkred", "size": 14, "symbol": "star"},
             ),
-            row=1,
+            row=2,
             col=2,
-            secondary_y=True,
         )
 
     steering_times, steering_angles = trajectory_values(optimized, "front_wheel_angle_rad")
@@ -310,6 +317,7 @@ def make_frame_figure(record: Dict):
             y=steering_angles,
             mode="lines",
             name="Optimized steering",
+            legendgroup="Optimized",
             line={"color": output_color, "width": 3},
         ),
         row=1,
@@ -324,7 +332,8 @@ def make_frame_figure(record: Dict):
                 y=[steering.steering_tire_angle],
                 mode="markers",
                 name="Ego steering",
-                marker={"color": "black", "size": 14, "symbol": "star"},
+                legendgroup="Ego state",
+                marker={"color": output_color, "size": 14, "symbol": "star"},
             ),
             row=1,
             col=3,
@@ -333,13 +342,15 @@ def make_frame_figure(record: Dict):
     figure.update_xaxes(title_text="Map X (m)", row=1, col=1)
     figure.update_yaxes(title_text="Map Y (m)", scaleanchor="x", scaleratio=1, row=1, col=1)
     figure.update_xaxes(title_text="Time (s)", row=1, col=2)
-    figure.update_yaxes(title_text="Velocity (m/s)", row=1, col=2, secondary_y=False)
-    figure.update_yaxes(title_text="Acceleration (m/s²)", row=1, col=2, secondary_y=True)
+    figure.update_yaxes(title_text="Velocity (m/s)", row=1, col=2)
+    figure.update_xaxes(title_text="Time (s)", row=2, col=2)
+    figure.update_yaxes(title_text="Acceleration (m/s²)", row=2, col=2)
     figure.update_xaxes(title_text="Time (s)", row=1, col=3)
     figure.update_yaxes(title_text="Steering angle (rad)", row=1, col=3)
     figure.update_layout(
-        title=f"{result['config_name']} — {result['frame_id']}",
-        height=650,
+        title=figure_title,
+        template="plotly_white",
+        height=800,
         width=1800,
     )
     return figure
