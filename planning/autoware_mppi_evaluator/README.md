@@ -118,7 +118,9 @@ The command writes a frame CSV file and a JSON file with aggregate latency and r
 
 Add `--visualize` to write a Plotly report to `<output>.html`. The report prioritizes invalid
 or rejected frames, then fills the remaining `--visualize-limit` slots per configuration with
-the valid frames that have the largest cross-track error.
+the valid frames that have the largest cross-track error. Visualization forces
+`skip_if_invalid=false` so the report can display invalid MPPI candidate trajectories instead of
+the fallback reference trajectory.
 
 Evaluate a curated dataset:
 
@@ -133,11 +135,15 @@ ros2 run autoware_mppi_evaluator mppi_evaluate_bag.py dataset \
 
 ## Dataset format
 
-The explorer stores each curated frame as versioned JSON.
+The explorer stores each curated frame as schema-versioned JSON.
 
-The JSON preserves each ROS message as base64-encoded CDR data.
+Schema version 2 keeps dynamic ROS messages as base64-encoded CDR in each frame JSON.
 
-It also stores topic names, message types, data ages, timestamps, and tags.
+Lanelet-map and route CDR payloads are content-addressed, gzip-compressed, and stored once under
+`blobs/`. Frame files reference an environment hash, and the loader shares the decoded static
+messages between frames.
+
+The manifest stores topic names, message types, timestamps, tags, and environment metadata.
 
 Manifest updates replace duplicate frame identifiers and use atomic file replacement.
 

@@ -446,6 +446,8 @@ def main() -> int:
             arguments.simulator_model,
             config_name,
         )
+        if arguments.visualize:
+            configuration.runtime_options.skip_if_invalid = False
         session = None
         environment_key = None
         for frame in selected_frames(arguments.start, stop):

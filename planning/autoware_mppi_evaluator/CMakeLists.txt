@@ -46,6 +46,15 @@ if(BUILD_TESTING)
     ENVIRONMENT
       "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}/ament_cmake_python/${PROJECT_NAME}"
   )
+
+  add_test(
+    NAME test_dataset_io
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_dataset_io.py
+  )
+  set_tests_properties(test_dataset_io PROPERTIES
+    ENVIRONMENT
+      "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}/ament_cmake_python/${PROJECT_NAME}"
+  )
 endif()
 
 ament_auto_package(INSTALL_TO_SHARE config)
