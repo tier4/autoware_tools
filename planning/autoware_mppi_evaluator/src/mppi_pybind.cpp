@@ -123,12 +123,7 @@ py::dict metrics_to_dict(const FrameEvaluationMetrics & metrics)
   result["baseline_cost"] = metrics.baseline_cost;
   result["was_rejected"] = metrics.was_rejected;
   result["is_valid"] = metrics.is_valid;
-  if (metrics.first_invalid_index.has_value()) {
-    result["first_invalid_index"] = *metrics.first_invalid_index;
-  } else {
-    result["first_invalid_index"] = py::none();
-  }
-  result["invalidity_reasons"] = metrics.invalidity_reasons;
+  result["crash_status"] = metrics.crash_status;
   result["min_effective_sample_size"] = metrics.min_effective_sample_size;
   result["max_importance_weight"] = metrics.max_importance_weight;
   result["max_lateral_acceleration_mps2"] = metrics.max_lateral_acceleration_mps2;

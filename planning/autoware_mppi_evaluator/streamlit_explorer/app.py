@@ -364,7 +364,7 @@ def render_main_explorer() -> None:
     if "original_trajectory" in frame.messages:
         original_trajectory = mppi_cpp.deserialize_trajectory(frame.messages["original_trajectory"])
     optimized_trajectory = result["optimized_trajectory"] if is_evaluated else None
-    output_color = "red" if is_evaluated and result["metrics"]["was_rejected"] else "green"
+    output_color = "green" if not is_evaluated or result["metrics"]["is_valid"] else "red"
 
     ego_velocity = None
     if "odometry" in frame.messages:

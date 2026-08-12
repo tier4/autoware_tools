@@ -17,8 +17,6 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
-#include <cstdint>
-
 namespace autoware::mppi_evaluator
 {
 
@@ -27,8 +25,7 @@ TEST(MppiEvaluationTypes, UsesSafeMetricDefaults)
   const FrameEvaluationMetrics metrics;
   EXPECT_FALSE(metrics.was_rejected);
   EXPECT_FALSE(metrics.is_valid);
-  EXPECT_FALSE(metrics.first_invalid_index.has_value());
-  EXPECT_EQ(metrics.invalidity_reasons, std::uint8_t{0U});
+  EXPECT_EQ(metrics.crash_status, 0);
   EXPECT_TRUE(std::isinf(metrics.min_obstacle_clearance_m));
   EXPECT_TRUE(std::isinf(metrics.min_road_border_clearance_m));
   EXPECT_TRUE(std::isinf(metrics.min_drivable_area_clearance_m));

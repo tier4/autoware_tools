@@ -209,13 +209,14 @@ def make_frame_figure(record: Dict):
     result = record["result"]
     messages = record["messages"]
     metrics = result["metrics"]
-    output_color = "red" if metrics["was_rejected"] else "green"
+    output_color = "green" if metrics["is_valid"] else "red"
     execution_time_ms = finite_or_none(float(metrics["execution_time_ms"]))
     execution_time_text = "N/A" if execution_time_ms is None else f"{execution_time_ms:.3f}"
     figure_title = (
         f"{result['config_name']} — {result['frame_id']}<br>"
         f"<sup>execution_time_ms: {execution_time_text} | "
-        f"is_valid: {metrics['is_valid']} | was_rejected: {metrics['was_rejected']}</sup>"
+        f"is_valid: {metrics['is_valid']} | was_rejected: {metrics['was_rejected']} | "
+        f"crash_status: {metrics['crash_status']}</sup>"
     )
     figure = make_subplots(
         rows=2,

@@ -153,7 +153,8 @@ The evaluator reports:
 
 - MPPI execution time
 - Baseline cost
-- Rejection and invalidity details
+- Rejection status and crash status (`0` valid, `1` lateral bound, `2` obstacle,
+  `3` road border)
 - Effective sample size
 - Maximum importance weight
 - Maximum and mean cross-track error
