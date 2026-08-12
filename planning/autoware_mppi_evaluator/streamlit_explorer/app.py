@@ -192,6 +192,67 @@ def add_lateral_profile(figure: go.Figure, trajectory: Dict, name: str, color: s
     )
 
 
+COST_OVERRIDE_GROUPS = (
+    (
+        "Core tracking",
+        (
+            ("lambda_", "Lambda", 0.001, 10.0),
+            ("desired_speed", "Desired speed (m/s)", 0.0, 0.1),
+            ("speed_coeff", "Speed coefficient", 0.0, 10.0),
+            ("track_coeff", "Tracking coefficient", 0.0, 10.0),
+            ("track_terminal_scale", "Tracking terminal scale", 0.0, 0.5),
+            ("heading_coeff", "Heading coefficient", 0.0, 10.0),
+            ("lateral_distance_coeff", "Lateral-distance coefficient", 0.0, 10.0),
+            ("lateral_yaw_error_coeff", "Lateral-yaw-error coefficient", 0.0, 10.0),
+        ),
+    ),
+    (
+        "Collision and boundaries",
+        (
+            ("crash_coeff", "Crash coefficient", 0.0, 1000.0),
+            ("boundary_threshold", "Boundary threshold (m)", 0.001, 0.05),
+            ("obstacle_collision_margin", "Obstacle margin (m)", 0.0, 0.05),
+            ("road_border_collision_margin", "Road-border margin (m)", 0.0, 0.05),
+            ("drivable_area_crossing_coeff", "Drivable-area coefficient", 0.0, 10.0),
+        ),
+    ),
+    (
+        "Control and comfort",
+        (
+            ("accel_cmd_coeff", "Acceleration-command coefficient", 0.0, 10.0),
+            ("steer_cmd_coeff", "Steering-command coefficient", 0.0, 10.0),
+            ("steer_rate_coeff", "Steering-rate coefficient", 0.0, 100.0),
+            (
+                "nominal_curvature_min_chord_length_m",
+                "Nominal-curvature minimum chord (m)",
+                0.001,
+                0.1,
+            ),
+            ("lateral_acceleration_coeff", "Lateral-acceleration coefficient", 0.0, 10.0),
+            ("lateral_jerk_coeff", "Lateral-jerk coefficient", 0.0, 10.0),
+            ("longitudinal_jerk_coeff", "Longitudinal-jerk coefficient", 0.0, 10.0),
+        ),
+    ),
+    (
+        "Goal",
+        (
+            ("goal_pos_coeff", "Goal-position coefficient", 0.0, 10.0),
+            ("goal_speed_coeff", "Goal-speed coefficient", 0.0, 10.0),
+            ("goal_yaw_coeff", "Goal-yaw coefficient", 0.0, 10.0),
+            ("goal_terminal_scale", "Goal terminal scale", 0.0, 0.5),
+        ),
+    ),
+)
+
+COST_OVERRIDE_FIELDS = tuple(
+    field for _group_name, fields in COST_OVERRIDE_GROUPS for field in fields
+)
+
+
+def cost_state_key(attribute: str) -> str:
+    return f"cost_override_{attribute}"
+
+
 st.set_page_config(page_title="MPPI Frame Explorer", layout="wide")
 st.sidebar.title("MPPI Frame Explorer")
 
@@ -250,18 +311,18 @@ except Exception as error:
     st.stop()
 
 
-# Initialize session state for isolated cost overrides
-if "boundary_threshold" not in st.session_state:
-    st.session_state.boundary_threshold = min(
-        3.0, max(0.1, float(configuration.cost_params.boundary_threshold))
-    )
-    st.session_state.obstacle_margin = min(
-        1.0, max(0.0, float(configuration.cost_params.obstacle_collision_margin))
-    )
-    st.session_state.border_margin = min(
-        1.0, max(0.0, float(configuration.cost_params.road_border_collision_margin))
-    )
+# Initialize session state for isolated cost overrides.
+optimizer_source = (
+    str(Path(optimizer_path).expanduser().resolve()),
+    Path(optimizer_path).stat().st_mtime_ns,
+)
+if st.session_state.get("cost_override_source") != optimizer_source:
+    for cost_attribute, _label, _minimum, _step in COST_OVERRIDE_FIELDS:
+        state_key = cost_state_key(cost_attribute)
+        st.session_state[state_key] = float(getattr(configuration.cost_params, cost_attribute))
     st.session_state.skip_if_invalid = configuration.runtime_options.skip_if_invalid
+    st.session_state.cost_override_source = optimizer_source
+if "auto_evaluate" not in st.session_state:
     st.session_state.auto_evaluate = False
 
 
@@ -269,9 +330,16 @@ if "boundary_threshold" not in st.session_state:
 def render_cost_overrides():
     """Isolated fragment so adjusting sliders does not reload the main canvas."""
     st.sidebar.subheader("Cost overrides")
-    st.sidebar.slider("Boundary threshold (m)", 0.1, 3.0, step=0.05, key="boundary_threshold")
-    st.sidebar.slider("Obstacle margin (m)", 0.0, 1.0, step=0.05, key="obstacle_margin")
-    st.sidebar.slider("Road-border margin (m)", 0.0, 1.0, step=0.05, key="border_margin")
+    for group_name, fields in COST_OVERRIDE_GROUPS:
+        with st.sidebar.expander(group_name, expanded=group_name == "Core tracking"):
+            for cost_attribute, label, minimum, step in fields:
+                st.number_input(
+                    label,
+                    min_value=minimum,
+                    step=step,
+                    format="%.3f",
+                    key=cost_state_key(cost_attribute),
+                )
     st.sidebar.checkbox("Reject an invalid result", key="skip_if_invalid")
     st.sidebar.checkbox("Auto-evaluate on select", key="auto_evaluate")
 
@@ -292,9 +360,12 @@ except Exception as error:
 @st.fragment
 def render_main_explorer() -> None:
     # Apply the latest cost overrides from session state before evaluation
-    configuration.cost_params.boundary_threshold = st.session_state.boundary_threshold
-    configuration.cost_params.obstacle_collision_margin = st.session_state.obstacle_margin
-    configuration.cost_params.road_border_collision_margin = st.session_state.border_margin
+    for cost_attribute, _label, _minimum, _step in COST_OVERRIDE_FIELDS:
+        setattr(
+            configuration.cost_params,
+            cost_attribute,
+            st.session_state[cost_state_key(cost_attribute)],
+        )
     configuration.runtime_options.skip_if_invalid = st.session_state.skip_if_invalid
 
     frame_index = st.slider("Frame index", 0, len(synchronizer) - 1, len(synchronizer) // 2)
@@ -308,9 +379,10 @@ def render_main_explorer() -> None:
         optimizer_path,
         vehicle_path,
         simulator_path,
-        st.session_state.boundary_threshold,
-        st.session_state.obstacle_margin,
-        st.session_state.border_margin,
+        tuple(
+            st.session_state[cost_state_key(cost_attribute)]
+            for cost_attribute, _label, _minimum, _step in COST_OVERRIDE_FIELDS
+        ),
         st.session_state.skip_if_invalid,
         hash(frame.messages["lanelet_map"]),
         hash(frame.messages["route"]),

@@ -263,6 +263,7 @@ PYBIND11_MODULE(mppi_optimizer_py, module)
   py::class_<FirstOrderDubinsMppiCostParams>(module, "CostParams")
     .def(py::init<>())
     .def_readwrite("lambda_", &FirstOrderDubinsMppiCostParams::lambda)
+    .def_readwrite("desired_speed", &FirstOrderDubinsMppiCostParams::desired_speed)
     .def_readwrite("speed_coeff", &FirstOrderDubinsMppiCostParams::speed_coeff)
     .def_readwrite("track_coeff", &FirstOrderDubinsMppiCostParams::track_coeff)
     .def_readwrite("track_terminal_scale", &FirstOrderDubinsMppiCostParams::track_terminal_scale)
@@ -276,12 +277,9 @@ PYBIND11_MODULE(mppi_optimizer_py, module)
     .def_readwrite("accel_cmd_coeff", &FirstOrderDubinsMppiCostParams::accel_cmd_coeff)
     .def_readwrite("steer_cmd_coeff", &FirstOrderDubinsMppiCostParams::steer_cmd_coeff)
     .def_readwrite("steer_rate_coeff", &FirstOrderDubinsMppiCostParams::steer_rate_coeff)
-    // .def_readwrite("steer_rate_l2_coeff", &FirstOrderDubinsMppiCostParams::steer_rate_l2_coeff)
-    // .def_readwrite("steer_accel_coeff", &FirstOrderDubinsMppiCostParams::steer_accel_coeff)
-    // .def_readwrite("cmd_slew_coeff", &FirstOrderDubinsMppiCostParams::cmd_slew_coeff)
-    // .def_readwrite(
-    //   "nominal_curvature_min_chord_length_m",
-    //   &FirstOrderDubinsMppiCostParams::nominal_curvature_min_chord_length_m)
+    .def_readwrite(
+      "nominal_curvature_min_chord_length_m",
+      &FirstOrderDubinsMppiCostParams::nominal_curvature_min_chord_length_m)
     .def_readwrite(
       "lateral_acceleration_coeff", &FirstOrderDubinsMppiCostParams::lateral_acceleration_coeff)
     .def_readwrite("lateral_jerk_coeff", &FirstOrderDubinsMppiCostParams::lateral_jerk_coeff)
