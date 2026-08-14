@@ -223,10 +223,10 @@ COST_OVERRIDE_GROUPS = (
             ("steer_cmd_coeff", "Steering-command coefficient", 0.0, 10.0),
             ("steer_rate_coeff", "Steering-rate coefficient", 0.0, 100.0),
             (
-                "nominal_curvature_min_chord_length_m",
-                "Nominal-curvature minimum chord (m)",
-                0.001,
+                "nominal_spline_smoothing_weight",
+                "Nominal spline smoothing weight",
                 0.1,
+                20.0,
             ),
             ("lateral_acceleration_coeff", "Lateral-acceleration coefficient", 0.0, 10.0),
             ("lateral_jerk_coeff", "Lateral-jerk coefficient", 0.0, 10.0),

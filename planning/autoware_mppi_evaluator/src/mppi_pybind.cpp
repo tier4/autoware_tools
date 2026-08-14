@@ -278,8 +278,8 @@ PYBIND11_MODULE(mppi_optimizer_py, module)
     .def_readwrite("steer_cmd_coeff", &FirstOrderDubinsMppiCostParams::steer_cmd_coeff)
     .def_readwrite("steer_rate_coeff", &FirstOrderDubinsMppiCostParams::steer_rate_coeff)
     .def_readwrite(
-      "nominal_curvature_min_chord_length_m",
-      &FirstOrderDubinsMppiCostParams::nominal_curvature_min_chord_length_m)
+      "nominal_spline_smoothing_weight",
+      &FirstOrderDubinsMppiCostParams::nominal_spline_smoothing_weight)
     .def_readwrite(
       "lateral_acceleration_coeff", &FirstOrderDubinsMppiCostParams::lateral_acceleration_coeff)
     .def_readwrite("lateral_jerk_coeff", &FirstOrderDubinsMppiCostParams::lateral_jerk_coeff)
