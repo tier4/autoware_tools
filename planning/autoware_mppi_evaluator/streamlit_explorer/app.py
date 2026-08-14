@@ -152,6 +152,12 @@ def trajectory_profile(trajectory: Dict, field: str) -> Tuple[List[float], List[
     return times, values
 
 
+def nominal_control_values(profile: Dict, field: str) -> Tuple[List[float], List[float]]:
+    values = [float(value) for value in profile[field]]
+    time_step_s = float(profile["time_step_s"])
+    return [index * time_step_s for index in range(len(values))], values
+
+
 def add_longitudinal_profile(figure: go.Figure, trajectory: Dict, name: str, color: str) -> None:
     times, velocities = trajectory_profile(trajectory, "velocity_mps")
     _, accelerations = trajectory_profile(trajectory, "acceleration_mps2")
@@ -190,6 +196,82 @@ def add_lateral_profile(figure: go.Figure, trajectory: Dict, name: str, color: s
             line={"color": color, "width": 3},
         )
     )
+
+
+COST_BREAKDOWN_COMPONENTS = (
+    ("speed", "Speed"),
+    ("track", "Track"),
+    ("heading", "Heading"),
+    ("lateral_distance", "Lateral distance"),
+    ("lateral_yaw_error", "Lateral yaw error"),
+    ("track_center", "Track center"),
+    ("corner_buffer", "Corner buffer"),
+    ("drivable_area", "Drivable area"),
+    ("acceleration_command", "Acceleration command"),
+    ("steering_command", "Steering command"),
+    ("lateral_acceleration", "Lateral acceleration"),
+    ("lateral_jerk", "Lateral jerk"),
+    ("longitudinal_jerk", "Longitudinal jerk"),
+    ("steering_rate", "Steering rate"),
+    ("crash", "Crash"),
+)
+
+
+def make_cost_breakdown_figure(cost_breakdown: Dict, baseline_cost: float) -> go.Figure:
+    labels = []
+    values = []
+    for field, label in COST_BREAKDOWN_COMPONENTS:
+        value = float(cost_breakdown.get(field, 0.0))
+        if math.isfinite(value) and value != 0.0:
+            labels.append(label)
+            values.append(value)
+
+    figure = go.Figure()
+    if values:
+        figure.add_trace(
+            go.Bar(
+                x=values,
+                y=labels,
+                orientation="h",
+                name="Cost component",
+                legendgroup="Cost breakdown",
+                marker={"color": values, "colorscale": "Viridis"},
+                text=[f"{value:.4g}" for value in values],
+                textposition="auto",
+                hovertemplate="%{y}: %{x:.6g}<extra></extra>",
+            )
+        )
+    else:
+        figure.add_annotation(
+            text="No non-zero finite cost components",
+            x=0.5,
+            y=0.5,
+            xref="paper",
+            yref="paper",
+            showarrow=False,
+        )
+
+    total = float(cost_breakdown.get("total", 0.0))
+    running_total = float(cost_breakdown.get("running_total", 0.0))
+    terminal_total = float(cost_breakdown.get("terminal_total", 0.0))
+    timesteps = int(cost_breakdown.get("evaluated_timesteps", 0))
+    delta = total - float(baseline_cost)
+    figure.update_layout(
+        title=(
+            "Cost breakdown "
+            f"(total={total:.4g}, running={running_total:.4g}, "
+            f"terminal={terminal_total:.4g}, baseline={float(baseline_cost):.4g}, "
+            f"Δ={delta:.4g}, timesteps={timesteps})"
+        ),
+        template="plotly_white",
+        height=max(360, 30 * len(labels) + 130),
+        xaxis_title="Horizon-average cost",
+        yaxis={"autorange": "reversed"},
+        showlegend=False,
+        uirevision="constant",
+        margin={"l": 150, "r": 30, "t": 70, "b": 50},
+    )
+    return figure
 
 
 COST_OVERRIDE_GROUPS = (
@@ -536,6 +618,20 @@ def render_main_explorer() -> None:
         add_longitudinal_profile(
             longitudinal_figure, optimized_trajectory, "Optimized", output_color
         )
+        nominal_times, nominal_acceleration = nominal_control_values(
+            result["nominal_control_profile"], "acceleration_commands_mps2"
+        )
+        longitudinal_figure.add_trace(
+            go.Scatter(
+                x=nominal_times,
+                y=nominal_acceleration,
+                mode="lines",
+                name="Nominal acceleration command",
+                legendgroup="Nominal control",
+                line={"color": "#9467bd", "width": 3, "dash": "dash"},
+            ),
+            secondary_y=True,
+        )
 
     if ego_velocity is not None:
         longitudinal_figure.add_trace(
@@ -571,6 +667,19 @@ def render_main_explorer() -> None:
         add_lateral_profile(lateral_figure, original_trajectory, "Original (Recorded)", "#1f77b4")
     if optimized_trajectory is not None:
         add_lateral_profile(lateral_figure, optimized_trajectory, "Optimized", output_color)
+        nominal_times, nominal_steering = nominal_control_values(
+            result["nominal_control_profile"], "steering_commands_rad"
+        )
+        lateral_figure.add_trace(
+            go.Scatter(
+                x=nominal_times,
+                y=nominal_steering,
+                mode="lines",
+                name="Nominal steering command",
+                legendgroup="Nominal control",
+                line={"color": "#9467bd", "width": 3, "dash": "dash"},
+            )
+        )
     if ego_steering is not None:
         lateral_figure.add_trace(
             go.Scatter(
@@ -595,6 +704,16 @@ def render_main_explorer() -> None:
     with profile_column:
         st.plotly_chart(longitudinal_figure, use_container_width=True, key="mppi_longitudinal_plot")
         st.plotly_chart(lateral_figure, use_container_width=True, key="mppi_lateral_plot")
+
+    if is_evaluated:
+        cost_breakdown_figure = make_cost_breakdown_figure(
+            result["cost_breakdown"], result["metrics"]["baseline_cost"]
+        )
+        st.plotly_chart(
+            cost_breakdown_figure,
+            use_container_width=True,
+            key="mppi_cost_breakdown_plot",
+        )
 
     st.subheader("Dataset curation")
     dataset_directory = st.text_input("Dataset directory", "dataset")

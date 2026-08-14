@@ -156,7 +156,7 @@ void compute_metrics(
   metrics.crash_status = static_cast<int>(debug.validation.reasons);
   metrics.is_valid =
     debug.validation.reasons == mppi_optimizer::FirstOrderDubinsMppiInvalidityReason::none;
-  metrics.was_rejected = !metrics.is_valid && configuration.runtime_options.skip_if_invalid;
+  metrics.was_rejected = debug.was_rejected;
   metrics.selected_object_count = evaluated.selected_objects.objects.size();
   metrics.road_border_segment_count = evaluated.road_borders.size();
   metrics.drivable_area_segment_count = evaluated.drivable_area.size();

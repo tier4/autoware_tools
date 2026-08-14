@@ -116,6 +116,41 @@ py::list objects_to_list(const mppi_optimizer::TrackedObjects & objects)
   return result;
 }
 
+py::dict cost_breakdown_to_dict(const mppi_optimizer::FirstOrderDubinsMppiCostBreakdown & breakdown)
+{
+  py::dict result;
+  result["speed"] = breakdown.speed;
+  result["track"] = breakdown.track;
+  result["heading"] = breakdown.heading;
+  result["lateral_distance"] = breakdown.lateral_distance;
+  result["lateral_yaw_error"] = breakdown.lateral_yaw_error;
+  result["track_center"] = breakdown.track_center;
+  result["corner_buffer"] = breakdown.corner_buffer;
+  result["drivable_area"] = breakdown.drivable_area;
+  result["acceleration_command"] = breakdown.acceleration_command;
+  result["steering_command"] = breakdown.steering_command;
+  result["lateral_acceleration"] = breakdown.lateral_acceleration;
+  result["lateral_jerk"] = breakdown.lateral_jerk;
+  result["longitudinal_jerk"] = breakdown.longitudinal_jerk;
+  result["steering_rate"] = breakdown.steering_rate;
+  result["crash"] = breakdown.crash;
+  result["running_total"] = breakdown.running_total;
+  result["terminal_total"] = breakdown.terminal_total;
+  result["total"] = breakdown.total;
+  result["evaluated_timesteps"] = breakdown.evaluated_timesteps;
+  return result;
+}
+
+py::dict nominal_control_profile_to_dict(
+  const mppi_optimizer::FirstOrderDubinsMppiNominalControlProfile & profile)
+{
+  py::dict result;
+  result["time_step_s"] = profile.time_step_s;
+  result["acceleration_commands_mps2"] = profile.acceleration_commands_mps2;
+  result["steering_commands_rad"] = profile.steering_commands_rad;
+  return result;
+}
+
 py::dict metrics_to_dict(const FrameEvaluationMetrics & metrics)
 {
   py::dict result;
@@ -151,6 +186,9 @@ py::dict result_to_dict(const EvaluatedFrameResult & evaluated)
     trajectory_to_dict(evaluated.optimize_result.debug.reference_trajectory);
   result["optimized_trajectory"] =
     trajectory_to_dict(evaluated.optimize_result.debug.optimized_trajectory);
+  result["nominal_control_profile"] =
+    nominal_control_profile_to_dict(evaluated.optimize_result.debug.nominal_control_profile);
+  result["cost_breakdown"] = cost_breakdown_to_dict(evaluated.optimize_result.debug.cost_breakdown);
   result["metrics"] = metrics_to_dict(evaluated.metrics);
   result["road_borders"] = segments_to_list(evaluated.road_borders);
   result["drivable_area"] = segments_to_list(evaluated.drivable_area);

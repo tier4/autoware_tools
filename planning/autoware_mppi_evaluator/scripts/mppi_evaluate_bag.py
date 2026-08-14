@@ -171,6 +171,31 @@ def trajectory_values(trajectory: Dict, field: str) -> Tuple[List[float], List[f
     return times, [float(point[field]) for point in points]
 
 
+def nominal_control_values(profile: Dict, field: str) -> Tuple[List[float], List[float]]:
+    values = [float(value) for value in profile[field]]
+    time_step_s = float(profile["time_step_s"])
+    return [index * time_step_s for index in range(len(values))], values
+
+
+COST_BREAKDOWN_COMPONENTS = (
+    ("speed", "Speed"),
+    ("track", "Track"),
+    ("heading", "Heading"),
+    ("lateral_distance", "Lateral distance"),
+    ("lateral_yaw_error", "Lateral yaw error"),
+    ("track_center", "Track center"),
+    ("corner_buffer", "Corner buffer"),
+    ("drivable_area", "Drivable area"),
+    ("acceleration_command", "Acceleration command"),
+    ("steering_command", "Steering command"),
+    ("lateral_acceleration", "Lateral acceleration"),
+    ("lateral_jerk", "Lateral jerk"),
+    ("longitudinal_jerk", "Longitudinal jerk"),
+    ("steering_rate", "Steering rate"),
+    ("crash", "Crash"),
+)
+
+
 def add_bev_trajectory(figure, trajectory: Dict, name: str, color: str, dash: str) -> None:
     points = trajectory["points"]
     figure.add_trace(
@@ -219,12 +244,17 @@ def make_frame_figure(record: Dict):
         f"crash_status: {metrics['crash_status']}</sup>"
     )
     figure = make_subplots(
-        rows=2,
+        rows=3,
         cols=3,
-        specs=[[{"rowspan": 2}, {}, {"rowspan": 2}], [None, {}, None]],
-        subplot_titles=("BEV", "Velocity", "Lateral", "Acceleration"),
+        specs=[
+            [{"rowspan": 2}, {}, {"rowspan": 2}],
+            [None, {}, None],
+            [{"colspan": 3}, None, None],
+        ],
+        subplot_titles=("BEV", "Velocity", "Lateral", "Acceleration", "Cost breakdown"),
         horizontal_spacing=0.08,
-        vertical_spacing=0.16,
+        vertical_spacing=0.12,
+        row_heights=[0.32, 0.32, 0.36],
     )
 
     reference = result["reference_trajectory"]
@@ -281,6 +311,23 @@ def make_frame_figure(record: Dict):
             col=2,
         )
 
+    nominal_profile = result["nominal_control_profile"]
+    nominal_times, nominal_acceleration = nominal_control_values(
+        nominal_profile, "acceleration_commands_mps2"
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=nominal_times,
+            y=nominal_acceleration,
+            mode="lines",
+            name="Nominal acceleration command",
+            legendgroup="Nominal control",
+            line={"color": "#9467bd", "width": 3, "dash": "dash"},
+        ),
+        row=2,
+        col=2,
+    )
+
     odometry_type = get_message("nav_msgs/msg/Odometry")
     odometry = deserialize_message(messages["odometry"], odometry_type)
     figure.add_trace(
@@ -324,6 +371,21 @@ def make_frame_figure(record: Dict):
         row=1,
         col=3,
     )
+    nominal_times, nominal_steering = nominal_control_values(
+        nominal_profile, "steering_commands_rad"
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=nominal_times,
+            y=nominal_steering,
+            mode="lines",
+            name="Nominal steering command",
+            legendgroup="Nominal control",
+            line={"color": "#9467bd", "width": 3, "dash": "dash"},
+        ),
+        row=1,
+        col=3,
+    )
     if "steering" in messages:
         steering_type = get_message("autoware_vehicle_msgs/msg/SteeringReport")
         steering = deserialize_message(messages["steering"], steering_type)
@@ -340,6 +402,58 @@ def make_frame_figure(record: Dict):
             col=3,
         )
 
+    cost_breakdown = result["cost_breakdown"]
+    cost_labels = []
+    cost_values = []
+    for field, label in COST_BREAKDOWN_COMPONENTS:
+        value = float(cost_breakdown.get(field, 0.0))
+        if math.isfinite(value) and value != 0.0:
+            cost_labels.append(label)
+            cost_values.append(value)
+    if cost_values:
+        figure.add_trace(
+            go.Bar(
+                x=cost_values,
+                y=cost_labels,
+                orientation="h",
+                name="Cost component",
+                legendgroup="Cost breakdown",
+                showlegend=False,
+                marker={"color": cost_values, "colorscale": "Viridis"},
+                text=[f"{value:.4g}" for value in cost_values],
+                textposition="auto",
+                hovertemplate="%{y}: %{x:.6g}<extra></extra>",
+            ),
+            row=3,
+            col=1,
+        )
+    else:
+        figure.add_annotation(
+            text="No non-zero finite cost components",
+            x=0.5,
+            y=0.5,
+            showarrow=False,
+            row=3,
+            col=1,
+        )
+
+    total = float(cost_breakdown.get("total", 0.0))
+    running_total = float(cost_breakdown.get("running_total", 0.0))
+    terminal_total = float(cost_breakdown.get("terminal_total", 0.0))
+    baseline_cost = float(metrics["baseline_cost"])
+    timesteps = int(cost_breakdown.get("evaluated_timesteps", 0))
+    cost_title = next(
+        annotation
+        for annotation in figure.layout.annotations
+        if annotation.text == "Cost breakdown"
+    )
+    cost_title.text = (
+        "Cost breakdown "
+        f"(total={total:.4g}, running={running_total:.4g}, "
+        f"terminal={terminal_total:.4g}, baseline={baseline_cost:.4g}, "
+        f"Δ={total - baseline_cost:.4g}, timesteps={timesteps})"
+    )
+
     figure.update_xaxes(title_text="Map X (m)", row=1, col=1)
     figure.update_yaxes(title_text="Map Y (m)", scaleanchor="x", scaleratio=1, row=1, col=1)
     figure.update_xaxes(title_text="Time (s)", row=1, col=2)
@@ -348,10 +462,12 @@ def make_frame_figure(record: Dict):
     figure.update_yaxes(title_text="Acceleration (m/s²)", row=2, col=2)
     figure.update_xaxes(title_text="Time (s)", row=1, col=3)
     figure.update_yaxes(title_text="Steering angle (rad)", row=1, col=3)
+    figure.update_xaxes(title_text="Horizon-average cost", row=3, col=1)
+    figure.update_yaxes(autorange="reversed", row=3, col=1)
     figure.update_layout(
         title=figure_title,
         template="plotly_white",
-        height=800,
+        height=1150,
         width=1800,
     )
     return figure
