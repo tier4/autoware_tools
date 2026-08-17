@@ -21,6 +21,11 @@ from typing import Optional
 
 import yaml
 
+# This key remains in the optimizer's packaged YAML but is not declared or loaded by its current
+# FirstOrderDubinsMppiCostParams ROS adapter. Match the optimizer's effective configuration while
+# continuing to reject every other unknown key.
+IGNORED_OPTIMIZER_PARAMETERS = {"desired_speed"}
+
 
 def _ros_parameters(path: Optional[str]) -> Dict[str, Any]:
     if not path:
@@ -50,17 +55,11 @@ def make_configuration(
     runtime = backend.RuntimeOptions()
     unsupported = []
     for key, value in optimizer.items():
-        if key == "terminal_coeffs":
-            if not isinstance(value, dict) or not hasattr(cost, key):
-                unsupported.append(key)
-                continue
-            terminal_coeffs = cost.terminal_coeffs
-            for terminal_key, terminal_value in value.items():
-                if hasattr(terminal_coeffs, terminal_key):
-                    setattr(terminal_coeffs, terminal_key, terminal_value)
-                else:
-                    unsupported.append(f"{key}.{terminal_key}")
-            cost.terminal_coeffs = terminal_coeffs
+        if (
+            key in IGNORED_OPTIMIZER_PARAMETERS
+            and not hasattr(cost, key)
+            and not hasattr(runtime, key)
+        ):
             continue
         target_key = "lambda_" if key == "lambda" else key
         recognized = False

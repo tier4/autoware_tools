@@ -62,10 +62,9 @@ Provide these ROS parameter files:
 
 The evaluator converts vehicle dimensions with the same formulas as `makeVehicleParams()`.
 
-The native parameter structures provide defaults when a file omits a value.
-
-Terminal tracking weights use the optimizer's nested `terminal_coeffs` section and are available
-as individual overrides in the explorer.
+The native parameter structures provide defaults when a file omits a value. The explorer exposes
+the optimizer's current flat cost structure, including terminal tracking scale, corridor-end costs,
+sampling standard deviations, collision costs, and goal costs.
 
 ## Build
 
@@ -123,7 +122,8 @@ Add `--visualize` to write a Plotly report to `<output>.html`. The report priori
 or rejected frames, then fills the remaining `--visualize-limit` slots per configuration with
 the valid frames that have the largest cross-track error. Visualization forces
 `skip_if_invalid=false` so the report can display invalid MPPI candidate trajectories instead of
-the fallback reference trajectory.
+the fallback reference trajectory. The longitudinal and lateral plots also show the seeded nominal
+acceleration and steering commands exported by the optimizer debug result.
 
 Evaluate a curated dataset:
 

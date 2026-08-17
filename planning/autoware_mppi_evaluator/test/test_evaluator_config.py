@@ -19,27 +19,22 @@ import unittest
 from autoware_mppi_evaluator.evaluator_config import make_configuration
 
 
-class TerminalCostParams:
-    def __init__(self):
-        self.track = 10000.0
-        self.heading = 5000.0
-        self.lateral_distance = 0.0
-        self.lateral_yaw_error = 0.0
-        self.track_center = 0.0
-
-
 class CostParams:
     def __init__(self):
         self.lambda_ = 1500.0
+        self.track_terminal_scale = 10.0
+        self.remaining_distance_coeff = 0.0
+        self.path_overshoot_coeff = 0.0
         self.track_center_coeff = 0.0
+        self.accel_cmd_std_dev = 0.35
+        self.steer_cmd_std_dev = 0.024
         self.nominal_spline_smoothing_weight = 10.0
-        self.obstacle_safe_margin = 0.5
-        self.terminal_coeffs = TerminalCostParams()
+        self.drivable_area_crossing_coeff = 100.0
 
 
 class RuntimeOptions:
-    curvature_std = 0.00625
-    min_optimization_length = 0.0
+    use_last_control_as_nominal = False
+    use_temporal_mpt_as_nominal = False
 
 
 class VehicleParams:
@@ -69,43 +64,38 @@ class TestEvaluatorConfig(unittest.TestCase):
             path = write_parameters(
                 directory,
                 "    lambda: 500.0\n"
+                "    desired_speed: 2.5\n"
+                "    track_terminal_scale: 12.0\n"
+                "    remaining_distance_coeff: 150.0\n"
+                "    path_overshoot_coeff: 25.0\n"
                 "    track_center_coeff: 20.0\n"
+                "    accel_cmd_std_dev: 0.1\n"
+                "    steer_cmd_std_dev: 0.02\n"
                 "    nominal_spline_smoothing_weight: 25.0\n"
-                "    obstacle_safe_margin: 0.7\n"
-                "    terminal_coeffs:\n"
-                "      track: 1234.0\n"
-                "      lateral_distance: 42.0\n"
-                "    curvature_std: 0.01\n"
-                "    min_optimization_length: 3.5\n",
+                "    drivable_area_crossing_coeff: 10.0\n"
+                "    use_last_control_as_nominal: true\n"
+                "    use_temporal_mpt_as_nominal: true\n",
             )
 
             configuration = make_configuration(Backend, optimizer_path=path)
 
             self.assertEqual(configuration.cost_params.lambda_, 500.0)
+            self.assertEqual(configuration.cost_params.track_terminal_scale, 12.0)
+            self.assertEqual(configuration.cost_params.remaining_distance_coeff, 150.0)
+            self.assertEqual(configuration.cost_params.path_overshoot_coeff, 25.0)
             self.assertEqual(configuration.cost_params.track_center_coeff, 20.0)
+            self.assertEqual(configuration.cost_params.accel_cmd_std_dev, 0.1)
+            self.assertEqual(configuration.cost_params.steer_cmd_std_dev, 0.02)
             self.assertEqual(configuration.cost_params.nominal_spline_smoothing_weight, 25.0)
-            self.assertEqual(configuration.cost_params.obstacle_safe_margin, 0.7)
-            self.assertEqual(configuration.cost_params.terminal_coeffs.track, 1234.0)
-            self.assertEqual(configuration.cost_params.terminal_coeffs.heading, 5000.0)
-            self.assertEqual(configuration.cost_params.terminal_coeffs.lateral_distance, 42.0)
-            self.assertEqual(configuration.runtime_options.curvature_std, 0.01)
-            self.assertEqual(configuration.runtime_options.min_optimization_length, 3.5)
+            self.assertEqual(configuration.cost_params.drivable_area_crossing_coeff, 10.0)
+            self.assertTrue(configuration.runtime_options.use_last_control_as_nominal)
+            self.assertTrue(configuration.runtime_options.use_temporal_mpt_as_nominal)
 
     def test_rejects_an_optimizer_parameter_missing_from_the_binding(self):
         with tempfile.TemporaryDirectory() as directory:
             path = write_parameters(directory, "    newly_added_parameter: 1.0\n")
 
             with self.assertRaisesRegex(ValueError, "newly_added_parameter"):
-                make_configuration(Backend, optimizer_path=path)
-
-    def test_rejects_an_unknown_nested_terminal_coefficient(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = write_parameters(
-                directory,
-                "    terminal_coeffs:\n" "      newly_added_coefficient: 1.0\n",
-            )
-
-            with self.assertRaisesRegex(ValueError, r"terminal_coeffs\.newly_added_coefficient"):
                 make_configuration(Backend, optimizer_path=path)
 
 

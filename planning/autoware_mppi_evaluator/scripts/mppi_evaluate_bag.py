@@ -182,19 +182,19 @@ COST_BREAKDOWN_COMPONENTS = (
     ("track", "Track"),
     ("heading", "Heading"),
     ("lateral_distance", "Lateral distance"),
-    ("lateral_boundary", "Lateral boundary"),
     ("lateral_yaw_error", "Lateral yaw error"),
+    ("remaining_distance", "Remaining distance"),
+    ("path_overshoot", "Path overshoot"),
     ("track_center", "Track center"),
     ("corner_buffer", "Corner buffer"),
     ("drivable_area", "Drivable area"),
-    ("obstacle", "Obstacle"),
-    ("road_border", "Road border"),
     ("acceleration_command", "Acceleration command"),
     ("steering_command", "Steering command"),
     ("lateral_acceleration", "Lateral acceleration"),
     ("lateral_jerk", "Lateral jerk"),
     ("longitudinal_jerk", "Longitudinal jerk"),
     ("steering_rate", "Steering rate"),
+    ("crash", "Crash"),
 )
 
 
