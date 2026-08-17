@@ -123,6 +123,7 @@ py::dict cost_breakdown_to_dict(const mppi_optimizer::FirstOrderDubinsMppiCostBr
   result["track"] = breakdown.track;
   result["heading"] = breakdown.heading;
   result["lateral_distance"] = breakdown.lateral_distance;
+  result["lateral_boundary"] = breakdown.lateral_boundary;
   result["lateral_yaw_error"] = breakdown.lateral_yaw_error;
   result["track_center"] = breakdown.track_center;
   result["corner_buffer"] = breakdown.corner_buffer;
@@ -133,7 +134,8 @@ py::dict cost_breakdown_to_dict(const mppi_optimizer::FirstOrderDubinsMppiCostBr
   result["lateral_jerk"] = breakdown.lateral_jerk;
   result["longitudinal_jerk"] = breakdown.longitudinal_jerk;
   result["steering_rate"] = breakdown.steering_rate;
-  result["crash"] = breakdown.crash;
+  result["obstacle"] = breakdown.obstacle;
+  result["road_border"] = breakdown.road_border;
   result["running_total"] = breakdown.running_total;
   result["terminal_total"] = breakdown.terminal_total;
   result["total"] = breakdown.total;
@@ -158,8 +160,11 @@ py::dict metrics_to_dict(const FrameEvaluationMetrics & metrics)
   result["baseline_cost"] = metrics.baseline_cost;
   result["was_rejected"] = metrics.was_rejected;
   result["is_valid"] = metrics.is_valid;
-  result["crash_status"] = metrics.crash_status;
-  result["min_effective_sample_size"] = metrics.min_effective_sample_size;
+  result["invalidity_reasons"] = metrics.invalidity_reasons;
+  result["invalidity_reason_names"] = mppi_optimizer::to_string(
+    static_cast<mppi_optimizer::FirstOrderDubinsMppiInvalidityReason>(metrics.invalidity_reasons));
+  result["first_invalid_index"] = metrics.first_invalid_index;
+  result["effective_sample_size"] = metrics.effective_sample_size;
   result["max_importance_weight"] = metrics.max_importance_weight;
   result["max_lateral_acceleration_mps2"] = metrics.max_lateral_acceleration_mps2;
   result["max_acceleration_command_rate_mps3"] = metrics.max_acceleration_command_rate_mps3;
@@ -229,6 +234,7 @@ PYBIND11_MODULE(mppi_optimizer_py, module)
   using autoware::mppi_evaluator::trajectory_to_dict;
   using autoware::mppi_optimizer::FirstOrderDubinsMppiCostParams;
   using autoware::mppi_optimizer::FirstOrderDubinsMppiRuntimeOptions;
+  using autoware::mppi_optimizer::FirstOrderDubinsMppiTerminalCostParams;
   using autoware::mppi_optimizer::FirstOrderDubinsMppiVehicleParams;
 
   module.doc() = "Native bindings for offline Autoware MPPI evaluation";
@@ -298,20 +304,33 @@ PYBIND11_MODULE(mppi_optimizer_py, module)
     },
     py::arg("objects_cdr"), py::arg("trajectory_cdr"), py::arg("margin"));
 
+  py::class_<FirstOrderDubinsMppiTerminalCostParams>(module, "TerminalCostParams")
+    .def(py::init<>())
+    .def_readwrite("track", &FirstOrderDubinsMppiTerminalCostParams::track)
+    .def_readwrite("heading", &FirstOrderDubinsMppiTerminalCostParams::heading)
+    .def_readwrite("lateral_distance", &FirstOrderDubinsMppiTerminalCostParams::lateral_distance)
+    .def_readwrite("lateral_yaw_error", &FirstOrderDubinsMppiTerminalCostParams::lateral_yaw_error)
+    .def_readwrite("track_center", &FirstOrderDubinsMppiTerminalCostParams::track_center);
+
   py::class_<FirstOrderDubinsMppiCostParams>(module, "CostParams")
     .def(py::init<>())
     .def_readwrite("lambda_", &FirstOrderDubinsMppiCostParams::lambda)
-    .def_readwrite("desired_speed", &FirstOrderDubinsMppiCostParams::desired_speed)
     .def_readwrite("speed_coeff", &FirstOrderDubinsMppiCostParams::speed_coeff)
     .def_readwrite("track_coeff", &FirstOrderDubinsMppiCostParams::track_coeff)
-    .def_readwrite("track_terminal_scale", &FirstOrderDubinsMppiCostParams::track_terminal_scale)
     .def_readwrite("heading_coeff", &FirstOrderDubinsMppiCostParams::heading_coeff)
     .def_readwrite(
       "lateral_distance_coeff", &FirstOrderDubinsMppiCostParams::lateral_distance_coeff)
     .def_readwrite(
       "lateral_yaw_error_coeff", &FirstOrderDubinsMppiCostParams::lateral_yaw_error_coeff)
-    .def_readwrite("crash_coeff", &FirstOrderDubinsMppiCostParams::crash_coeff)
+    .def_readwrite("track_center_coeff", &FirstOrderDubinsMppiCostParams::track_center_coeff)
+    .def_readwrite("corner_buffer_coeff", &FirstOrderDubinsMppiCostParams::corner_buffer_coeff)
+    .def_readwrite("corner_safe_margin", &FirstOrderDubinsMppiCostParams::corner_safe_margin)
     .def_readwrite("boundary_threshold", &FirstOrderDubinsMppiCostParams::boundary_threshold)
+    .def_readwrite(
+      "lateral_boundary_soft_margin", &FirstOrderDubinsMppiCostParams::lateral_boundary_soft_margin)
+    .def_readwrite(
+      "lateral_boundary_barrier_weight",
+      &FirstOrderDubinsMppiCostParams::lateral_boundary_barrier_weight)
     .def_readwrite("accel_cmd_coeff", &FirstOrderDubinsMppiCostParams::accel_cmd_coeff)
     .def_readwrite("steer_cmd_coeff", &FirstOrderDubinsMppiCostParams::steer_cmd_coeff)
     .def_readwrite("steer_rate_coeff", &FirstOrderDubinsMppiCostParams::steer_rate_coeff)
@@ -327,15 +346,27 @@ PYBIND11_MODULE(mppi_optimizer_py, module)
       "obstacle_collision_margin", &FirstOrderDubinsMppiCostParams::obstacle_collision_margin)
     .def_readwrite(
       "road_border_collision_margin", &FirstOrderDubinsMppiCostParams::road_border_collision_margin)
+    .def_readwrite("obstacle_safe_margin", &FirstOrderDubinsMppiCostParams::obstacle_safe_margin)
     .def_readwrite(
-      "drivable_area_crossing_coeff", &FirstOrderDubinsMppiCostParams::drivable_area_crossing_coeff)
+      "obstacle_barrier_weight", &FirstOrderDubinsMppiCostParams::obstacle_barrier_weight)
+    .def_readwrite(
+      "road_border_safe_margin", &FirstOrderDubinsMppiCostParams::road_border_safe_margin)
+    .def_readwrite(
+      "road_border_barrier_weight", &FirstOrderDubinsMppiCostParams::road_border_barrier_weight)
+    .def_readwrite(
+      "drivable_area_safe_margin", &FirstOrderDubinsMppiCostParams::drivable_area_safe_margin)
+    .def_readwrite(
+      "drivable_area_barrier_weight", &FirstOrderDubinsMppiCostParams::drivable_area_barrier_weight)
+    .def_readwrite("max_crash_penalty", &FirstOrderDubinsMppiCostParams::max_crash_penalty)
     .def_readwrite("goal_pos_coeff", &FirstOrderDubinsMppiCostParams::goal_pos_coeff)
     .def_readwrite("goal_speed_coeff", &FirstOrderDubinsMppiCostParams::goal_speed_coeff)
     .def_readwrite("goal_yaw_coeff", &FirstOrderDubinsMppiCostParams::goal_yaw_coeff)
-    .def_readwrite("goal_terminal_scale", &FirstOrderDubinsMppiCostParams::goal_terminal_scale);
+    .def_readwrite("goal_terminal_scale", &FirstOrderDubinsMppiCostParams::goal_terminal_scale)
+    .def_readwrite("terminal_coeffs", &FirstOrderDubinsMppiCostParams::terminal_coeffs);
 
   py::class_<FirstOrderDubinsMppiRuntimeOptions>(module, "RuntimeOptions")
     .def(py::init<>())
+    .def_readwrite("curvature_std", &FirstOrderDubinsMppiRuntimeOptions::curvature_std)
     .def_readwrite(
       "enable_debug_trajectory_log",
       &FirstOrderDubinsMppiRuntimeOptions::enable_debug_trajectory_log)
@@ -348,6 +379,8 @@ PYBIND11_MODULE(mppi_optimizer_py, module)
     .def_readwrite(
       "force_cold_start_each_step", &FirstOrderDubinsMppiRuntimeOptions::force_cold_start_each_step)
     .def_readwrite("skip_if_invalid", &FirstOrderDubinsMppiRuntimeOptions::skip_if_invalid)
+    .def_readwrite(
+      "min_optimization_length", &FirstOrderDubinsMppiRuntimeOptions::min_optimization_length)
     .def_readwrite(
       "use_last_control_as_nominal",
       &FirstOrderDubinsMppiRuntimeOptions::use_last_control_as_nominal);

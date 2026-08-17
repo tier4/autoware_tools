@@ -68,9 +68,10 @@ struct FrameEvaluationMetrics
   double baseline_cost{0.0};
   bool was_rejected{false};
   bool is_valid{false};
-  int crash_status{0};
-  double min_effective_sample_size{0.0};
-  double max_importance_weight{0.0};
+  int invalidity_reasons{0};
+  std::optional<std::size_t> first_invalid_index;
+  double effective_sample_size{std::numeric_limits<double>::quiet_NaN()};
+  double max_importance_weight{std::numeric_limits<double>::quiet_NaN()};
   double max_lateral_acceleration_mps2{0.0};
   double max_acceleration_command_rate_mps3{0.0};
   double max_front_wheel_angle_rate_rps{0.0};

@@ -16,6 +16,7 @@
 
 #include "autoware/avoidance_target_detector/boundary.hpp"
 #include "autoware/avoidance_target_detector/object_filtering.hpp"
+#include "autoware/mppi_optimizer/detail/trajectory_utils.hpp"
 #include "autoware/mppi_optimizer/predicted_objects_obstacles.hpp"
 #include "autoware/mppi_optimizer/tracked_objects_obstacles.hpp"
 
@@ -40,7 +41,8 @@ namespace autoware::mppi_evaluator
 namespace
 {
 
-constexpr double kMppiDt = 0.1;
+constexpr double kMppiDt = static_cast<double>(mppi_optimizer::detail::kMppiDt);
+constexpr std::size_t kMppiHorizon = static_cast<std::size_t>(mppi_optimizer::detail::kMppiHorizon);
 
 std::vector<mppi_optimizer::Segment> to_mppi_segments(
   const std::vector<avoidance_target_detector::Segment> & segments)
@@ -112,20 +114,19 @@ double obstacle_clearance(
     return std::numeric_limits<double>::infinity();
   }
 
-  constexpr int kHorizonSteps = 80;
   std::vector<float> obstacle_x;
   std::vector<float> obstacle_y;
   std::vector<float> obstacle_yaw;
   std::vector<float> obstacle_half_length;
   std::vector<float> obstacle_half_width;
   mppi_optimizer::buildObstacleTrajectoryBuffersFromTrackedObjects(
-    tracked_objects, static_cast<float>(kMppiDt), kHorizonSteps, obstacle_x, obstacle_y,
-    obstacle_yaw, obstacle_half_length, obstacle_half_width);
+    tracked_objects, static_cast<float>(kMppiDt), static_cast<int>(kMppiHorizon), obstacle_x,
+    obstacle_y, obstacle_yaw, obstacle_half_length, obstacle_half_width);
 
   const double ego_radius = 0.5 * std::hypot(vehicle_params.ego_length, vehicle_params.ego_width);
   double clearance = std::numeric_limits<double>::infinity();
   const std::size_t obstacle_count = obstacle_half_length.size();
-  const std::size_t step_count = std::min<std::size_t>(trajectory.points.size(), kHorizonSteps);
+  const std::size_t step_count = std::min(trajectory.points.size(), kMppiHorizon);
   for (std::size_t obstacle_index = 0U; obstacle_index < obstacle_count; ++obstacle_index) {
     const double obstacle_radius =
       std::hypot(obstacle_half_length[obstacle_index], obstacle_half_width[obstacle_index]);
@@ -136,7 +137,7 @@ double obstacle_clearance(
         ego_pose.position.x + vehicle_params.ego_axle_to_box_center * std::cos(ego_yaw);
       const double ego_y =
         ego_pose.position.y + vehicle_params.ego_axle_to_box_center * std::sin(ego_yaw);
-      const std::size_t buffer_index = obstacle_index * kHorizonSteps + step;
+      const std::size_t buffer_index = obstacle_index * kMppiHorizon + step;
       const double center_distance =
         std::hypot(ego_x - obstacle_x[buffer_index], ego_y - obstacle_y[buffer_index]);
       clearance =
@@ -146,6 +147,35 @@ double obstacle_clearance(
   return clearance;
 }
 
+void compute_importance_metrics(
+  const mppi_optimizer::FirstOrderDubinsMppiInterface & optimizer, EvaluatedFrameResult & evaluated)
+{
+  if (evaluated.optimize_result.debug.nominal_control_profile.acceleration_commands_mps2.empty()) {
+    return;
+  }
+
+  std::vector<float> raw_costs;
+  std::vector<float> normalized_weights;
+  if (!optimizer.copySampleCostDistribution(raw_costs, normalized_weights)) {
+    return;
+  }
+
+  double squared_weight_sum = 0.0;
+  double maximum_weight = 0.0;
+  for (const float weight : normalized_weights) {
+    if (!std::isfinite(weight) || weight < 0.0F) {
+      continue;
+    }
+    const double value = static_cast<double>(weight);
+    squared_weight_sum += value * value;
+    maximum_weight = std::max(maximum_weight, value);
+  }
+  if (squared_weight_sum > std::numeric_limits<double>::epsilon()) {
+    evaluated.metrics.effective_sample_size = 1.0 / squared_weight_sum;
+    evaluated.metrics.max_importance_weight = maximum_weight;
+  }
+}
+
 void compute_metrics(
   const MppiInputFrame & frame, const MppiConfiguration & configuration,
   EvaluatedFrameResult & evaluated)
@@ -153,7 +183,8 @@ void compute_metrics(
   const auto & debug = evaluated.optimize_result.debug;
   auto & metrics = evaluated.metrics;
   metrics.baseline_cost = debug.baseline_cost;
-  metrics.crash_status = static_cast<int>(debug.validation.reasons);
+  metrics.invalidity_reasons = static_cast<int>(debug.validation.reasons);
+  metrics.first_invalid_index = debug.validation.first_invalid_index;
   metrics.is_valid =
     debug.validation.reasons == mppi_optimizer::FirstOrderDubinsMppiInvalidityReason::none;
   metrics.was_rejected = debug.was_rejected;
@@ -309,6 +340,7 @@ struct MppiEvaluationSession::Impl
     const auto end = std::chrono::steady_clock::now();
     evaluated.metrics.execution_time_ms =
       std::chrono::duration<double, std::milli>(end - start).count();
+    compute_importance_metrics(*optimizer, evaluated);
     compute_metrics(frame, configuration, evaluated);
     last_timestamp_ns = frame.timestamp_ns;
     return evaluated;

@@ -48,12 +48,33 @@ def make_configuration(
     optimizer = _ros_parameters(optimizer_path)
     cost = backend.CostParams()
     runtime = backend.RuntimeOptions()
+    unsupported = []
     for key, value in optimizer.items():
+        if key == "terminal_coeffs":
+            if not isinstance(value, dict) or not hasattr(cost, key):
+                unsupported.append(key)
+                continue
+            terminal_coeffs = cost.terminal_coeffs
+            for terminal_key, terminal_value in value.items():
+                if hasattr(terminal_coeffs, terminal_key):
+                    setattr(terminal_coeffs, terminal_key, terminal_value)
+                else:
+                    unsupported.append(f"{key}.{terminal_key}")
+            cost.terminal_coeffs = terminal_coeffs
+            continue
         target_key = "lambda_" if key == "lambda" else key
+        recognized = False
         if hasattr(cost, target_key):
             setattr(cost, target_key, value)
+            recognized = True
         if hasattr(runtime, key):
             setattr(runtime, key, value)
+            recognized = True
+        if not recognized:
+            unsupported.append(key)
+    if unsupported:
+        names = ", ".join(sorted(unsupported))
+        raise ValueError(f"Unsupported MPPI optimizer parameters in {optimizer_path}: {names}")
     configuration.cost_params = cost
     configuration.runtime_options = runtime
 

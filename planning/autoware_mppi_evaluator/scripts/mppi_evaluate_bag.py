@@ -182,17 +182,19 @@ COST_BREAKDOWN_COMPONENTS = (
     ("track", "Track"),
     ("heading", "Heading"),
     ("lateral_distance", "Lateral distance"),
+    ("lateral_boundary", "Lateral boundary"),
     ("lateral_yaw_error", "Lateral yaw error"),
     ("track_center", "Track center"),
     ("corner_buffer", "Corner buffer"),
     ("drivable_area", "Drivable area"),
+    ("obstacle", "Obstacle"),
+    ("road_border", "Road border"),
     ("acceleration_command", "Acceleration command"),
     ("steering_command", "Steering command"),
     ("lateral_acceleration", "Lateral acceleration"),
     ("lateral_jerk", "Lateral jerk"),
     ("longitudinal_jerk", "Longitudinal jerk"),
     ("steering_rate", "Steering rate"),
-    ("crash", "Crash"),
 )
 
 
@@ -237,11 +239,14 @@ def make_frame_figure(record: Dict):
     output_color = "green" if metrics["is_valid"] else "red"
     execution_time_ms = finite_or_none(float(metrics["execution_time_ms"]))
     execution_time_text = "N/A" if execution_time_ms is None else f"{execution_time_ms:.3f}"
+    invalid_index = metrics["first_invalid_index"]
+    invalid_index_text = "N/A" if invalid_index is None else str(invalid_index)
     figure_title = (
         f"{result['config_name']} — {result['frame_id']}<br>"
         f"<sup>execution_time_ms: {execution_time_text} | "
         f"is_valid: {metrics['is_valid']} | was_rejected: {metrics['was_rejected']} | "
-        f"crash_status: {metrics['crash_status']}</sup>"
+        f"invalidity_reasons: {metrics['invalidity_reason_names']} "
+        f"({metrics['invalidity_reasons']}) | first_invalid_index: {invalid_index_text}</sup>"
     )
     figure = make_subplots(
         rows=3,

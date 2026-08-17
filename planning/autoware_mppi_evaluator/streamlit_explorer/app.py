@@ -203,17 +203,19 @@ COST_BREAKDOWN_COMPONENTS = (
     ("track", "Track"),
     ("heading", "Heading"),
     ("lateral_distance", "Lateral distance"),
+    ("lateral_boundary", "Lateral boundary"),
     ("lateral_yaw_error", "Lateral yaw error"),
     ("track_center", "Track center"),
     ("corner_buffer", "Corner buffer"),
     ("drivable_area", "Drivable area"),
+    ("obstacle", "Obstacle"),
+    ("road_border", "Road border"),
     ("acceleration_command", "Acceleration command"),
     ("steering_command", "Steering command"),
     ("lateral_acceleration", "Lateral acceleration"),
     ("lateral_jerk", "Lateral jerk"),
     ("longitudinal_jerk", "Longitudinal jerk"),
     ("steering_rate", "Steering rate"),
-    ("crash", "Crash"),
 )
 
 
@@ -279,23 +281,66 @@ COST_OVERRIDE_GROUPS = (
         "Core tracking",
         (
             ("lambda_", "Lambda", 0.001, 10.0),
-            ("desired_speed", "Desired speed (m/s)", 0.0, 0.1),
             ("speed_coeff", "Speed coefficient", 0.0, 10.0),
             ("track_coeff", "Tracking coefficient", 0.0, 10.0),
-            ("track_terminal_scale", "Tracking terminal scale", 0.0, 0.5),
             ("heading_coeff", "Heading coefficient", 0.0, 10.0),
             ("lateral_distance_coeff", "Lateral-distance coefficient", 0.0, 10.0),
             ("lateral_yaw_error_coeff", "Lateral-yaw-error coefficient", 0.0, 10.0),
+            ("track_center_coeff", "Track-center coefficient", 0.0, 10.0),
         ),
     ),
     (
-        "Collision and boundaries",
+        "Terminal tracking",
         (
-            ("crash_coeff", "Crash coefficient", 0.0, 1000.0),
+            ("terminal_coeffs.track", "Terminal tracking coefficient", 0.0, 100.0),
+            ("terminal_coeffs.heading", "Terminal heading coefficient", 0.0, 100.0),
+            (
+                "terminal_coeffs.lateral_distance",
+                "Terminal lateral-distance coefficient",
+                0.0,
+                100.0,
+            ),
+            (
+                "terminal_coeffs.lateral_yaw_error",
+                "Terminal lateral-yaw-error coefficient",
+                0.0,
+                100.0,
+            ),
+            (
+                "terminal_coeffs.track_center",
+                "Terminal track-center coefficient",
+                0.0,
+                100.0,
+            ),
+        ),
+    ),
+    (
+        "Lateral and drivable boundaries",
+        (
+            ("corner_buffer_coeff", "Corner-buffer coefficient", 0.0, 10.0),
+            ("corner_safe_margin", "Corner safe margin (m)", 0.0, 0.05),
             ("boundary_threshold", "Boundary threshold (m)", 0.001, 0.05),
-            ("obstacle_collision_margin", "Obstacle margin (m)", 0.0, 0.05),
-            ("road_border_collision_margin", "Road-border margin (m)", 0.0, 0.05),
-            ("drivable_area_crossing_coeff", "Drivable-area coefficient", 0.0, 10.0),
+            ("lateral_boundary_soft_margin", "Lateral soft margin (m)", 0.0, 0.05),
+            (
+                "lateral_boundary_barrier_weight",
+                "Lateral barrier weight",
+                0.0,
+                100.0,
+            ),
+            ("drivable_area_safe_margin", "Drivable-area safe margin (m)", 0.0, 0.05),
+            ("drivable_area_barrier_weight", "Drivable-area barrier weight", 0.0, 100.0),
+        ),
+    ),
+    (
+        "Obstacles and road borders",
+        (
+            ("obstacle_collision_margin", "Obstacle collision margin (m)", 0.0, 0.05),
+            ("obstacle_safe_margin", "Obstacle safe margin (m)", 0.0, 0.05),
+            ("obstacle_barrier_weight", "Obstacle barrier weight", 0.0, 100.0),
+            ("road_border_collision_margin", "Road-border collision margin (m)", 0.0, 0.05),
+            ("road_border_safe_margin", "Road-border safe margin (m)", 0.0, 0.05),
+            ("road_border_barrier_weight", "Road-border barrier weight", 0.0, 100.0),
+            ("max_crash_penalty", "Minimum collision penalty", 0.0, 1000.0),
         ),
     ),
     (
@@ -307,8 +352,8 @@ COST_OVERRIDE_GROUPS = (
             (
                 "nominal_spline_smoothing_weight",
                 "Nominal spline smoothing weight",
-                0.1,
-                20.0,
+                0.0,
+                1.0,
             ),
             ("lateral_acceleration_coeff", "Lateral-acceleration coefficient", 0.0, 10.0),
             ("lateral_jerk_coeff", "Lateral-jerk coefficient", 0.0, 10.0),
@@ -333,6 +378,21 @@ COST_OVERRIDE_FIELDS = tuple(
 
 def cost_state_key(attribute: str) -> str:
     return f"cost_override_{attribute}"
+
+
+def get_cost_parameter(cost_params, attribute: str):
+    value = cost_params
+    for component in attribute.split("."):
+        value = getattr(value, component)
+    return value
+
+
+def set_cost_parameter(cost_params, attribute: str, value: float) -> None:
+    components = attribute.split(".")
+    target = cost_params
+    for component in components[:-1]:
+        target = getattr(target, component)
+    setattr(target, components[-1], value)
 
 
 st.set_page_config(page_title="MPPI Frame Explorer", layout="wide")
@@ -398,11 +458,24 @@ optimizer_source = (
     str(Path(optimizer_path).expanduser().resolve()),
     Path(optimizer_path).stat().st_mtime_ns,
 )
-if st.session_state.get("cost_override_source") != optimizer_source:
-    for cost_attribute, _label, _minimum, _step in COST_OVERRIDE_FIELDS:
-        state_key = cost_state_key(cost_attribute)
-        st.session_state[state_key] = float(getattr(configuration.cost_params, cost_attribute))
+vehicle_source = (
+    str(Path(vehicle_path).expanduser().resolve()),
+    Path(vehicle_path).stat().st_mtime_ns,
+)
+simulator_source = (
+    str(Path(simulator_path).expanduser().resolve()),
+    Path(simulator_path).stat().st_mtime_ns,
+)
+cost_source_changed = st.session_state.get("cost_override_source") != optimizer_source
+for cost_attribute, _label, _minimum, _step in COST_OVERRIDE_FIELDS:
+    state_key = cost_state_key(cost_attribute)
+    if cost_source_changed or state_key not in st.session_state:
+        st.session_state[state_key] = float(
+            get_cost_parameter(configuration.cost_params, cost_attribute)
+        )
+if cost_source_changed or "skip_if_invalid" not in st.session_state:
     st.session_state.skip_if_invalid = configuration.runtime_options.skip_if_invalid
+if cost_source_changed:
     st.session_state.cost_override_source = optimizer_source
 if "auto_evaluate" not in st.session_state:
     st.session_state.auto_evaluate = False
@@ -443,12 +516,24 @@ except Exception as error:
 def render_main_explorer() -> None:
     # Apply the latest cost overrides from session state before evaluation
     for cost_attribute, _label, _minimum, _step in COST_OVERRIDE_FIELDS:
-        setattr(
+        set_cost_parameter(
             configuration.cost_params,
             cost_attribute,
             st.session_state[cost_state_key(cost_attribute)],
         )
     configuration.runtime_options.skip_if_invalid = st.session_state.skip_if_invalid
+    runtime_options = configuration.runtime_options
+    runtime_key = (
+        float(runtime_options.curvature_std),
+        bool(runtime_options.enable_debug_trajectory_log),
+        str(runtime_options.debug_trajectory_log_directory),
+        bool(runtime_options.ignore_obstacles),
+        bool(runtime_options.ignore_drivable_area),
+        bool(runtime_options.force_cold_start_each_step),
+        bool(runtime_options.skip_if_invalid),
+        float(runtime_options.min_optimization_length),
+        bool(runtime_options.use_last_control_as_nominal),
+    )
 
     frame_index = st.slider("Frame index", 0, len(synchronizer) - 1, len(synchronizer) // 2)
     frame = synchronizer.get_synchronized_frame(frame_index)
@@ -458,14 +543,14 @@ def render_main_explorer() -> None:
     session_key = (
         str(Path(bag_path).expanduser().resolve()),
         mode,
-        optimizer_path,
-        vehicle_path,
-        simulator_path,
+        optimizer_source,
+        vehicle_source,
+        simulator_source,
         tuple(
             st.session_state[cost_state_key(cost_attribute)]
             for cost_attribute, _label, _minimum, _step in COST_OVERRIDE_FIELDS
         ),
-        st.session_state.skip_if_invalid,
+        runtime_key,
         hash(frame.messages["lanelet_map"]),
         hash(frame.messages["route"]),
     )

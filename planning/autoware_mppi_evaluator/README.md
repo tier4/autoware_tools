@@ -64,6 +64,9 @@ The evaluator converts vehicle dimensions with the same formulas as `makeVehicle
 
 The native parameter structures provide defaults when a file omits a value.
 
+Terminal tracking weights use the optimizer's nested `terminal_coeffs` section and are available
+as individual overrides in the explorer.
+
 ## Build
 
 Install the two Python user-interface dependencies:
@@ -153,9 +156,10 @@ The evaluator reports:
 
 - MPPI execution time
 - Baseline cost
-- Rejection status and crash status (`0` valid, `1` lateral bound, `2` obstacle,
-  `3` road border)
-- Effective sample size
+- Rejection status and invalidity reasons (`0` valid, `1` lateral boundary, `2` obstacle,
+  `4` road border; values may be combined as a bitmask)
+- First invalid trajectory index, when validation fails
+- Effective sample size of the final importance distribution
 - Maximum importance weight
 - Maximum and mean cross-track error
 - Maximum lateral acceleration
