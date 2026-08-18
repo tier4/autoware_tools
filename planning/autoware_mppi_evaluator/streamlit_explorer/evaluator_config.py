@@ -62,7 +62,7 @@ def make_configuration(
             unsupported.append(key)
     if unsupported:
         names = ", ".join(sorted(unsupported))
-        raise ValueError(f"Unsupported MPPI optimizer parameters in {optimizer_path}: {names}")
+        print(f"Unsupported MPPI optimizer parameters in {optimizer_path}: {names}")
     configuration.cost_params = cost
     configuration.runtime_options = runtime
 
