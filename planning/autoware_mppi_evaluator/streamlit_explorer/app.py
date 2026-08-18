@@ -203,19 +203,21 @@ COST_BREAKDOWN_COMPONENTS = (
     ("track", "Track"),
     ("heading", "Heading"),
     ("lateral_distance", "Lateral distance"),
+    ("lateral_boundary", "Lateral boundary"),
     ("lateral_yaw_error", "Lateral yaw error"),
     ("remaining_distance", "Remaining distance"),
     ("path_overshoot", "Path overshoot"),
     ("track_center", "Track center"),
     ("corner_buffer", "Corner buffer"),
     ("drivable_area", "Drivable area"),
+    ("obstacle", "Obstacle"),
+    ("road_border", "Road border"),
     ("acceleration_command", "Acceleration command"),
     ("steering_command", "Steering command"),
     ("lateral_acceleration", "Lateral acceleration"),
     ("lateral_jerk", "Lateral jerk"),
     ("longitudinal_jerk", "Longitudinal jerk"),
     ("steering_rate", "Steering rate"),
-    ("crash", "Crash"),
 )
 
 
@@ -257,13 +259,12 @@ def make_cost_breakdown_figure(cost_breakdown: Dict, baseline_cost: float) -> go
     running_total = float(cost_breakdown.get("running_total", 0.0))
     terminal_total = float(cost_breakdown.get("terminal_total", 0.0))
     timesteps = int(cost_breakdown.get("evaluated_timesteps", 0))
-    delta = total - float(baseline_cost)
     figure.update_layout(
         title=(
             "Cost breakdown "
             f"(total={total:.4g}, running={running_total:.4g}, "
-            f"terminal={terminal_total:.4g}, baseline={float(baseline_cost):.4g}, "
-            f"Δ={delta:.4g}, timesteps={timesteps})"
+            f"terminal={terminal_total:.4g}, best sampled={float(baseline_cost):.4g}, "
+            f"timesteps={timesteps})"
         ),
         template="plotly_white",
         height=max(360, 30 * len(labels) + 130),
@@ -297,11 +298,15 @@ COST_OVERRIDE_GROUPS = (
         (
             ("corner_buffer_coeff", "Corner-buffer coefficient", 0.0, 10.0),
             ("corner_safe_margin", "Corner safe margin (m)", 0.0, 0.05),
-            ("crash_coeff", "Crash coefficient", 0.0, 1000.0),
             ("boundary_threshold", "Boundary threshold (m)", 0.001, 0.05),
+            ("lateral_boundary_soft_margin", "Lateral soft margin (m)", 0.0, 0.05),
             ("obstacle_collision_margin", "Obstacle collision margin (m)", 0.0, 0.05),
             ("road_border_collision_margin", "Road-border collision margin (m)", 0.0, 0.05),
-            ("drivable_area_crossing_coeff", "Drivable-area crossing coefficient", 0.0, 10.0),
+            ("obstacle_safe_margin", "Obstacle safe margin (m)", 0.0, 0.05),
+            ("road_border_safe_margin", "Road-border safe margin (m)", 0.0, 0.05),
+            ("drivable_area_safe_margin", "Drivable-area safe margin (m)", 0.0, 0.05),
+            ("drivable_area_barrier_weight", "Drivable-area barrier weight", 0.0, 100.0),
+            ("crash_contact_penalty", "Contact penalty", 0.0, 1000.0),
         ),
     ),
     (
@@ -310,10 +315,10 @@ COST_OVERRIDE_GROUPS = (
             ("accel_cmd_std_dev", "Acceleration-command std. dev. (m/s²)", 0.001, 0.01),
             ("steer_cmd_std_dev", "Steering-command std. dev. (rad)", 0.001, 0.001),
             (
-                "nominal_spline_smoothing_weight",
-                "Nominal spline smoothing weight",
+                "nominal_curvature_min_chord_length_m",
+                "Nominal curvature minimum chord length (m)",
                 0.0,
-                1.0,
+                0.1,
             ),
         ),
     ),
@@ -326,15 +331,6 @@ COST_OVERRIDE_GROUPS = (
             ("lateral_acceleration_coeff", "Lateral-acceleration coefficient", 0.0, 10.0),
             ("lateral_jerk_coeff", "Lateral-jerk coefficient", 0.0, 10.0),
             ("longitudinal_jerk_coeff", "Longitudinal-jerk coefficient", 0.0, 10.0),
-        ),
-    ),
-    (
-        "Goal",
-        (
-            ("goal_pos_coeff", "Goal-position coefficient", 0.0, 10.0),
-            ("goal_speed_coeff", "Goal-speed coefficient", 0.0, 10.0),
-            ("goal_yaw_coeff", "Goal-yaw coefficient", 0.0, 10.0),
-            ("goal_terminal_scale", "Goal terminal scale", 0.0, 0.5),
         ),
     ),
 )
@@ -500,6 +496,7 @@ def render_main_explorer() -> None:
         bool(runtime_options.skip_if_invalid),
         bool(runtime_options.use_last_control_as_nominal),
         bool(runtime_options.use_temporal_mpt_as_nominal),
+        bool(runtime_options.enable_input_delay_compensation),
     )
 
     frame_index = st.slider("Frame index", 0, len(synchronizer) - 1, len(synchronizer) // 2)

@@ -123,7 +123,9 @@ or rejected frames, then fills the remaining `--visualize-limit` slots per confi
 the valid frames that have the largest cross-track error. Visualization forces
 `skip_if_invalid=false` so the report can display invalid MPPI candidate trajectories instead of
 the fallback reference trajectory. The longitudinal and lateral plots also show the seeded nominal
-acceleration and steering commands exported by the optimizer debug result.
+acceleration and steering commands exported by the optimizer debug result. Each frame title reports
+effective sample size, maximum importance weight, and the horizon-average cost change from the
+pre-optimization nominal rollout to the final selected rollout (`final - nominal`).
 
 Evaluate a curated dataset:
 

@@ -182,19 +182,21 @@ COST_BREAKDOWN_COMPONENTS = (
     ("track", "Track"),
     ("heading", "Heading"),
     ("lateral_distance", "Lateral distance"),
+    ("lateral_boundary", "Lateral boundary"),
     ("lateral_yaw_error", "Lateral yaw error"),
     ("remaining_distance", "Remaining distance"),
     ("path_overshoot", "Path overshoot"),
     ("track_center", "Track center"),
     ("corner_buffer", "Corner buffer"),
     ("drivable_area", "Drivable area"),
+    ("obstacle", "Obstacle"),
+    ("road_border", "Road border"),
     ("acceleration_command", "Acceleration command"),
     ("steering_command", "Steering command"),
     ("lateral_acceleration", "Lateral acceleration"),
     ("lateral_jerk", "Lateral jerk"),
     ("longitudinal_jerk", "Longitudinal jerk"),
     ("steering_rate", "Steering rate"),
-    ("crash", "Crash"),
 )
 
 
@@ -239,11 +241,37 @@ def make_frame_figure(record: Dict):
     output_color = "green" if metrics["is_valid"] else "red"
     execution_time_ms = finite_or_none(float(metrics["execution_time_ms"]))
     execution_time_text = "N/A" if execution_time_ms is None else f"{execution_time_ms:.3f}"
+    effective_sample_size = finite_or_none(float(metrics["effective_sample_size"]))
+    effective_sample_size_text = (
+        "N/A" if effective_sample_size is None else f"{effective_sample_size:.3f}"
+    )
+    max_importance_weight = finite_or_none(float(metrics["max_importance_weight"]))
+    max_importance_weight_text = (
+        "N/A" if max_importance_weight is None else f"{max_importance_weight:.6f}"
+    )
+    output_cost_breakdown = result["cost_breakdown"]
+    nominal_cost_breakdown = result["nominal_cost_breakdown"]
+    output_cost = finite_or_none(float(output_cost_breakdown["total"]))
+    nominal_cost = finite_or_none(float(nominal_cost_breakdown["total"]))
+    costs_available = (
+        int(output_cost_breakdown.get("evaluated_timesteps", 0)) > 0
+        and int(nominal_cost_breakdown.get("evaluated_timesteps", 0)) > 0
+        and output_cost is not None
+        and nominal_cost is not None
+    )
+    delta_cost = output_cost - nominal_cost if costs_available else None
+    nominal_cost_text = "N/A" if not costs_available else f"{nominal_cost:.4g}"
+    output_cost_text = "N/A" if not costs_available else f"{output_cost:.4g}"
+    delta_cost_text = "N/A" if delta_cost is None else f"{delta_cost:+.4g}"
     invalid_index = metrics["first_invalid_index"]
     invalid_index_text = "N/A" if invalid_index is None else str(invalid_index)
     figure_title = (
         f"{result['config_name']} — {result['frame_id']}<br>"
         f"<sup>execution_time_ms: {execution_time_text} | "
+        f"effective_sample_size: {effective_sample_size_text} | "
+        f"max_importance_weight: {max_importance_weight_text} | "
+        f"nominal_cost: {nominal_cost_text} | output_cost: {output_cost_text} | "
+        f"delta_cost (output − nominal): {delta_cost_text}<br>"
         f"is_valid: {metrics['is_valid']} | was_rejected: {metrics['was_rejected']} | "
         f"invalidity_reasons: {metrics['invalidity_reason_names']} "
         f"({metrics['invalidity_reasons']}) | first_invalid_index: {invalid_index_text}</sup>"
@@ -407,7 +435,7 @@ def make_frame_figure(record: Dict):
             col=3,
         )
 
-    cost_breakdown = result["cost_breakdown"]
+    cost_breakdown = output_cost_breakdown
     cost_labels = []
     cost_values = []
     for field, label in COST_BREAKDOWN_COMPONENTS:
@@ -455,8 +483,9 @@ def make_frame_figure(record: Dict):
     cost_title.text = (
         "Cost breakdown "
         f"(total={total:.4g}, running={running_total:.4g}, "
-        f"terminal={terminal_total:.4g}, baseline={baseline_cost:.4g}, "
-        f"Δ={total - baseline_cost:.4g}, timesteps={timesteps})"
+        f"terminal={terminal_total:.4g}, best sampled={baseline_cost:.4g}, "
+        f"nominal={nominal_cost_text}, Δ={delta_cost_text}, "
+        f"timesteps={timesteps})"
     )
 
     figure.update_xaxes(title_text="Map X (m)", row=1, col=1)

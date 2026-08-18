@@ -28,13 +28,19 @@ class CostParams:
         self.track_center_coeff = 0.0
         self.accel_cmd_std_dev = 0.35
         self.steer_cmd_std_dev = 0.024
-        self.nominal_spline_smoothing_weight = 10.0
-        self.drivable_area_crossing_coeff = 100.0
+        self.nominal_curvature_min_chord_length_m = 1.5
+        self.lateral_boundary_soft_margin = 0.2
+        self.obstacle_safe_margin = 0.5
+        self.road_border_safe_margin = 0.3
+        self.drivable_area_safe_margin = 0.0
+        self.drivable_area_barrier_weight = 2000.0
+        self.crash_contact_penalty = 100000.0
 
 
 class RuntimeOptions:
     use_last_control_as_nominal = False
     use_temporal_mpt_as_nominal = False
+    enable_input_delay_compensation = True
 
 
 class VehicleParams:
@@ -64,17 +70,22 @@ class TestEvaluatorConfig(unittest.TestCase):
             path = write_parameters(
                 directory,
                 "    lambda: 500.0\n"
-                "    desired_speed: 2.5\n"
                 "    track_terminal_scale: 12.0\n"
                 "    remaining_distance_coeff: 150.0\n"
                 "    path_overshoot_coeff: 25.0\n"
                 "    track_center_coeff: 20.0\n"
                 "    accel_cmd_std_dev: 0.1\n"
                 "    steer_cmd_std_dev: 0.02\n"
-                "    nominal_spline_smoothing_weight: 25.0\n"
-                "    drivable_area_crossing_coeff: 10.0\n"
+                "    nominal_curvature_min_chord_length_m: 2.0\n"
+                "    lateral_boundary_soft_margin: 0.25\n"
+                "    obstacle_safe_margin: 0.6\n"
+                "    road_border_safe_margin: 0.4\n"
+                "    drivable_area_safe_margin: 0.1\n"
+                "    drivable_area_barrier_weight: 2500.0\n"
+                "    crash_contact_penalty: 120000.0\n"
                 "    use_last_control_as_nominal: true\n"
-                "    use_temporal_mpt_as_nominal: true\n",
+                "    use_temporal_mpt_as_nominal: true\n"
+                "    enable_input_delay_compensation: false\n",
             )
 
             configuration = make_configuration(Backend, optimizer_path=path)
@@ -86,10 +97,16 @@ class TestEvaluatorConfig(unittest.TestCase):
             self.assertEqual(configuration.cost_params.track_center_coeff, 20.0)
             self.assertEqual(configuration.cost_params.accel_cmd_std_dev, 0.1)
             self.assertEqual(configuration.cost_params.steer_cmd_std_dev, 0.02)
-            self.assertEqual(configuration.cost_params.nominal_spline_smoothing_weight, 25.0)
-            self.assertEqual(configuration.cost_params.drivable_area_crossing_coeff, 10.0)
+            self.assertEqual(configuration.cost_params.nominal_curvature_min_chord_length_m, 2.0)
+            self.assertEqual(configuration.cost_params.lateral_boundary_soft_margin, 0.25)
+            self.assertEqual(configuration.cost_params.obstacle_safe_margin, 0.6)
+            self.assertEqual(configuration.cost_params.road_border_safe_margin, 0.4)
+            self.assertEqual(configuration.cost_params.drivable_area_safe_margin, 0.1)
+            self.assertEqual(configuration.cost_params.drivable_area_barrier_weight, 2500.0)
+            self.assertEqual(configuration.cost_params.crash_contact_penalty, 120000.0)
             self.assertTrue(configuration.runtime_options.use_last_control_as_nominal)
             self.assertTrue(configuration.runtime_options.use_temporal_mpt_as_nominal)
+            self.assertFalse(configuration.runtime_options.enable_input_delay_compensation)
 
     def test_rejects_an_optimizer_parameter_missing_from_the_binding(self):
         with tempfile.TemporaryDirectory() as directory:
