@@ -138,6 +138,9 @@ py::dict cost_breakdown_to_dict(const mppi_optimizer::FirstOrderDubinsMppiCostBr
   result["lateral_jerk"] = breakdown.lateral_jerk;
   result["longitudinal_jerk"] = breakdown.longitudinal_jerk;
   result["steering_rate"] = breakdown.steering_rate;
+  result["kinematic_velocity_overlimit"] = breakdown.kinematic_velocity_overlimit;
+  result["kinematic_acceleration_overlimit"] = breakdown.kinematic_acceleration_overlimit;
+  result["kinematic_jerk_overlimit"] = breakdown.kinematic_jerk_overlimit;
   result["running_total"] = breakdown.running_total;
   result["terminal_total"] = breakdown.terminal_total;
   result["total"] = breakdown.total;
@@ -297,15 +300,19 @@ PYBIND11_MODULE(mppi_optimizer_py, module)
 
   module.def(
     "deserialize_tracked_objects_in_range",
-    [](const py::bytes & objects_cdr, const py::bytes & trajectory_cdr, const double margin) {
+    [](
+      const py::bytes & objects_cdr, const py::bytes & trajectory_cdr, const double margin,
+      const double prediction_extension_s) {
       const auto objects =
         deserialize_message<autoware_perception_msgs::msg::TrackedObjects>(objects_cdr);
       const auto trajectory =
         deserialize_message<autoware_planning_msgs::msg::Trajectory>(trajectory_cdr);
       return objects_to_list(
-        autoware::avoidance_target_detector::filter_objects_in_range(objects, trajectory, margin));
+        autoware::avoidance_target_detector::filter_objects_in_range(
+          objects, trajectory, margin, prediction_extension_s));
     },
-    py::arg("objects_cdr"), py::arg("trajectory_cdr"), py::arg("margin"));
+    py::arg("objects_cdr"), py::arg("trajectory_cdr"), py::arg("margin"),
+    py::arg("prediction_extension_s") = 0.0);
 
   py::class_<FirstOrderDubinsMppiCostParams>(module, "CostParams")
     .def(py::init<>())
@@ -330,8 +337,13 @@ PYBIND11_MODULE(mppi_optimizer_py, module)
     .def_readwrite("accel_cmd_coeff", &FirstOrderDubinsMppiCostParams::accel_cmd_coeff)
     .def_readwrite("steer_cmd_coeff", &FirstOrderDubinsMppiCostParams::steer_cmd_coeff)
     .def_readwrite("steer_rate_coeff", &FirstOrderDubinsMppiCostParams::steer_rate_coeff)
+    .def_readwrite("overlimit_coeff", &FirstOrderDubinsMppiCostParams::overlimit_coeff)
     .def_readwrite("accel_cmd_std_dev", &FirstOrderDubinsMppiCostParams::accel_cmd_std_dev)
     .def_readwrite("steer_cmd_std_dev", &FirstOrderDubinsMppiCostParams::steer_cmd_std_dev)
+    .def_readwrite(
+      "accel_cmd_noise_exponent", &FirstOrderDubinsMppiCostParams::accel_cmd_noise_exponent)
+    .def_readwrite(
+      "steer_cmd_noise_exponent", &FirstOrderDubinsMppiCostParams::steer_cmd_noise_exponent)
     .def_readwrite(
       "nominal_curvature_min_chord_length_m",
       &FirstOrderDubinsMppiCostParams::nominal_curvature_min_chord_length_m)
@@ -362,17 +374,32 @@ PYBIND11_MODULE(mppi_optimizer_py, module)
       "debug_trajectory_log_directory",
       &FirstOrderDubinsMppiRuntimeOptions::debug_trajectory_log_directory)
     .def_readwrite("ignore_obstacles", &FirstOrderDubinsMppiRuntimeOptions::ignore_obstacles)
+    .def_readwrite("ignore_road_borders", &FirstOrderDubinsMppiRuntimeOptions::ignore_road_borders)
     .def_readwrite(
       "ignore_drivable_area", &FirstOrderDubinsMppiRuntimeOptions::ignore_drivable_area)
     .def_readwrite(
       "force_cold_start_each_step", &FirstOrderDubinsMppiRuntimeOptions::force_cold_start_each_step)
     .def_readwrite("skip_if_invalid", &FirstOrderDubinsMppiRuntimeOptions::skip_if_invalid)
     .def_readwrite(
+      "min_optimization_length", &FirstOrderDubinsMppiRuntimeOptions::min_optimization_length)
+    .def_readwrite(
       "use_last_control_as_nominal",
       &FirstOrderDubinsMppiRuntimeOptions::use_last_control_as_nominal)
     .def_readwrite(
+      "enable_dynamic_reseeding", &FirstOrderDubinsMppiRuntimeOptions::enable_dynamic_reseeding)
+    .def_readwrite(
+      "dynamic_reseed_obstacle_cost_threshold",
+      &FirstOrderDubinsMppiRuntimeOptions::dynamic_reseed_obstacle_cost_threshold)
+    .def_readwrite(
+      "dynamic_reseed_road_border_cost_threshold",
+      &FirstOrderDubinsMppiRuntimeOptions::dynamic_reseed_road_border_cost_threshold)
+    .def_readwrite(
+      "evasive_rollout_fraction", &FirstOrderDubinsMppiRuntimeOptions::evasive_rollout_fraction)
+    .def_readwrite(
       "use_temporal_mpt_as_nominal",
       &FirstOrderDubinsMppiRuntimeOptions::use_temporal_mpt_as_nominal)
+    .def_readwrite(
+      "prevent_reverse_velocity", &FirstOrderDubinsMppiRuntimeOptions::prevent_reverse_velocity)
     .def_readwrite(
       "enable_input_delay_compensation",
       &FirstOrderDubinsMppiRuntimeOptions::enable_input_delay_compensation);
@@ -398,7 +425,14 @@ PYBIND11_MODULE(mppi_optimizer_py, module)
     .def_readwrite("cost_params", &MppiConfiguration::cost_params)
     .def_readwrite("runtime_options", &MppiConfiguration::runtime_options)
     .def_readwrite("vehicle_params", &MppiConfiguration::vehicle_params)
-    .def_readwrite("boundary_search_margin_m", &MppiConfiguration::boundary_search_margin_m);
+    .def_readwrite("boundary_search_margin_m", &MppiConfiguration::boundary_search_margin_m)
+    .def_readwrite("limit_velocity_from_map", &MppiConfiguration::limit_velocity_from_map)
+    .def_readwrite(
+      "limit_velocity_from_map_debug_lanelet_ids",
+      &MppiConfiguration::limit_velocity_from_map_debug_lanelet_ids)
+    .def_readwrite(
+      "limit_velocity_from_map_debug_max_velocities",
+      &MppiConfiguration::limit_velocity_from_map_debug_max_velocities);
 
   py::class_<MppiEvaluationSession>(module, "EvaluationSession")
     .def(
@@ -421,8 +455,9 @@ PYBIND11_MODULE(mppi_optimizer_py, module)
         const std::uint64_t timestamp_ns, const py::bytes & trajectory_cdr,
         const py::bytes & odometry_cdr, const py::bytes & tracked_objects_cdr,
         const py::object & acceleration_cdr, const py::object & steering_cdr,
-        const double odometry_age_ms, const py::object & acceleration_age_ms,
-        const py::object & steering_age_ms, const py::object & tracked_objects_age_ms) {
+        const py::object & velocity_limit_cdr, const double odometry_age_ms,
+        const py::object & acceleration_age_ms, const py::object & steering_age_ms,
+        const py::object & tracked_objects_age_ms, const py::object & velocity_limit_age_ms) {
         MppiInputFrame frame;
         frame.frame_id = frame_id;
         frame.timestamp_ns = timestamp_ns;
@@ -434,6 +469,9 @@ PYBIND11_MODULE(mppi_optimizer_py, module)
             acceleration_cdr);
         frame.steering_status =
           deserialize_optional_message<autoware_vehicle_msgs::msg::SteeringReport>(steering_cdr);
+        frame.velocity_limit =
+          deserialize_optional_message<autoware_internal_planning_msgs::msg::VelocityLimit>(
+            velocity_limit_cdr);
         frame.tracked_objects =
           deserialize_message<autoware_perception_msgs::msg::TrackedObjects>(tracked_objects_cdr);
         frame.odometry_age_ms = odometry_age_ms;
@@ -446,6 +484,9 @@ PYBIND11_MODULE(mppi_optimizer_py, module)
         if (!tracked_objects_age_ms.is_none()) {
           frame.tracked_objects_age_ms = tracked_objects_age_ms.cast<double>();
         }
+        if (!velocity_limit_age_ms.is_none()) {
+          frame.velocity_limit_age_ms = velocity_limit_age_ms.cast<double>();
+        }
 
         EvaluatedFrameResult result;
         {
@@ -457,6 +498,8 @@ PYBIND11_MODULE(mppi_optimizer_py, module)
       py::arg("frame_id"), py::arg("timestamp_ns"), py::arg("trajectory_cdr"),
       py::arg("odometry_cdr"), py::arg("tracked_objects_cdr"),
       py::arg("acceleration_cdr") = py::none(), py::arg("steering_cdr") = py::none(),
-      py::arg("odometry_age_ms") = 0.0, py::arg("acceleration_age_ms") = py::none(),
-      py::arg("steering_age_ms") = py::none(), py::arg("tracked_objects_age_ms") = py::none());
+      py::arg("velocity_limit_cdr") = py::none(), py::arg("odometry_age_ms") = 0.0,
+      py::arg("acceleration_age_ms") = py::none(), py::arg("steering_age_ms") = py::none(),
+      py::arg("tracked_objects_age_ms") = py::none(),
+      py::arg("velocity_limit_age_ms") = py::none());
 }

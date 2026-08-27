@@ -67,10 +67,12 @@ def evaluate(session, frame):
         messages["tracked_objects"],
         messages.get("acceleration"),
         messages.get("steering"),
+        messages.get("external_velocity_limit"),
         frame.ages_ms["odometry"],
         frame.ages_ms.get("acceleration"),
         frame.ages_ms.get("steering"),
         frame.ages_ms.get("tracked_objects"),
+        frame.ages_ms.get("external_velocity_limit"),
     )
 
 
@@ -98,11 +100,29 @@ def box_outline(
 
 def object_filter_margin(configuration) -> float:
     vehicle = configuration.vehicle_params
-    max_longitudinal_offset = abs(float(vehicle.ego_axle_to_box_center)) + 0.5 * float(
-        vehicle.ego_length
+    half_length = 0.5 * float(vehicle.ego_length)
+    center = float(vehicle.ego_axle_to_box_center)
+    max_longitudinal_offset = max(abs(center - half_length), abs(center + half_length))
+    half_width = 0.5 * float(vehicle.ego_width)
+    collision_margin = float(configuration.cost_params.obstacle_collision_margin)
+    collision_radius = math.hypot(
+        max_longitudinal_offset + collision_margin,
+        half_width + collision_margin,
     )
-    vehicle_radius = math.hypot(max_longitudinal_offset, 0.5 * float(vehicle.ego_width))
-    return vehicle_radius + float(configuration.cost_params.boundary_threshold)
+    barrier_radius = math.hypot(max_longitudinal_offset, half_width) + float(
+        configuration.cost_params.obstacle_safe_margin
+    )
+    return max(collision_radius, barrier_radius)
+
+
+def object_filter_prediction_extension(configuration) -> float:
+    time_step_s = 0.1
+    maximum_delay_s = max(
+        float(configuration.vehicle_params.acc_time_delay),
+        float(configuration.vehicle_params.steer_time_delay),
+    )
+    delay_steps = max(0, math.floor(maximum_delay_s / time_step_s + 0.5))
+    return delay_steps * time_step_s
 
 
 def add_segments(figure: go.Figure, segments: Iterable, name: str, color: str) -> None:
@@ -218,6 +238,9 @@ COST_BREAKDOWN_COMPONENTS = (
     ("lateral_jerk", "Lateral jerk"),
     ("longitudinal_jerk", "Longitudinal jerk"),
     ("steering_rate", "Steering rate"),
+    ("kinematic_velocity_overlimit", "Velocity overlimit"),
+    ("kinematic_acceleration_overlimit", "Acceleration overlimit"),
+    ("kinematic_jerk_overlimit", "Jerk overlimit"),
 )
 
 
@@ -307,6 +330,7 @@ COST_OVERRIDE_GROUPS = (
             ("drivable_area_safe_margin", "Drivable-area safe margin (m)", 0.0, 0.05),
             ("drivable_area_barrier_weight", "Drivable-area barrier weight", 0.0, 100.0),
             ("crash_contact_penalty", "Contact penalty", 0.0, 1000.0),
+            ("overlimit_coeff", "Kinematic overlimit coefficient", 0.0, 100.0),
         ),
     ),
     (
@@ -314,6 +338,8 @@ COST_OVERRIDE_GROUPS = (
         (
             ("accel_cmd_std_dev", "Acceleration-command std. dev. (m/s²)", 0.001, 0.01),
             ("steer_cmd_std_dev", "Steering-command std. dev. (rad)", 0.001, 0.001),
+            ("accel_cmd_noise_exponent", "Acceleration noise exponent", 0.0, 0.1),
+            ("steer_cmd_noise_exponent", "Steering noise exponent", 0.0, 0.1),
             (
                 "nominal_curvature_min_chord_length_m",
                 "Nominal curvature minimum chord length (m)",
@@ -491,11 +517,18 @@ def render_main_explorer() -> None:
         bool(runtime_options.enable_debug_trajectory_log),
         str(runtime_options.debug_trajectory_log_directory),
         bool(runtime_options.ignore_obstacles),
+        bool(runtime_options.ignore_road_borders),
         bool(runtime_options.ignore_drivable_area),
         bool(runtime_options.force_cold_start_each_step),
         bool(runtime_options.skip_if_invalid),
+        float(runtime_options.min_optimization_length),
         bool(runtime_options.use_last_control_as_nominal),
+        bool(runtime_options.enable_dynamic_reseeding),
+        float(runtime_options.dynamic_reseed_obstacle_cost_threshold),
+        float(runtime_options.dynamic_reseed_road_border_cost_threshold),
+        float(runtime_options.evasive_rollout_fraction),
         bool(runtime_options.use_temporal_mpt_as_nominal),
+        bool(runtime_options.prevent_reverse_velocity),
         bool(runtime_options.enable_input_delay_compensation),
     )
 
@@ -617,6 +650,7 @@ def render_main_explorer() -> None:
                 frame.messages["tracked_objects"],
                 frame.messages["reference_trajectory"],
                 object_filter_margin(configuration),
+                object_filter_prediction_extension(configuration),
             )
         object_name = "Tracked objects"
         object_color = "gray"

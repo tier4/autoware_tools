@@ -62,7 +62,12 @@ class McapZohSynchronizer:
 
     _STATIC_KEYS = ("lanelet_map", "route")
     _REQUIRED_ZOH_KEYS = ("odometry", "tracked_objects")
-    _OPTIONAL_ZOH_KEYS = ("acceleration", "steering", "original_trajectory")
+    _OPTIONAL_ZOH_KEYS = (
+        "acceleration",
+        "steering",
+        "original_trajectory",
+        "external_velocity_limit",
+    )
     _PAYLOAD_CACHE_SIZE = 128
 
     def __init__(self, bag_path: str, topics_config_path: str):
@@ -186,7 +191,10 @@ class McapZohSynchronizer:
         warnings: List[str] = []
         is_usable = True
 
-        for key in self._STATIC_KEYS + self._REQUIRED_ZOH_KEYS + self._OPTIONAL_ZOH_KEYS:
+        synchronized_keys = self._STATIC_KEYS + self._REQUIRED_ZOH_KEYS + tuple(
+            key for key in self._OPTIONAL_ZOH_KEYS if key in self.topic_map
+        )
+        for key in synchronized_keys:
             record, age_ms = self._latest_at_or_before(key, timestamp_ns)
             ages_ms[key] = age_ms
             if record is not None:
@@ -202,7 +210,11 @@ class McapZohSynchronizer:
             if key in self._REQUIRED_ZOH_KEYS and age_ms > self.required_stale_ms:
                 warnings.append(f"{key} is stale by {age_ms:.1f} ms")
                 is_usable = False
-            if key in self._OPTIONAL_ZOH_KEYS and age_ms > self.optional_stale_ms:
+            if (
+                key in self._OPTIONAL_ZOH_KEYS
+                and key != "external_velocity_limit"
+                and age_ms > self.optional_stale_ms
+            ):
                 warnings.append(f"{key} is stale by {age_ms:.1f} ms and will be omitted")
                 messages.pop(key, None)
 

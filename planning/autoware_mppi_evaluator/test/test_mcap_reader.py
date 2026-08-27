@@ -21,13 +21,15 @@ try:
     import rosbag2_py  # noqa: F401
 except ModuleNotFoundError:
     rosbag2_py = types.ModuleType("rosbag2_py")
+    sys.modules["rosbag2_py"] = rosbag2_py
+
+if not hasattr(rosbag2_py, "StorageFilter"):
 
     class StorageFilter:
         def __init__(self, topics):
             self.topics = topics
 
     rosbag2_py.StorageFilter = StorageFilter
-    sys.modules["rosbag2_py"] = rosbag2_py
 
 from autoware_mppi_evaluator.mcap_reader import McapZohSynchronizer
 from autoware_mppi_evaluator.mcap_reader import MessageReference

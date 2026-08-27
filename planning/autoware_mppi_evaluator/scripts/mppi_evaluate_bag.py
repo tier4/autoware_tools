@@ -79,10 +79,12 @@ def evaluate_frame(session, frame):
         messages["tracked_objects"],
         messages.get("acceleration"),
         messages.get("steering"),
+        messages.get("external_velocity_limit"),
         frame.ages_ms["odometry"],
         frame.ages_ms.get("acceleration"),
         frame.ages_ms.get("steering"),
         frame.ages_ms.get("tracked_objects"),
+        frame.ages_ms.get("external_velocity_limit"),
     )
 
 
@@ -197,6 +199,9 @@ COST_BREAKDOWN_COMPONENTS = (
     ("lateral_jerk", "Lateral jerk"),
     ("longitudinal_jerk", "Longitudinal jerk"),
     ("steering_rate", "Steering rate"),
+    ("kinematic_velocity_overlimit", "Velocity overlimit"),
+    ("kinematic_acceleration_overlimit", "Acceleration overlimit"),
+    ("kinematic_jerk_overlimit", "Jerk overlimit"),
 )
 
 
@@ -585,6 +590,7 @@ def main() -> int:
         parser.error("The selected frame range is empty")
 
     rows: List[Dict] = []
+    summary_rows: List[Dict] = []
     optimization_times: List[float] = []
     visualization_records: Dict[str, List[Dict]] = {
         config_name: [] for config_name, _ in arguments.optimizer_config
@@ -603,14 +609,14 @@ def main() -> int:
         environment_key = None
         for frame in selected_frames(arguments.start, stop):
             if not frame.is_usable:
-                rows.append(
-                    {
-                        "frame_id": frame.frame_id,
-                        "timestamp_ns": frame.timestamp_ns,
-                        "config_name": config_name,
-                        "error": "; ".join(frame.warnings),
-                    }
-                )
+                error_row = {
+                    "frame_id": frame.frame_id,
+                    "timestamp_ns": frame.timestamp_ns,
+                    "config_name": config_name,
+                    "error": "; ".join(frame.warnings),
+                }
+                rows.append(error_row)
+                summary_rows.append(error_row)
                 continue
 
             next_environment_key = (
@@ -641,30 +647,31 @@ def main() -> int:
                     visualization_records[config_name] = select_visualization_frames(
                         candidates, arguments.visualize_limit
                     )
+                row = {
+                    "frame_id": result["frame_id"],
+                    "timestamp_ns": result["timestamp_ns"],
+                    "config_name": result["config_name"],
+                }
+                row.update(
+                    {key: finite_or_none(value) for key, value in result["metrics"].items()}
+                )
+                summary_rows.append(row)
                 if (frame.index - arguments.start) % arguments.output_stride == 0:
-                    row = {
-                        "frame_id": result["frame_id"],
-                        "timestamp_ns": result["timestamp_ns"],
-                        "config_name": result["config_name"],
-                    }
-                    row.update(
-                        {key: finite_or_none(value) for key, value in result["metrics"].items()}
-                    )
                     rows.append(row)
             except Exception as error:
-                rows.append(
-                    {
-                        "frame_id": frame.frame_id,
-                        "timestamp_ns": frame.timestamp_ns,
-                        "config_name": config_name,
-                        "error": str(error),
-                    }
-                )
+                error_row = {
+                    "frame_id": frame.frame_id,
+                    "timestamp_ns": frame.timestamp_ns,
+                    "config_name": config_name,
+                    "error": str(error),
+                }
+                rows.append(error_row)
+                summary_rows.append(error_row)
                 if arguments.mode == "chronological":
                     session.reset()
 
     output_base = Path(arguments.output).expanduser().resolve()
-    json_payload = {"schema_version": 1, "summary": summarize(rows), "frames": rows}
+    json_payload = {"schema_version": 1, "summary": summarize(summary_rows), "frames": rows}
     atomic_write(output_base.with_suffix(".json"), json.dumps(json_payload, indent=2) + "\n")
 
     fieldnames = sorted({key for row in rows for key in row})

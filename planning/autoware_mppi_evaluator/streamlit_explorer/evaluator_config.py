@@ -45,24 +45,31 @@ def make_configuration(
     configuration = backend.Configuration()
     configuration.name = name
 
-    optimizer = _ros_parameters(optimizer_path)
+    optimizer_document = _ros_parameters(optimizer_path)
+    optimizer = optimizer_document.get("mppi_optimizer", optimizer_document)
+    if not isinstance(optimizer, dict):
+        raise ValueError(f"mppi_optimizer must be a parameter mapping in {optimizer_path}")
     cost = backend.CostParams()
     runtime = backend.RuntimeOptions()
     unsupported = []
+    ignored_plugin_parameters = {"enabled", "shadow_mode"}
     for key, value in optimizer.items():
         target_key = "lambda_" if key == "lambda" else key
-        recognized = False
+        recognized = key in ignored_plugin_parameters
         if hasattr(cost, target_key):
             setattr(cost, target_key, value)
             recognized = True
         if hasattr(runtime, key):
             setattr(runtime, key, value)
             recognized = True
+        if hasattr(configuration, key):
+            setattr(configuration, key, value)
+            recognized = True
         if not recognized:
             unsupported.append(key)
     if unsupported:
         names = ", ".join(sorted(unsupported))
-        print(f"Unsupported MPPI optimizer parameters in {optimizer_path}: {names}")
+        raise ValueError(f"Unsupported MPPI optimizer parameters in {optimizer_path}: {names}")
     configuration.cost_params = cost
     configuration.runtime_options = runtime
 

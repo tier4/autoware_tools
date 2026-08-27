@@ -17,6 +17,7 @@
 #include "autoware/avoidance_target_detector/boundary.hpp"
 #include "autoware/avoidance_target_detector/object_filtering.hpp"
 #include "autoware/mppi_optimizer/detail/trajectory_utils.hpp"
+#include "autoware/mppi_optimizer/first_order_dubins_mppi_kinematic_limits_conversion.hpp"
 #include "autoware/mppi_optimizer/predicted_objects_obstacles.hpp"
 #include "autoware/mppi_optimizer/tracked_objects_obstacles.hpp"
 
@@ -57,6 +58,30 @@ std::vector<mppi_optimizer::Segment> to_mppi_segments(
        static_cast<float>(boost::geometry::get<1, 1>(segment))});
   }
   return result;
+}
+
+avoidance_target_detector::ExtendedRouteHandler::VelocityLimitOverrides
+make_velocity_limit_overrides(const MppiConfiguration & configuration)
+{
+  if (
+    configuration.limit_velocity_from_map_debug_lanelet_ids.size() !=
+    configuration.limit_velocity_from_map_debug_max_velocities.size()) {
+    throw std::invalid_argument("Map velocity-limit override arrays must have equal lengths");
+  }
+  avoidance_target_detector::ExtendedRouteHandler::VelocityLimitOverrides overrides;
+  for (std::size_t index = 0U;
+       index < configuration.limit_velocity_from_map_debug_lanelet_ids.size(); ++index) {
+    const auto velocity = configuration.limit_velocity_from_map_debug_max_velocities[index];
+    if (!std::isfinite(velocity) || velocity < 0.0) {
+      throw std::invalid_argument("Map velocity-limit overrides must be finite and non-negative");
+    }
+    const auto inserted = overrides.emplace(
+      configuration.limit_velocity_from_map_debug_lanelet_ids[index], velocity);
+    if (!inserted.second) {
+      throw std::invalid_argument("Map velocity-limit override IDs must be unique");
+    }
+  }
+  return overrides;
 }
 
 double point_to_segment_distance(
@@ -253,7 +278,8 @@ struct MppiEvaluationSession::Impl
   Impl(MppiEnvironment environment_in, MppiConfiguration configuration_in, EvaluationMode mode_in)
   : environment(std::move(environment_in)),
     configuration(std::move(configuration_in)),
-    mode(mode_in)
+    mode(mode_in),
+    map_velocity_limit_overrides(make_velocity_limit_overrides(configuration))
   {
     route_handler = std::make_unique<avoidance_target_detector::ExtendedRouteHandler>(
       environment.lanelet_map, environment.route);
@@ -280,13 +306,24 @@ struct MppiEvaluationSession::Impl
   {
     const double half_length = 0.5 * static_cast<double>(configuration.vehicle_params.ego_length);
     const double half_width = 0.5 * static_cast<double>(configuration.vehicle_params.ego_width);
+    const double center =
+      static_cast<double>(configuration.vehicle_params.ego_axle_to_box_center);
     const double max_longitudinal_offset =
-      std::abs(static_cast<double>(configuration.vehicle_params.ego_axle_to_box_center)) +
-      half_length;
-    const double margin = std::hypot(max_longitudinal_offset, half_width) +
-                          configuration.cost_params.boundary_threshold;
+      std::max(std::abs(center - half_length), std::abs(center + half_length));
+    const double collision_margin = configuration.cost_params.obstacle_collision_margin;
+    const double collision_envelope_radius = std::hypot(
+      max_longitudinal_offset + collision_margin, half_width + collision_margin);
+    const double barrier_envelope_radius =
+      std::hypot(max_longitudinal_offset, half_width) +
+      configuration.cost_params.obstacle_safe_margin;
+    const double margin = std::max(collision_envelope_radius, barrier_envelope_radius);
+    const double max_vehicle_delay_s = std::max(
+      static_cast<double>(configuration.vehicle_params.acc_time_delay),
+      static_cast<double>(configuration.vehicle_params.steer_time_delay));
+    const double delay_steps = std::max(0.0, std::round(max_vehicle_delay_s / kMppiDt));
+    const double prediction_extension_s = delay_steps * kMppiDt;
     const auto objects_in_range = avoidance_target_detector::filter_objects_in_range(
-      frame.tracked_objects, frame.reference_trajectory, margin);
+      frame.tracked_objects, frame.reference_trajectory, margin, prediction_extension_s);
 
     if (mode == EvaluationMode::isolated) {
       return objects_in_range;
@@ -333,10 +370,29 @@ struct MppiEvaluationSession::Impl
     evaluated.drivable_area = to_mppi_segments(
       route_handler->get_drivable_area_around_trajectory(frame.reference_trajectory, margin));
 
+    auto kinematic_limits = frame.velocity_limit
+                              ? mppi_optimizer::makeKinematicLimits(*frame.velocity_limit)
+                              : mppi_optimizer::FirstOrderDubinsMppiKinematicLimits{};
+    if (configuration.limit_velocity_from_map) {
+      kinematic_limits.max_velocity_by_reference_point.reserve(
+        frame.reference_trajectory.points.size());
+      for (const auto & point : frame.reference_trajectory.points) {
+        const auto map_limit = route_handler->get_velocity_limit(
+          point.pose.position, map_velocity_limit_overrides);
+        kinematic_limits.max_velocity_by_reference_point.push_back(
+          map_limit && std::isfinite(*map_limit) && *map_limit >= 0.0
+            ? std::make_optional(static_cast<float>(*map_limit))
+            : std::nullopt);
+      }
+    }
+
+    // Keep one-time CUDA/model setup outside the per-frame latency metric.
+    optimizer->initialize();
     const auto start = std::chrono::steady_clock::now();
     evaluated.optimize_result = optimizer->optimizeTrajectory(
       frame.reference_trajectory, frame.odometry, frame.acceleration, frame.steering_status,
-      evaluated.selected_objects, evaluated.road_borders, evaluated.drivable_area);
+      evaluated.selected_objects, evaluated.road_borders, evaluated.drivable_area,
+      kinematic_limits);
     const auto end = std::chrono::steady_clock::now();
     evaluated.metrics.execution_time_ms =
       std::chrono::duration<double, std::milli>(end - start).count();
@@ -349,6 +405,8 @@ struct MppiEvaluationSession::Impl
   MppiEnvironment environment;
   MppiConfiguration configuration;
   EvaluationMode mode;
+  avoidance_target_detector::ExtendedRouteHandler::VelocityLimitOverrides
+    map_velocity_limit_overrides;
   std::unique_ptr<avoidance_target_detector::ExtendedRouteHandler> route_handler;
   avoidance_target_detector::TrackedObjectSelector object_selector;
   std::unique_ptr<mppi_optimizer::FirstOrderDubinsMppiInterface> optimizer;

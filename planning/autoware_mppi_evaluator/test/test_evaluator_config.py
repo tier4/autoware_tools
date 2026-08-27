@@ -39,6 +39,10 @@ class CostParams:
 
 class RuntimeOptions:
     use_last_control_as_nominal = False
+    enable_dynamic_reseeding = False
+    dynamic_reseed_obstacle_cost_threshold = 100000.0
+    dynamic_reseed_road_border_cost_threshold = 100000.0
+    evasive_rollout_fraction = 0.0625
     use_temporal_mpt_as_nominal = False
     enable_input_delay_compensation = True
 
@@ -48,7 +52,10 @@ class VehicleParams:
 
 
 class Configuration:
-    pass
+    def __init__(self):
+        self.limit_velocity_from_map = False
+        self.limit_velocity_from_map_debug_lanelet_ids = []
+        self.limit_velocity_from_map_debug_max_velocities = []
 
 
 class Backend:
@@ -65,6 +72,40 @@ def write_parameters(directory: str, contents: str) -> str:
 
 
 class TestEvaluatorConfig(unittest.TestCase):
+    def test_unwraps_the_production_mppi_optimizer_namespace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_parameters(
+                directory,
+                "    mppi_optimizer:\n"
+                "      enabled: true\n"
+                "      shadow_mode: false\n"
+                "      lambda: 100.0\n"
+                "      enable_dynamic_reseeding: true\n"
+                "      dynamic_reseed_obstacle_cost_threshold: 11000.0\n"
+                "      dynamic_reseed_road_border_cost_threshold: 12000.0\n"
+                "      evasive_rollout_fraction: 0.05\n"
+                "      limit_velocity_from_map: true\n"
+                "      limit_velocity_from_map_debug_lanelet_ids: [42]\n"
+                "      limit_velocity_from_map_debug_max_velocities: [3.5]\n",
+            )
+
+            configuration = make_configuration(Backend, optimizer_path=path)
+
+            self.assertEqual(configuration.cost_params.lambda_, 100.0)
+            self.assertTrue(configuration.runtime_options.enable_dynamic_reseeding)
+            self.assertEqual(
+                configuration.runtime_options.dynamic_reseed_obstacle_cost_threshold,
+                11000.0,
+            )
+            self.assertEqual(
+                configuration.runtime_options.dynamic_reseed_road_border_cost_threshold,
+                12000.0,
+            )
+            self.assertEqual(configuration.runtime_options.evasive_rollout_fraction, 0.05)
+            self.assertTrue(configuration.limit_velocity_from_map)
+            self.assertEqual(configuration.limit_velocity_from_map_debug_lanelet_ids, [42])
+            self.assertEqual(configuration.limit_velocity_from_map_debug_max_velocities, [3.5])
+
     def test_loads_current_cost_and_runtime_parameters(self):
         with tempfile.TemporaryDirectory() as directory:
             path = write_parameters(

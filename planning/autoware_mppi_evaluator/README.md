@@ -20,6 +20,10 @@ The required inputs are:
 
 Acceleration and steering reports are optional.
 
+The external velocity limit is optional and, like the production polling subscriber, the latest
+message remains active until it is replaced. Map-derived velocity limits are reconstructed when
+`limit_velocity_from_map` is enabled in the optimizer parameters.
+
 The default topic configuration uses the diffusion planner MPPI reference debug topic.
 
 This topic preserves the exact trajectory that entered the recorded MPPI call.
@@ -62,9 +66,11 @@ Provide these ROS parameter files:
 
 The evaluator converts vehicle dimensions with the same formulas as `makeVehicleParams()`.
 
-The native parameter structures provide defaults when a file omits a value. The explorer exposes
-the optimizer's current flat cost structure, including terminal tracking scale, corridor-end costs,
-sampling standard deviations, collision costs, and goal costs.
+The loader accepts the production `mppi_optimizer` ROS parameter namespace and rejects unknown
+optimizer parameters so an evaluation cannot silently fall back to a different configuration. The
+native parameter structures provide defaults when a recognized value is omitted. The explorer
+exposes the optimizer's current cost structure, including terminal tracking scale, corridor-end
+costs, colored-noise sampling parameters, collision costs, and kinematic-limit costs.
 
 ## Build
 
@@ -116,7 +122,8 @@ Repeat `--optimizer-config NAME=PATH` to compare configurations.
 
 The command writes a frame CSV file and a JSON file with aggregate latency and rejection counts.
 
-`--output-stride` reduces output rows but still evaluates every chronological frame.
+`--output-stride` reduces output rows but still evaluates every chronological frame. Aggregate
+statistics always include every evaluated frame, independent of the output stride.
 
 Add `--visualize` to write a Plotly report to `<output>.html`. The report prioritizes invalid
 or rejected frames, then fills the remaining `--visualize-limit` slots per configuration with
@@ -168,9 +175,13 @@ The evaluator reports:
 - Maximum acceleration-command rate
 - Maximum steering-state rate
 - Obstacle and boundary clearance
+- Velocity-, acceleration-, and jerk-overlimit cost components when kinematic limits are active
 
 The acceleration trajectory field contains an MPPI command, not the simulated acceleration state.
 
 The obstacle clearance uses conservative circumscribed circles around each vehicle box.
 
 The boundary clearance uses a conservative circle around the centered ego vehicle box.
+
+One-time CUDA and model initialization is excluded from `execution_time_ms`, including in isolated
+mode.

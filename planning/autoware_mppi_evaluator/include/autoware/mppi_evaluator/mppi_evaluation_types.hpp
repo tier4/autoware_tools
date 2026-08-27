@@ -17,6 +17,7 @@
 
 #include "autoware/mppi_optimizer/first_order_dubins_mppi_interface.hpp"
 
+#include <autoware_internal_planning_msgs/msg/velocity_limit.hpp>
 #include <autoware_map_msgs/msg/lanelet_map_bin.hpp>
 #include <autoware_planning_msgs/msg/lanelet_route.hpp>
 
@@ -40,11 +41,13 @@ struct MppiInputFrame
   mppi_optimizer::Odometry odometry;
   std::optional<geometry_msgs::msg::AccelWithCovarianceStamped> acceleration;
   std::optional<autoware_vehicle_msgs::msg::SteeringReport> steering_status;
+  std::optional<autoware_internal_planning_msgs::msg::VelocityLimit> velocity_limit;
   mppi_optimizer::TrackedObjects tracked_objects;
   double odometry_age_ms{0.0};
   std::optional<double> acceleration_age_ms;
   std::optional<double> steering_age_ms;
   std::optional<double> tracked_objects_age_ms;
+  std::optional<double> velocity_limit_age_ms;
 };
 
 struct MppiEnvironment
@@ -60,6 +63,9 @@ struct MppiConfiguration
   mppi_optimizer::FirstOrderDubinsMppiRuntimeOptions runtime_options;
   mppi_optimizer::FirstOrderDubinsMppiVehicleParams vehicle_params;
   double boundary_search_margin_m{1.0};
+  bool limit_velocity_from_map{false};
+  std::vector<std::int64_t> limit_velocity_from_map_debug_lanelet_ids;
+  std::vector<double> limit_velocity_from_map_debug_max_velocities;
 };
 
 struct FrameEvaluationMetrics
