@@ -1,0 +1,22 @@
+topics:
+  reference_trajectory: /planning/trajectory_generator/neural_network_based_planner/trajectory_processor/debug/mppi/reference_trajectory
+  original_trajectory: /planning/trajectory_generator/neural_network_based_planner/trajectory_processor/debug/mppi/optimized_trajectory
+  odometry: /localization/kinematic_state
+  acceleration: /localization/acceleration
+  steering: /vehicle/status/steering_status
+  external_velocity_limit: /planning/scenario_planning/max_velocity_default
+  tracked_objects: /perception/object_recognition/tracking/objects
+  lanelet_map: /map/vector_map
+  route: /planning/route
+
+thresholds:
+  required_stale_ms: 100.0
+  optional_stale_ms: 250.0
+
+parameter_files:
+  vehicle_information:
+    package: j6_gen2_description
+    path: config/vehicle_info.param.yaml
+  vehicle_dynamics:
+    package: j6_gen2_description
+    path: config/simulator_model.param.yaml
