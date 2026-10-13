@@ -22,6 +22,7 @@
 
 #include <autoware_perception_msgs/msg/object_classification.hpp>
 
+#include <algorithm>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -104,10 +105,21 @@ QList<QCommandLineOption> make_object_filter_options()
       "remove the objects matching the filter options instead of keeping them")};
 }
 
+QStringList split_numbers(const QString & value)
+{
+  const QStringList values = value.split(',', Qt::SkipEmptyParts);
+  const auto is_number = [](const QString & str) {
+    bool ok = false;
+    str.toDouble(&ok);
+    return ok;
+  };
+  return std::all_of(values.begin(), values.end(), is_number) ? values : QStringList{};
+}
+
 bool parse_filter_radius(
   const QString & value, autoware::planning_debug_tools::utils::ObjectFilterParam & filter)
 {
-  const QStringList values = value.split(',', Qt::SkipEmptyParts);
+  const QStringList values = split_numbers(value);
   if (values.size() == 1) {
     filter.max_radius = values[0].toDouble();
   } else if (values.size() == 2) {
@@ -127,7 +139,7 @@ bool parse_filter_radius(
 bool parse_filter_angle(
   const QString & value, autoware::planning_debug_tools::utils::ObjectFilterParam & filter)
 {
-  const QStringList values = value.split(',', Qt::SkipEmptyParts);
+  const QStringList values = split_numbers(value);
   const auto is_valid = [](const double deg) { return -180.0 <= deg && deg <= 180.0; };
   if (values.size() != 2 || !is_valid(values[0].toDouble()) || !is_valid(values[1].toDouble())) {
     std::cerr << "Error: --filter-angle must be <min>,<max> within [-180, 180]" << std::endl;
