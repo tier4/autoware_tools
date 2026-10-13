@@ -19,6 +19,8 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rosbag2_cpp/reader.hpp>
 
+#include <autoware_perception_msgs/msg/object_classification.hpp>
+#include <autoware_perception_msgs/msg/predicted_objects.hpp>
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/quaternion.hpp>
@@ -27,9 +29,13 @@
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/LinearMath/Quaternion.h>
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -219,6 +225,72 @@ void translate_objects_coordinate(
     const double new_yaw = log_object_yaw + log_ego_yaw - ego_yaw;
     log_object_pose.orientation = get_quaternion_from_yaw(new_yaw);
   }
+}
+
+struct ObjectFilterParam
+{
+  bool enabled{false};
+  double min_radius{0.0};
+  double max_radius{std::numeric_limits<double>::max()};
+  double min_angle{-M_PI};  // [rad] in the ego frame, wraps through the rear if min > max
+  double max_angle{M_PI};
+  std::vector<uint8_t> classes;  // empty means all classes
+  bool invert{false};
+};
+
+// check if the object matches the filter around the ego pose
+inline bool is_object_matched(
+  const geometry_msgs::msg::Pose & ego_pose, const ObjectFilterParam & filter,
+  const geometry_msgs::msg::Point & position,
+  const std::vector<autoware_perception_msgs::msg::ObjectClassification> & classification)
+{
+  const double distance = calculate_distance_2d(ego_pose.position, position);
+  if (distance < filter.min_radius || filter.max_radius < distance) {
+    return false;
+  }
+
+  const double angle = normalize_radian(
+    std::atan2(position.y - ego_pose.position.y, position.x - ego_pose.position.x) -
+    get_yaw_from_quaternion(ego_pose.orientation));
+  const bool is_in_angle = filter.min_angle <= filter.max_angle
+                             ? filter.min_angle <= angle && angle <= filter.max_angle
+                             : filter.min_angle <= angle || angle <= filter.max_angle;
+  if (!is_in_angle) {
+    return false;
+  }
+
+  if (filter.classes.empty()) {
+    return true;
+  }
+  if (classification.empty()) {
+    return false;
+  }
+  const auto label = std::max_element(
+                       classification.begin(), classification.end(),
+                       [](const auto & a, const auto & b) { return a.probability < b.probability; })
+                       ->label;
+  return std::find(filter.classes.begin(), filter.classes.end(), label) != filter.classes.end();
+}
+
+// keep objects matching the filter around the ego pose (remove them if filter.invert)
+template <typename ObjectsT>
+void filter_objects(
+  const geometry_msgs::msg::Pose & ego_pose, const ObjectFilterParam & filter,
+  ObjectsT & objects_msg)
+{
+  const auto is_removed = [&](const auto & object) {
+    const auto & position = [&]() -> const geometry_msgs::msg::Point & {
+      if constexpr (std::is_same_v<ObjectsT, autoware_perception_msgs::msg::PredictedObjects>) {
+        return object.kinematics.initial_pose_with_covariance.pose.position;
+      } else {
+        return object.kinematics.pose_with_covariance.pose.position;
+      }
+    }();
+    return is_object_matched(ego_pose, filter, position, object.classification) == filter.invert;
+  };
+
+  auto & objects = objects_msg.objects;
+  objects.erase(std::remove_if(objects.begin(), objects.end(), is_removed), objects.end());
 }
 
 }  // namespace autoware::planning_debug_tools::utils

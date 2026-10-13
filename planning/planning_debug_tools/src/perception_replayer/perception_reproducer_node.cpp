@@ -19,69 +19,10 @@
 #include <QCoreApplication>
 #include <rclcpp/rclcpp.hpp>
 
-#include <autoware_perception_msgs/msg/object_classification.hpp>
-
 #include <iostream>
 #include <memory>
 #include <string>
-#include <unordered_map>
 #include <vector>
-
-namespace
-{
-using autoware::planning_debug_tools::ObjectFilterParam;
-using autoware_perception_msgs::msg::ObjectClassification;
-
-bool parse_filter_radius(const QString & value, ObjectFilterParam & filter)
-{
-  const QStringList values = value.split(',', Qt::SkipEmptyParts);
-  if (values.size() == 1) {
-    filter.max_radius = values[0].toDouble();
-  } else if (values.size() == 2) {
-    filter.min_radius = values[0].toDouble();
-    filter.max_radius = values[1].toDouble();
-  }
-  if (
-    values.isEmpty() || values.size() > 2 || filter.min_radius < 0.0 ||
-    filter.max_radius <= filter.min_radius) {
-    std::cerr << "Error: --filter-radius must be <max> or <min>,<max> with 0 <= min < max"
-              << std::endl;
-    return false;
-  }
-  return true;
-}
-
-bool parse_filter_angle(const QString & value, ObjectFilterParam & filter)
-{
-  const QStringList values = value.split(',', Qt::SkipEmptyParts);
-  const auto is_valid = [](const double deg) { return -180.0 <= deg && deg <= 180.0; };
-  if (values.size() != 2 || !is_valid(values[0].toDouble()) || !is_valid(values[1].toDouble())) {
-    std::cerr << "Error: --filter-angle must be <min>,<max> within [-180, 180]" << std::endl;
-    return false;
-  }
-  filter.min_angle = values[0].toDouble() * M_PI / 180.0;
-  filter.max_angle = values[1].toDouble() * M_PI / 180.0;
-  return true;
-}
-
-bool parse_filter_class(const QString & value, ObjectFilterParam & filter)
-{
-  const std::unordered_map<std::string, uint8_t> class_map = {
-    {"UNKNOWN", ObjectClassification::UNKNOWN}, {"CAR", ObjectClassification::CAR},
-    {"TRUCK", ObjectClassification::TRUCK},     {"BUS", ObjectClassification::BUS},
-    {"TRAILER", ObjectClassification::TRAILER}, {"MOTORCYCLE", ObjectClassification::MOTORCYCLE},
-    {"BICYCLE", ObjectClassification::BICYCLE}, {"PEDESTRIAN", ObjectClassification::PEDESTRIAN}};
-  for (const auto & name : value.split(',', Qt::SkipEmptyParts)) {
-    const auto it = class_map.find(name.trimmed().toUpper().toStdString());
-    if (it == class_map.end()) {
-      std::cerr << "Error: unknown class for --filter-class: " << name.toStdString() << std::endl;
-      return false;
-    }
-    filter.classes.push_back(it->second);
-  }
-  return true;
-}
-}  // namespace
 
 int main(int argc, char ** argv)
 {
@@ -210,30 +151,7 @@ int main(int argc, char ** argv)
       "dump reproducer metrics json under the ROS logging directory on shutdown");
     options << output_metrics_option;
 
-    const QCommandLineOption filter_radius_option(
-      QStringList() << "filter-radius",
-      "publish only objects within this 2D distance range [m] from the recorded ego pose "
-      "(<max> or <min>,<max>)",
-      "radius");
-    options << filter_radius_option;
-
-    const QCommandLineOption filter_angle_option(
-      QStringList() << "filter-angle",
-      "publish only objects within this angle range [deg] in the recorded ego frame "
-      "(<min>,<max>, 0 is front and counterclockwise is positive, wraps through the rear if "
-      "min > max)",
-      "angle");
-    options << filter_angle_option;
-
-    const QCommandLineOption filter_class_option(
-      QStringList() << "filter-class",
-      "publish only objects of these comma-separated classes (e.g., 'car,pedestrian')", "classes");
-    options << filter_class_option;
-
-    const QCommandLineOption filter_invert_option(
-      QStringList() << "filter-invert",
-      "remove the objects matching the filter options instead of keeping them");
-    options << filter_invert_option;
+    options << make_object_filter_options();
 
     for (const auto & option : options) {
       parser.addOption(option);
@@ -281,21 +199,7 @@ int main(int argc, char ** argv)
       return 1;
     }
 
-    auto & filter = param.object_filter;
-    filter.enabled = parser.isSet(filter_radius_option) || parser.isSet(filter_angle_option) ||
-                     parser.isSet(filter_class_option);
-    filter.invert = parser.isSet(filter_invert_option);
-    if (filter.invert && !filter.enabled) {
-      std::cerr << "Error: --filter-invert requires at least one filter option" << std::endl;
-      return 1;
-    }
-    if (
-      (parser.isSet(filter_radius_option) &&
-       !parse_filter_radius(parser.value(filter_radius_option), filter)) ||
-      (parser.isSet(filter_angle_option) &&
-       !parse_filter_angle(parser.value(filter_angle_option), filter)) ||
-      (parser.isSet(filter_class_option) &&
-       !parse_filter_class(parser.value(filter_class_option), filter))) {
+    if (!parse_object_filter_options(parser, param.object_filter)) {
       return 1;
     }
 

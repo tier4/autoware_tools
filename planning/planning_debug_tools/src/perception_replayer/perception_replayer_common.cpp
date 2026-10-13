@@ -414,41 +414,6 @@ Odometry PerceptionReplayerCommon::find_ego_odom_by_timestamp(const rclcpp::Time
   return rosbag_ego_odom_data_.at(idx).second;
 }
 
-bool PerceptionReplayerCommon::is_filter_matched(
-  const geometry_msgs::msg::Point & position,
-  const std::vector<autoware_perception_msgs::msg::ObjectClassification> & classification,
-  const geometry_msgs::msg::Pose & ego_pose) const
-{
-  const auto & filter = param_.object_filter;
-
-  const double distance = utils::calculate_distance_2d(ego_pose.position, position);
-  if (distance < filter.min_radius || filter.max_radius < distance) {
-    return false;
-  }
-
-  const double angle = utils::normalize_radian(
-    std::atan2(position.y - ego_pose.position.y, position.x - ego_pose.position.x) -
-    utils::get_yaw_from_quaternion(ego_pose.orientation));
-  const bool is_in_angle = filter.min_angle <= filter.max_angle
-                             ? filter.min_angle <= angle && angle <= filter.max_angle
-                             : filter.min_angle <= angle || angle <= filter.max_angle;
-  if (!is_in_angle) {
-    return false;
-  }
-
-  if (filter.classes.empty()) {
-    return true;
-  }
-  if (classification.empty()) {
-    return false;
-  }
-  const auto label = std::max_element(
-                       classification.begin(), classification.end(),
-                       [](const auto & a, const auto & b) { return a.probability < b.probability; })
-                       ->label;
-  return std::find(filter.classes.begin(), filter.classes.end(), label) != filter.classes.end();
-}
-
 void PerceptionReplayerCommon::publish_topics_at_timestamp(
   const rclcpp::Time & bag_timestamp, const rclcpp::Time & current_timestamp,
   const bool apply_noise)
@@ -463,7 +428,7 @@ void PerceptionReplayerCommon::publish_topics_at_timestamp(
     if (objects_msg.has_value()) {
       auto msg = objects_msg.value();
       if (param_.object_filter.enabled) {
-        apply_object_filter(msg, recorded_ego_odom.pose.pose);
+        utils::filter_objects(recorded_ego_odom.pose.pose, param_.object_filter, msg);
       }
       if (apply_noise) {
         apply_perception_noise(msg);

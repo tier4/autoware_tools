@@ -355,6 +355,7 @@ The following topics are published during replay:
 - `-t`, `--tracked-object`: Publish tracked objects
 - `--replay-route`: Replay route and route state topics from rosbag data with transient_local QoS (only publishes when the message changes)
 - `-f`, `--rosbag-format`: Specify rosbag data format (default: "db3")
+- `--filter-radius`, `--filter-angle`, `--filter-class`, `--filter-invert`: Filter the published objects (same as [Perception reproducer](#available-options))
 - `-v`, `--verbose`: Output debug data
 - `-h`, `--help`: Show help message
 
