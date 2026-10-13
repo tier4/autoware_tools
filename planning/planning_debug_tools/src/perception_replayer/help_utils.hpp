@@ -20,8 +20,6 @@
 #include <QCommandLineParser>
 #include <QCoreApplication>
 
-#include <autoware_perception_msgs/msg/object_classification.hpp>
-
 #include <algorithm>
 #include <iostream>
 #include <memory>
