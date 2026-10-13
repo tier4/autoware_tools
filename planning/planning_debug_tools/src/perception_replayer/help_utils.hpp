@@ -155,6 +155,10 @@ bool parse_filter_class(
     }
     filter.classes.push_back(it->second);
   }
+  if (filter.classes.empty()) {
+    std::cerr << "Error: --filter-class must be <class,...> with at least one class" << std::endl;
+    return false;
+  }
   return true;
 }
 
