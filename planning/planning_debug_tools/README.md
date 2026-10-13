@@ -252,6 +252,10 @@ With `--auto-tackle-stuck`, if Autoware is in `DRIVING`, the live ego is stopped
 - `--expand-radius-scale`: Scale applied to `--search-radius` for the one-shot stuck expand rebuild (default: 3.0)
 - `--perturb-distance`: Path distance in meters to walk forward along bag ego poses when perturbing (default: 0.5)
 - `--output-metrics`: Dump metrics JSON under `$ROS_LOG_DIR/autoware_metrics/` on shutdown (`reproducer/perturb_count`, `reproducer/expand_count`, `reproducer/normal_duration/total`, `reproducer/repeat_duration/total`)
+- `--filter-radius`: Publish only objects within this 2D distance range in meters from the recorded ego pose (not the simulator ego pose). Accepts `<max>` or `<min>,<max>` (e.g., `30` or `10,30`)
+- `--filter-angle`: Publish only objects within this angle range in degrees in the recorded ego frame. Accepts `<min>,<max>` in [-180, 180], where 0 is front and counterclockwise is positive. If `min > max`, the range wraps through the rear (e.g., `135,-135` is the rear 90 degrees)
+- `--filter-class`: Publish only objects of these comma-separated classes (`unknown`, `car`, `truck`, `bus`, `trailer`, `motorcycle`, `bicycle`, `pedestrian`, case-insensitive). The class with the highest probability is used
+- `--filter-invert`: Remove the objects matching the filter options instead of keeping them
 - `-v`, `--verbose`: Output debug data
 - `-h`, `--help`: Show help message
 
@@ -292,6 +296,14 @@ Example usage with route replaying:
 
 ```bash
 ros2 run planning_debug_tools perception_reproducer -b <bag-file> --replay-route
+```
+
+The `--filter-radius`, `--filter-angle`, and `--filter-class` options limit the published objects around the recorded ego pose. This is useful when you want to find the objects that affect the planning behavior.
+
+Example usage with object filtering (publish only cars within 30 m in front of the ego):
+
+```bash
+ros2 run planning_debug_tools perception_reproducer -b <bag-file> --filter-radius 30 --filter-angle -90,90 --filter-class car
 ```
 
 While the node is running, you can republish localization and route without restarting:

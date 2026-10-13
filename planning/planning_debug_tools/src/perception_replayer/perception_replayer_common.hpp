@@ -25,8 +25,11 @@
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <random>
 #include <string>
@@ -37,6 +40,18 @@
 namespace autoware::planning_debug_tools
 {
 
+struct ObjectFilterParam
+{
+  bool enabled{false};
+  double min_radius{0.0};
+  double max_radius{std::numeric_limits<double>::max()};
+  // angle range in the ego frame [rad]; wraps through the rear if min_angle > max_angle
+  double min_angle{-M_PI};
+  double max_angle{M_PI};
+  std::vector<uint8_t> classes;  // empty means all classes
+  bool invert{false};
+};
+
 struct PerceptionReplayerCommonParam
 {
   std::string rosbag_path;
@@ -44,6 +59,7 @@ struct PerceptionReplayerCommonParam
   bool tracked_object;
   bool replay_route;
   std::vector<std::string> reference_image_topics;  // Topics for reference images
+  ObjectFilterParam object_filter;
 };
 
 class PerceptionReplayerCommon : public rclcpp::Node
@@ -176,6 +192,31 @@ protected:
       pose.position.y += noise_y_world;
     }
   }
+
+  // Template function to keep objects matching the filter around the recorded ego pose
+  template <typename T>
+  void apply_object_filter(T & msg, const geometry_msgs::msg::Pose & ego_pose) const
+  {
+    const auto is_removed = [&](const auto & object) {
+      const auto & position = [&]() -> const geometry_msgs::msg::Point & {
+        if constexpr (std::is_same_v<T, PredictedObjects>) {
+          return object.kinematics.initial_pose_with_covariance.pose.position;
+        } else {
+          return object.kinematics.pose_with_covariance.pose.position;
+        }
+      }();
+      return is_filter_matched(position, object.classification, ego_pose) ==
+             param_.object_filter.invert;
+    };
+
+    auto & objects = msg.objects;
+    objects.erase(std::remove_if(objects.begin(), objects.end(), is_removed), objects.end());
+  }
+
+  bool is_filter_matched(
+    const geometry_msgs::msg::Point & position,
+    const std::vector<autoware_perception_msgs::msg::ObjectClassification> & classification,
+    const geometry_msgs::msg::Pose & ego_pose) const;
 
   // noise
   mutable std::random_device rd_;
