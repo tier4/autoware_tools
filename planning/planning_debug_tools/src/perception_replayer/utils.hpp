@@ -15,12 +15,12 @@
 #ifndef PERCEPTION_REPLAYER__UTILS_HPP_
 #define PERCEPTION_REPLAYER__UTILS_HPP_
 
+#include "type_alias.hpp"
+
 #include <builtin_interfaces/msg/time.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rosbag2_cpp/reader.hpp>
 
-#include <autoware_perception_msgs/msg/object_classification.hpp>
-#include <autoware_perception_msgs/msg/predicted_objects.hpp>
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/quaternion.hpp>
@@ -242,7 +242,7 @@ struct ObjectFilterParam
 inline bool is_object_matched(
   const geometry_msgs::msg::Pose & ego_pose, const ObjectFilterParam & filter,
   const geometry_msgs::msg::Point & position,
-  const std::vector<autoware_perception_msgs::msg::ObjectClassification> & classification)
+  const std::vector<ObjectClassification> & classification)
 {
   const double distance = calculate_distance_2d(ego_pose.position, position);
   if (distance < filter.min_radius || filter.max_radius < distance) {
@@ -280,7 +280,7 @@ void filter_objects(
 {
   const auto is_removed = [&](const auto & object) {
     const auto & position = [&]() -> const geometry_msgs::msg::Point & {
-      if constexpr (std::is_same_v<ObjectsT, autoware_perception_msgs::msg::PredictedObjects>) {
+      if constexpr (std::is_same_v<ObjectsT, PredictedObjects>) {
         return object.kinematics.initial_pose_with_covariance.pose.position;
       } else {
         return object.kinematics.pose_with_covariance.pose.position;
