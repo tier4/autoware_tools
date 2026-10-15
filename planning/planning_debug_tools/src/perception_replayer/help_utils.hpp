@@ -151,7 +151,7 @@ bool parse_filter_angle(
 bool parse_filter_class(
   const QString & value, autoware::planning_debug_tools::utils::ObjectFilterParam & filter)
 {
-  using autoware_perception_msgs::msg::ObjectClassification;
+  using autoware::planning_debug_tools::ObjectClassification;
   const std::unordered_map<std::string, uint8_t> class_map = {
     {"UNKNOWN", ObjectClassification::UNKNOWN}, {"CAR", ObjectClassification::CAR},
     {"TRUCK", ObjectClassification::TRUCK},     {"BUS", ObjectClassification::BUS},
