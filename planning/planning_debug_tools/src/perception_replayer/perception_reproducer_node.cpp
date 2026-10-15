@@ -151,6 +151,8 @@ int main(int argc, char ** argv)
       "dump reproducer metrics json under the ROS logging directory on shutdown");
     options << output_metrics_option;
 
+    options << make_object_filter_options();
+
     for (const auto & option : options) {
       parser.addOption(option);
     }
@@ -194,6 +196,10 @@ int main(int argc, char ** argv)
     }
     if (param.perturb_distance_m < 0.0) {
       std::cerr << "Error: --perturb-distance must be >= 0" << std::endl;
+      return 1;
+    }
+
+    if (!parse_object_filter_options(parser, param.object_filter)) {
       return 1;
     }
 
