@@ -140,3 +140,26 @@ The two differ by about (vehicle speed × horizon), e.g. 33 m for 30 km/h and a 
 
 For a 25 minute drive (about 15,000 frames with 40 points each), `frame_geometry.jsonl` is about
 70 MB.
+
+## Error map report
+
+`plot_error_map.py` bins the per-frame ADE/FDE by route arc length and writes one PNG per
+(metric, horizon): the route colored by the mean error of each bin, and the mean / max error of
+each bin along the route (intersection lanelets are shaded).
+
+```sh
+ros2 run autoware_planning_data_analyzer plot_error_map.py $HOME/result
+```
+
+Output: `<input_dir>/error_map/{ade,fde}_{1.0s,2.0s,4.0s}_{inference,evaluated}.png`
+
+| Option           | Default             | Description                                                                         |
+| ---------------- | ------------------- | ----------------------------------------------------------------------------------- |
+| `--position`     | `inference`         | Place the error at the ego position at the inference time, or `evaluated`: the GT position at t + horizon |
+| `--horizons`     | `1.0s 2.0s 4.0s`    | Horizon keys                                                                        |
+| `--metrics`      | `ade fde`           | Metrics to plot                                                                     |
+| `--bin-size`     | `5.0`               | Bin size along the route [m]                                                        |
+| `--control-mode` | `AUTONOMOUS`        | Use only frames in this control mode, or `all`                                      |
+| `--vmax`         | 99th percentile     | Upper limit of the map color scale [m]; set it to compare images with the same scale |
+| `--label`        | input directory name | Run name shown in the title                                                        |
+| `--output-dir`   | `<input_dir>/error_map` | Output directory                                                                |

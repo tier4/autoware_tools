@@ -43,6 +43,8 @@
   <depend>yaml-cpp</depend>
 
   <exec_depend>autoware_global_parameter_loader</exec_depend>
+  <exec_depend>python3-matplotlib</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>autoware_lint_common</test_depend>
