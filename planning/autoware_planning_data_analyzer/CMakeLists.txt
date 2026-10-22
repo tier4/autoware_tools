@@ -90,6 +90,11 @@ if(BUILD_TESTING)
   ament_target_dependencies(test_offline_evaluation autoware_test_utils)
 endif()
 
+install(PROGRAMS
+  scripts/plot_error_map.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_auto_package(
   INSTALL_TO_SHARE
   config
