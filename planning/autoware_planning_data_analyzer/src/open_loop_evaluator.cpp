@@ -43,6 +43,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <limits>
 #include <map>
@@ -445,6 +447,8 @@ void OpenLoopEvaluator::evaluate(
   trajectory_point_metrics_list_.clear();
   human_filter_metrics_list_.clear();
   synthetic_epdms_metrics_list_.clear();
+  frame_geometry_lines_.clear();
+  route_centerline_ = utils::RouteCenterline{};
   // Reset normalized timestamp tracking for new evaluation
   first_bag_timestamp_set_ = false;
 
@@ -718,6 +722,8 @@ void OpenLoopEvaluator::evaluate(
         evaluation_data_list[i].synchronized_data->bag_timestamp);
     }
   }
+
+  build_frame_geometry(evaluation_data_list);
 
   // Calculate summary statistics
   calculate_summary();
@@ -1089,7 +1095,8 @@ OpenLoopTrajectoryMetrics OpenLoopEvaluator::evaluate_trajectory(const Evaluatio
       lat_running_abs_max[cutoff],
       lon_prefix_sum[cutoff] / n,
       lon_running_abs_max[cutoff],
-      ttc_running_min[cutoff]};
+      ttc_running_min[cutoff],
+      cutoff};
   };
 
   if (metrics.num_points > 1u) {
@@ -2312,6 +2319,239 @@ void OpenLoopEvaluator::save_dlr_style_result_to_bag(
   bag_writer.write(result_msg, dlr_result_topic(), trajectory_data->bag_timestamp);
 }
 
+void OpenLoopEvaluator::build_frame_geometry(
+  const std::vector<EvaluationData> & evaluation_data_list)
+{
+  frame_geometry_lines_.clear();
+  route_centerline_ = utils::RouteCenterline{};
+  if (!frame_geometry_params_.enabled) {
+    return;
+  }
+
+  // Arc length distance between the three points used for the trajectory curvature [m].
+  constexpr double kTrajectoryCurvatureBaselineM = 1.0;
+  const auto & params = frame_geometry_params_;
+  const int pos = params.position_decimals;
+  const int ang = params.angle_decimals;
+  const int cur = params.curvature_decimals;
+
+  // Route legs: every route message of the bag (consecutive duplicates removed), or the route
+  // set to the route handler if no history is given.
+  std::vector<utils::RouteLegInput> legs;
+  if (route_handler_ && route_handler_->getLaneletMapPtr()) {
+    for (const auto & [stamp_ns, route] : route_history_) {
+      std::string uuid;
+      for (const auto byte : route.uuid.uuid) {
+        constexpr char kHex[] = "0123456789abcdef";
+        uuid += kHex[byte >> 4];
+        uuid += kHex[byte & 0x0F];
+      }
+      if (!legs.empty() && legs.back().uuid == uuid) {
+        continue;
+      }
+      legs.push_back(
+        {utils::build_route_centerline(
+           utils::route_lanelet_sources(*route_handler_, route), params.route_resample_interval_m),
+         stamp_ns, uuid});
+    }
+    if (legs.empty()) {
+      legs.push_back(
+        {utils::build_route_centerline(
+           utils::route_lanelet_sources(*route_handler_), params.route_resample_interval_m),
+         0, ""});
+    }
+  }
+
+  // Ego positions with their stamps, used to clip each leg to the driven part
+  const auto point_stamp_ns = [](const rclcpp::Time & stamp, const double t) {
+    return stamp.nanoseconds() + static_cast<rcutils_time_point_value_t>(std::llround(t * 1.0e9));
+  };
+  std::vector<utils::TimedPoint> samples;
+  for (std::size_t i = 0; i < evaluation_data_list.size(); ++i) {
+    const auto & metrics = metrics_list_[i];
+    const auto & trajectory = evaluation_data_list[i].synchronized_data->trajectory;
+    for (std::size_t k = 0; k < metrics.ground_truth_poses.size(); ++k) {
+      const double t = trajectory && k < trajectory->points.size()
+                         ? rclcpp::Duration(trajectory->points[k].time_from_start).seconds()
+                         : 0.0;
+      const auto & position = metrics.ground_truth_poses[k].position;
+      samples.push_back({point_stamp_ns(metrics.trajectory_timestamp, t), position.x, position.y});
+    }
+  }
+  route_centerline_ = utils::build_drive_route(legs, samples, params.max_route_lateral_offset_m);
+  if (route_centerline_.empty()) {
+    RCLCPP_WARN(
+      logger_, "Route centerline is unavailable. route_* and lanelet_id are exported as null.");
+  } else {
+    const auto used_legs = std::count_if(
+      route_centerline_.routes.begin(), route_centerline_.routes.end(),
+      [](const auto & leg) { return leg.used; });
+    RCLCPP_INFO(
+      logger_, "Route centerline: %.1f m from %ld of %zu route(s)", route_centerline_.length(),
+      static_cast<long>(used_legs), route_centerline_.routes.size());  // NOLINT
+  }
+
+  const auto project = [&](
+                         const rcutils_time_point_value_t stamp_ns, const double x, const double y,
+                         const std::optional<std::size_t> hint) {
+    return utils::project_to_drive_route(
+      route_centerline_, stamp_ns, x, y, params.max_route_lateral_offset_m, hint);
+  };
+  const auto route_index_at = [&](const std::size_t index) -> nlohmann::json {
+    return index < route_centerline_.route_index.size()
+             ? nlohmann::json(route_centerline_.route_index[index])
+             : nlohmann::json(nullptr);
+  };
+  const auto curvature_at = [&](const std::size_t index) -> std::optional<double> {
+    return index < route_centerline_.curvature.size() ? route_centerline_.curvature[index]
+                                                      : std::nullopt;
+  };
+
+  std::optional<std::size_t> previous_ego_index;
+  frame_geometry_lines_.reserve(evaluation_data_list.size());
+  for (std::size_t i = 0; i < evaluation_data_list.size(); ++i) {
+    const auto & sync_data = evaluation_data_list[i].synchronized_data;
+    const auto & metrics = metrics_list_[i];
+
+    nlohmann::json frame;
+    frame["frame_index"] = i;
+    frame["timestamp_sec"] = metrics.trajectory_timestamp.seconds();
+    frame["bag_timestamp_sec"] = metrics.bag_timestamp.seconds();
+    frame["valid"] = !metrics.horizon_results.empty();
+    frame["control_mode"] = utils::control_mode_name(
+      utils::find_control_mode(control_mode_events_, metrics.trajectory_timestamp.nanoseconds()));
+
+    // Ego state at the inference time
+    std::optional<std::size_t> route_hint = previous_ego_index;
+    if (sync_data && sync_data->kinematic_state) {
+      const auto & pose = sync_data->kinematic_state->pose.pose;
+      const auto projection = project(
+        metrics.trajectory_timestamp.nanoseconds(), pose.position.x, pose.position.y,
+        previous_ego_index);
+      auto & ego = frame["ego"];
+      ego["x"] = utils::rounded_json(pose.position.x, pos);
+      ego["y"] = utils::rounded_json(pose.position.y, pos);
+      ego["yaw"] = utils::rounded_json(get_yaw_from_msg(pose.orientation), ang);
+      ego["v"] = utils::rounded_json(sync_data->kinematic_state->twist.twist.linear.x, 3);
+      ego["route_s"] =
+        utils::rounded_json(projection ? std::optional<double>(projection->s) : std::nullopt, pos);
+      ego["route_lateral_offset"] = utils::rounded_json(
+        projection ? std::optional<double>(projection->lateral_offset) : std::nullopt, pos);
+      ego["lanelet_id"] = projection
+                            ? nlohmann::json(route_centerline_.lanelet_id[projection->index])
+                            : nlohmann::json(nullptr);
+      ego["route_curvature"] =
+        utils::rounded_json(projection ? curvature_at(projection->index) : std::nullopt, cur);
+      ego["route_index"] = projection ? route_index_at(projection->index) : nlohmann::json(nullptr);
+      if (projection) {
+        previous_ego_index = projection->index;
+        route_hint = projection->index;
+      }
+    } else {
+      frame["ego"] = nullptr;
+    }
+
+    // Predicted trajectory (truncated by trajectory_evaluation_horizon)
+    std::vector<double> t, x, y, yaw, v;
+    if (sync_data && sync_data->trajectory) {
+      for (const auto & point : sync_data->trajectory->points) {
+        t.push_back(rclcpp::Duration(point.time_from_start).seconds());
+        x.push_back(point.pose.position.x);
+        y.push_back(point.pose.position.y);
+        yaw.push_back(get_yaw_from_msg(point.pose.orientation));
+        v.push_back(point.longitudinal_velocity_mps);
+      }
+    }
+    auto & predicted = frame["predicted"];
+    predicted["t"] = utils::rounded_json_array(t, 3);
+    predicted["x"] = utils::rounded_json_array(x, pos);
+    predicted["y"] = utils::rounded_json_array(y, pos);
+    predicted["yaw"] = utils::rounded_json_array(yaw, ang);
+    predicted["v"] = utils::rounded_json_array(v, 3);
+    predicted["curvature"] = utils::rounded_json_array(
+      utils::calc_signed_curvature(x, y, kTrajectoryCurvatureBaselineM), cur);
+
+    // Ground truth (actual ego poses at the same time_from_start as the predicted points)
+    std::vector<double> gt_x, gt_y, gt_yaw;
+    std::vector<std::optional<double>> gt_s, gt_offset, gt_curvature;
+    nlohmann::json gt_lanelet_id = nlohmann::json::array();
+    nlohmann::json gt_route_index = nlohmann::json::array();
+    for (std::size_t k = 0; k < metrics.ground_truth_poses.size(); ++k) {
+      const auto & pose = metrics.ground_truth_poses[k];
+      gt_x.push_back(pose.position.x);
+      gt_y.push_back(pose.position.y);
+      gt_yaw.push_back(get_yaw_from_msg(pose.orientation));
+      const auto projection = project(
+        point_stamp_ns(metrics.trajectory_timestamp, k < t.size() ? t[k] : 0.0), pose.position.x,
+        pose.position.y, route_hint);
+      if (projection) {
+        route_hint = projection->index;
+        gt_s.emplace_back(projection->s);
+        gt_offset.emplace_back(projection->lateral_offset);
+        gt_curvature.push_back(curvature_at(projection->index));
+        gt_lanelet_id.push_back(route_centerline_.lanelet_id[projection->index]);
+        gt_route_index.push_back(route_index_at(projection->index));
+      } else {
+        gt_s.emplace_back(std::nullopt);
+        gt_offset.emplace_back(std::nullopt);
+        gt_curvature.emplace_back(std::nullopt);
+        gt_lanelet_id.push_back(nullptr);
+        gt_route_index.push_back(nullptr);
+      }
+    }
+    auto & ground_truth = frame["ground_truth"];
+    ground_truth["x"] = utils::rounded_json_array(gt_x, pos);
+    ground_truth["y"] = utils::rounded_json_array(gt_y, pos);
+    ground_truth["yaw"] = utils::rounded_json_array(gt_yaw, ang);
+    ground_truth["route_s"] = utils::rounded_json_array(gt_s, pos);
+    ground_truth["route_lateral_offset"] = utils::rounded_json_array(gt_offset, pos);
+    ground_truth["lanelet_id"] = gt_lanelet_id;
+    ground_truth["route_curvature"] = utils::rounded_json_array(gt_curvature, cur);
+    ground_truth["route_index"] = gt_route_index;
+
+    // Horizon results (copied from time_step_based_trajectory_result.jsonl)
+    frame["horizons"] = nlohmann::json::object();
+    for (const auto & [key, horizon] : metrics.horizon_results) {
+      frame["horizons"][key] = {
+        {"index", horizon.index},
+        {"t", utils::rounded_json(horizon.index < t.size() ? t[horizon.index] : 0.0, 3)},
+        {"ade", utils::rounded_json(horizon.ade, pos)},
+        {"fde", utils::rounded_json(horizon.fde, pos)}};
+    }
+
+    frame_geometry_lines_.push_back(frame.dump());
+  }
+}
+
+void OpenLoopEvaluator::save_frame_geometry(const std::string & bag_path) const
+{
+  if (!frame_geometry_params_.enabled) {
+    return;
+  }
+
+  save_json_results(
+    utils::route_centerline_to_json(route_centerline_, frame_geometry_params_), bag_path,
+    "open_loop", "time_step_based_trajectory_route.json", false, false);
+
+  const std::string filename = "time_step_based_trajectory_frame_geometry.jsonl";
+  std::filesystem::path output_path;
+  if (!json_output_dir_.empty()) {
+    output_path = std::filesystem::path(json_output_dir_) / filename;
+  } else {
+    const char * home = std::getenv("HOME");
+    output_path = std::filesystem::path(home ? home : ".") / filename;
+  }
+  std::ofstream out(output_path);
+  if (!out.is_open()) {
+    RCLCPP_ERROR(logger_, "Failed to save frame geometry to: %s", output_path.c_str());
+    return;
+  }
+  for (const auto & line : frame_geometry_lines_) {
+    out << line << '\n';
+  }
+  RCLCPP_INFO(logger_, "Frame geometry saved to: %s", output_path.c_str());
+}
+
 std::vector<std::pair<std::string, std::string>> OpenLoopEvaluator::get_result_topics() const
 {
   std::vector<std::pair<std::string, std::string>> topics;
@@ -2460,6 +2700,7 @@ std::pair<rclcpp::Time, rclcpp::Time> OpenLoopEvaluator::run_evaluation_from_bag
     save_json_results(
       full_json, bag_path, "open_loop", "time_step_based_trajectory_detailed_result.json", false,
       true);
+    save_frame_geometry(bag_path);
   }
 
   // Save evaluator metric results
