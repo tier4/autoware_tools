@@ -74,7 +74,7 @@ ros2 run autoware_planning_data_analyzer autoware_planning_data_analyzer_node --
 - **`debug_images/*.png`** - Trajectory visualization (with `--viz` flag)
 - **evaluator_metric.json** — evaluator metric aggregates per `evaluator_config` (if bag contains configured topics)
 - **`time_step_based_trajectory_frame_geometry.jsonl`** / **`time_step_based_trajectory_route.json`** — per-frame ego pose, predicted trajectory and ground truth with their position on the route, and the route centerline (only with `export_frame_geometry:=true`). See [Frame Geometry Output](docs/frame_geometry_output.md)
-- **`error_map/*.png`** — ADE/FDE by location along the route, generated from the frame geometry output by `ros2 run autoware_planning_data_analyzer plot_error_map.py <output_dir>`. See [Error map report](docs/frame_geometry_output.md#error-map-report)
+- **`error_map/*.png`** — ADE / FDE / average lateral and longitudinal deviation by location along the route, generated from the frame geometry output by `ros2 run autoware_planning_data_analyzer plot_error_map.py <output_dir>`. See [Error map report](docs/frame_geometry_output.md#error-map-report)
 
 ## Parameters
 

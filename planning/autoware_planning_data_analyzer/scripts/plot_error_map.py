@@ -14,9 +14,10 @@
 # limitations under the License.
 """Plot ADE/FDE by location along the route.
 
-Reads time_step_based_trajectory_frame_geometry.jsonl and time_step_based_trajectory_route.json
-written by autoware_planning_data_analyzer with export_frame_geometry:=true, bins the per-frame
-errors by route arc length, and writes one PNG per (metric, horizon):
+Reads time_step_based_trajectory_frame_geometry.jsonl, time_step_based_trajectory_route.json and
+time_step_based_trajectory_result.jsonl written by autoware_planning_data_analyzer with
+export_frame_geometry:=true, bins the per-frame errors (ADE, FDE, average lateral / longitudinal
+deviation) by route arc length, and writes one PNG per (metric, horizon):
 
 - top: the route colored by the mean error of each bin
 - bottom: mean / max error of each bin along the route arc length
@@ -47,8 +48,26 @@ import numpy as np  # noqa: E402
 
 FRAME_GEOMETRY_FILE = "time_step_based_trajectory_frame_geometry.jsonl"
 ROUTE_FILE = "time_step_based_trajectory_route.json"
+RESULT_FILE = "time_step_based_trajectory_result.jsonl"
 
-METRICS = {"ade": "ADE", "fde": "FDE"}
+
+@dataclass(frozen=True)
+class Metric:
+    name: str  # shown in the title, e.g. "FDE"
+    info_key: str  # key in Frame.<horizon>.Info of time_step_based_trajectory_result.jsonl
+    average_label: str  # label of the average in the title, e.g. "Average FDE"
+
+
+METRICS = {
+    "ade": Metric("ADE", "ADE", "Average ADE"),
+    "fde": Metric("FDE", "FDE", "Average FDE"),
+    "avg_lateral": Metric(
+        "Lateral deviation", "average_lateral_deviation", "Average lateral deviation"
+    ),
+    "avg_longitudinal": Metric(
+        "Longitudinal deviation", "average_longitudinal_deviation", "Average longitudinal deviation"
+    ),
+}
 POSITIONS = {
     "inference": "position at inference time",
     "evaluated": "position at evaluated time",
@@ -83,8 +102,7 @@ class FrameError:
 
     s_inference: Optional[float]
     s_evaluated: Optional[float]
-    ade: float
-    fde: float
+    values: Dict[str, float]  # metric key -> value
 
 
 @dataclass
@@ -128,7 +146,8 @@ def load_route(path: Path) -> Route:
 def load_run(output_dir: Path, label: str, control_mode: str) -> Run:
     frame_path = output_dir / FRAME_GEOMETRY_FILE
     route_path = output_dir / ROUTE_FILE
-    for path in (frame_path, route_path):
+    result_path = output_dir / RESULT_FILE
+    for path in (frame_path, route_path, result_path):
         if not path.exists():
             sys.exit(
                 f"{path} not found. Run autoware_planning_data_analyzer with "
@@ -138,9 +157,16 @@ def load_run(output_dir: Path, label: str, control_mode: str) -> Run:
     errors: Dict[str, List[FrameError]] = {}
     num_frames = 0
     num_selected = 0
-    with frame_path.open() as f:
-        for line in f:
-            frame = json.loads(line)
+    # The N-th lines of frame_geometry.jsonl and result.jsonl are the same frame.
+    with frame_path.open() as frame_file, result_path.open() as result_file:
+        for frame_line, result_line in zip(frame_file, result_file):
+            frame = json.loads(frame_line)
+            result = json.loads(result_line)
+            if frame["timestamp_sec"] != result["Stamp"]["ROS"]:
+                sys.exit(
+                    f"Frame {num_frames} of {frame_path.name} and {result_path.name} do not "
+                    "match. Use the files of the same analyzer run."
+                )
             num_frames += 1
             if not frame["valid"]:
                 continue
@@ -151,12 +177,12 @@ def load_run(output_dir: Path, label: str, control_mode: str) -> Run:
             gt_route_s = frame["ground_truth"]["route_s"]
             for key, horizon in frame["horizons"].items():
                 index = horizon["index"]
+                info = result["Frame"][key]["Info"]
                 errors.setdefault(key, []).append(
                     FrameError(
                         s_inference=ego.get("route_s"),
                         s_evaluated=gt_route_s[index] if index < len(gt_route_s) else None,
-                        ade=horizon["ade"],
-                        fde=horizon["fde"],
+                        values={k: info[m.info_key] for k, m in METRICS.items()},
                     )
                 )
     return Run(label, load_route(route_path), errors, num_frames, num_selected)
@@ -173,7 +199,7 @@ def compute_bins(
         if s is None:
             continue
         index = min(max(int(s // bin_size), 0), num_bins - 1)
-        values[index].append(getattr(error, metric))
+        values[index].append(error.values[metric])
 
     mean = np.full(num_bins, np.nan)
     maximum = np.full(num_bins, np.nan)
@@ -233,14 +259,15 @@ def plot_report(
     ax_map = fig.add_subplot(grid[0])
     ax_line = fig.add_subplot(grid[1])
 
-    metric_name = METRICS[metric]
-    mode_text = "all control modes" if control_mode == "all" else f"{control_mode} frames"
+    metric_name = METRICS[metric].name
+    # Average over the frames used in this figure (filtered by control mode)
+    all_values = [error.values[metric] for error in errors]
+    average_text = f"{np.mean(all_values):.3f} m" if all_values else "n/a"
     fig.suptitle(
-        f"{metric_name} @ {horizon} by location: {run.label}\n"
-        f"{len(errors)} of {run.num_frames} frames ({mode_text}), {POSITIONS[position]}, "
-        f"route {route.length:.0f} m, {bin_size:g} m bins",
+        f"{metric_name} @ {horizon}: {run.label}, route {route.length:.0f} m\n"
+        f"{METRICS[metric].average_label}={average_text}, {POSITIONS[position]}",
         color=TEXT_PRIMARY,
-        fontsize=12,
+        fontsize=16,
     )
 
     # --- map ---
@@ -263,7 +290,7 @@ def plot_report(
     ax_map.set_xlabel("x [m]")
     ax_map.set_ylabel("y [m]")
     colorbar = fig.colorbar(colored, ax=ax_map, shrink=0.6, extend="max", pad=0.02)
-    colorbar.set_label(f"mean {metric_name} per bin [m]", color=TEXT_SECONDARY)
+    colorbar.set_label(f"{metric_name}, mean per bin [m]", color=TEXT_SECONDARY)
     colorbar.ax.tick_params(colors=TEXT_SECONDARY, labelsize=9)
     colorbar.outline.set_visible(False)
 
@@ -318,7 +345,12 @@ def main() -> None:
     )
     parser.add_argument("--label", help="name of the run shown in the title (default: input_dir)")
     parser.add_argument(
-        "--metrics", nargs="+", choices=sorted(METRICS), default=["ade", "fde"]
+        "--metrics",
+        nargs="+",
+        choices=list(METRICS),
+        default=list(METRICS),
+        help="metrics to plot (default: all). avg_lateral / avg_longitudinal are the "
+        "average_lateral_deviation / average_longitudinal_deviation of the result",
     )
     parser.add_argument(
         "--horizons",
@@ -356,7 +388,8 @@ def main() -> None:
     run = load_run(input_dir, label, args.control_mode)
     print(
         f"{run.num_selected_frames} of {run.num_frames} frames selected "
-        f"(control_mode: {args.control_mode})"
+        f"(control_mode: {args.control_mode}), route {run.route.length:.0f} m, "
+        f"{args.bin_size:g} m bins"
     )
     for horizon in args.horizons:
         if horizon not in run.errors:
