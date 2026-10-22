@@ -143,21 +143,25 @@ For a 25 minute drive (about 15,000 frames with 40 points each), `frame_geometry
 
 ## Error map report
 
-`plot_error_map.py` bins the per-frame ADE/FDE by route arc length and writes one PNG per
-(metric, horizon): the route colored by the mean error of each bin, and the mean / max error of
-each bin along the route (intersection lanelets are shaded).
+`plot_error_map.py` bins the per-frame ADE, FDE, average lateral deviation and average
+longitudinal deviation by route arc length and writes one PNG per (metric, horizon): the route
+colored by the mean value of each bin, and the mean / max value of each bin along the route
+(intersection lanelets are shaded). The values are read from
+`time_step_based_trajectory_result.jsonl`, so they are the same as the `Info` of each horizon
+(e.g. `average_lateral_deviation` at `2.0s` is the average over 0 to 2.0 s). The title shows the
+average over the plotted frames.
 
 ```sh
 ros2 run autoware_planning_data_analyzer plot_error_map.py $HOME/result
 ```
 
-Output: `<input_dir>/error_map/{ade,fde}_{1.0s,2.0s,4.0s}_{inference,evaluated}.png`
+Output: `<input_dir>/error_map/{ade,fde,avg_lateral,avg_longitudinal}_{1.0s,2.0s,4.0s}_{inference,evaluated}.png`
 
 | Option           | Default             | Description                                                                         |
 | ---------------- | ------------------- | ----------------------------------------------------------------------------------- |
 | `--position`     | `inference`         | Place the error at the ego position at the inference time, or `evaluated`: the GT position at t + horizon |
 | `--horizons`     | `1.0s 2.0s 4.0s`    | Horizon keys                                                                        |
-| `--metrics`      | `ade fde`           | Metrics to plot                                                                     |
+| `--metrics`      | all                 | Metrics to plot: `ade`, `fde`, `avg_lateral`, `avg_longitudinal`                    |
 | `--bin-size`     | `5.0`               | Bin size along the route [m]                                                        |
 | `--control-mode` | `AUTONOMOUS`        | Use only frames in this control mode, or `all`                                      |
 | `--vmax`         | 99th percentile     | Upper limit of the map color scale [m]; set it to compare images with the same scale |
