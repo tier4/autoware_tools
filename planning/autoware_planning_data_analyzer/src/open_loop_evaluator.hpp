@@ -24,6 +24,7 @@
 #include "metrics/epdms/subscores/lane_keeping.hpp"
 #include "metrics/evaluator/evaluator.hpp"
 #include "metrics/trajectory_metrics.hpp"
+#include "utils/frame_geometry.hpp"
 #include "utils/override_windows.hpp"
 
 #include <autoware/route_handler/route_handler.hpp>
@@ -59,6 +60,7 @@ struct HorizonMetrics
   double average_longitudinal_deviation;
   double max_longitudinal_deviation;
   double min_ttc;
+  std::size_t index{0};  // index of the trajectory point used for this horizon
 };
 
 struct OpenLoopTrajectoryMetrics
@@ -240,6 +242,28 @@ public:
     control_mode_events_ = std::move(events);
   }
 
+  /**
+   * @brief Configure the export of time_step_based_trajectory_frame_geometry.jsonl and
+   * time_step_based_trajectory_route.json.
+   */
+  void set_frame_geometry_parameters(const utils::FrameGeometryParameters & parameters)
+  {
+    frame_geometry_params_ = parameters;
+  }
+
+  /**
+   * @brief Provide every route message of the bag with the time it became active.
+   *
+   * Used to join the routes of a drive for the frame geometry export. If empty, the route set
+   * to the route handler is used.
+   */
+  void set_route_history(
+    std::vector<std::pair<rcutils_time_point_value_t, autoware_planning_msgs::msg::LaneletRoute>>
+      route_history)
+  {
+    route_history_ = std::move(route_history);
+  }
+
   void set_evaluator_configs(const std::vector<metrics::evaluator::EvaluatorConfig> & configs)
   {
     evaluator_configs_ = configs;
@@ -403,6 +427,20 @@ private:
 
   bool should_write_synthetic_epdms() const;
 
+  /**
+   * @brief Build route_centerline_ and one frame_geometry.jsonl line per evaluated trajectory.
+   *
+   * Lines are in the same order as metrics_list_, i.e. the same order as
+   * time_step_based_trajectory_result.jsonl.
+   */
+  void build_frame_geometry(const std::vector<EvaluationData> & evaluation_data_list);
+
+  /**
+   * @brief Write time_step_based_trajectory_frame_geometry.jsonl and
+   * time_step_based_trajectory_route.json into the JSON output directory.
+   */
+  void save_frame_geometry(const std::string & bag_path) const;
+
   std::vector<OpenLoopTrajectoryMetrics> metrics_list_;
   std::vector<metrics::TrajectoryPointMetrics> trajectory_point_metrics_list_;
   std::vector<metrics::HumanFilterMetrics> human_filter_metrics_list_;
@@ -425,6 +463,11 @@ private:
   std::vector<TimedTrackedObjects> object_timeline_;
   bool debug_topics_enabled_{false};
   std::vector<metrics::evaluator::EvaluatorConfig> evaluator_configs_;
+  utils::FrameGeometryParameters frame_geometry_params_;
+  std::vector<std::pair<rcutils_time_point_value_t, autoware_planning_msgs::msg::LaneletRoute>>
+    route_history_;
+  utils::RouteCenterline route_centerline_;
+  std::vector<std::string> frame_geometry_lines_;
 };
 
 }  // namespace autoware::planning_data_analyzer

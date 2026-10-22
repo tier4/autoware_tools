@@ -73,6 +73,7 @@ ros2 run autoware_planning_data_analyzer autoware_planning_data_analyzer_node --
 - **`evaluation_output.bag/`** - Evaluation metrics as rosbag for visualization
 - **`debug_images/*.png`** - Trajectory visualization (with `--viz` flag)
 - **evaluator_metric.json** — evaluator metric aggregates per `evaluator_config` (if bag contains configured topics)
+- **`time_step_based_trajectory_frame_geometry.jsonl`** / **`time_step_based_trajectory_route.json`** — per-frame ego pose, predicted trajectory and ground truth with their position on the route, and the route centerline (only with `export_frame_geometry:=true`). See [Frame Geometry Output](docs/frame_geometry_output.md)
 
 ## Parameters
 
@@ -83,6 +84,7 @@ Key parameters in `config/planning_data_analyzer.param.yaml`:
 - `sync_tolerance_ms`: Time synchronization tolerance (default: 100ms)
 - `trajectory_topic`: Trajectory topic to evaluate
 - `open_loop.*`: Open-loop specific settings
+- `open_loop.frame_geometry.*`: Frame geometry export settings (enabled by the `export_frame_geometry` launch argument)
 
 ---
 
