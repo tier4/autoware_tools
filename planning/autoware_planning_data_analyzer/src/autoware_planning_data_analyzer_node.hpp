@@ -21,6 +21,7 @@
 #include "rosbag2_cpp/reader.hpp"
 #include "rosbag2_cpp/writer.hpp"
 #include "serialized_bag_message.hpp"
+#include "utils/frame_geometry.hpp"
 
 #include <autoware/route_handler/route_handler.hpp>
 #include <autoware_vehicle_info_utils/vehicle_info_utils.hpp>
@@ -105,6 +106,7 @@ private:
   std::string turn_indicators_topic_name_;
   std::string control_mode_topic_name_;
   double override_window_sec_ = 0.0;
+  utils::FrameGeometryParameters frame_geometry_params_;
 
   EvaluationMode evaluation_mode_;
   std::string bag_path_;

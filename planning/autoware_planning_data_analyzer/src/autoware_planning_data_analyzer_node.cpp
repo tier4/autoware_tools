@@ -177,6 +177,18 @@ AutowarePlanningDataAnalyzerNode::AutowarePlanningDataAnalyzerNode(
     get_or_declare_parameter<std::string>(*this, "turn_indicators_topic");
   control_mode_topic_name_ = get_or_declare_parameter<std::string>(*this, "control_mode_topic");
   override_window_sec_ = get_or_declare_parameter<double>(*this, "open_loop.override.window_sec");
+  frame_geometry_params_.enabled =
+    get_or_declare_parameter<bool>(*this, "open_loop.frame_geometry.enabled");
+  frame_geometry_params_.position_decimals = static_cast<int>(
+    get_or_declare_parameter<int64_t>(*this, "open_loop.frame_geometry.position_decimals"));
+  frame_geometry_params_.angle_decimals = static_cast<int>(
+    get_or_declare_parameter<int64_t>(*this, "open_loop.frame_geometry.angle_decimals"));
+  frame_geometry_params_.curvature_decimals = static_cast<int>(
+    get_or_declare_parameter<int64_t>(*this, "open_loop.frame_geometry.curvature_decimals"));
+  frame_geometry_params_.route_resample_interval_m =
+    get_or_declare_parameter<double>(*this, "open_loop.frame_geometry.route_resample_interval_m");
+  frame_geometry_params_.max_route_lateral_offset_m =
+    get_or_declare_parameter<double>(*this, "open_loop.frame_geometry.max_route_lateral_offset_m");
 
   if (evaluation_interval_ms_ <= 0.0) {
     throw std::runtime_error(
@@ -191,6 +203,11 @@ AutowarePlanningDataAnalyzerNode::AutowarePlanningDataAnalyzerNode(
     throw std::runtime_error(
       "Invalid open_loop.gt_sync_tolerance_ms: " + std::to_string(gt_sync_tolerance_ms_) +
       ". Expected >= 0.");
+  }
+  if (frame_geometry_params_.route_resample_interval_m <= 0.0) {
+    throw std::runtime_error(
+      "Invalid open_loop.frame_geometry.route_resample_interval_m: " +
+      std::to_string(frame_geometry_params_.route_resample_interval_m) + ". Expected > 0.");
   }
   if (trajectory_evaluation_horizon_s_ < 0.0) {
     throw std::runtime_error(
@@ -402,6 +419,9 @@ void AutowarePlanningDataAnalyzerNode::run_evaluation()
 
   // Storage for the last route message and tf messages
   autoware_planning_msgs::msg::LaneletRoute::SharedPtr last_route_msg = nullptr;
+  // Every route message with the time it became active (header stamp, or bag time if unset)
+  std::vector<std::pair<rcutils_time_point_value_t, autoware_planning_msgs::msg::LaneletRoute>>
+    route_history;
   tf2_msgs::msg::TFMessage tf_static_msg;
   std::vector<std::pair<tf2_msgs::msg::TFMessage, rclcpp::Time>> tf_messages;
 
@@ -449,6 +469,8 @@ void AutowarePlanningDataAnalyzerNode::run_evaluation()
         rclcpp::SerializedMessage serialized_msg(*serialized_message->serialized_data);
         serializer.deserialize_message(&serialized_msg, &msg);
         last_route_msg = std::make_shared<autoware_planning_msgs::msg::LaneletRoute>(msg);
+        const auto stamp_ns = rclcpp::Time(msg.header.stamp).nanoseconds();
+        route_history.emplace_back(stamp_ns != 0 ? stamp_ns : message_time.nanoseconds(), msg);
       } catch (const std::exception & e) {
         RCLCPP_WARN(get_logger(), "Failed to deserialize route message: %s", e.what());
       }
@@ -531,6 +553,11 @@ void AutowarePlanningDataAnalyzerNode::run_evaluation()
       evaluator.set_evaluation_horizons(evaluation_horizons);
       evaluator.set_extended_comfort_parameters(extended_comfort_parameters_);
       evaluator.set_override_window_sec(override_window_sec_);
+      evaluator.set_frame_geometry_parameters(frame_geometry_params_);
+      std::stable_sort(
+        route_history.begin(), route_history.end(),
+        [](const auto & a, const auto & b) { return a.first < b.first; });
+      evaluator.set_route_history(std::move(route_history));
 
       const auto evaluator_configs = metrics::evaluator::load_evaluator_configs(*this);
       evaluator.set_evaluator_configs(evaluator_configs);
