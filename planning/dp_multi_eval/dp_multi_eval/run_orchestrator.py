@@ -159,7 +159,9 @@ def _job_config_from_payload(job: dict[str, Any], opts: dict[str, Any], domain_i
         scenario_record_warmup_sec=float(opts.get("scenario_record_warmup_sec", 15.0)),
         dry_run=bool(opts.get("dry_run", False)),
         rviz=bool(opts.get("rviz", False)),
-        planning_setting=str(opts.get("planning_setting", "diffusion_planner")),
+        planning_setting=str(
+            job.get("planning_setting") or opts.get("planning_setting", "diffusion_planner")
+        ),
     )
 
 
