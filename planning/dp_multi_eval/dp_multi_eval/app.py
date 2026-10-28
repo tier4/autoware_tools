@@ -176,6 +176,9 @@ def discover_model_configs(models_dir: Path) -> list[tuple[str, Path]]:
             continue
         if (child / "diffusion_planner.onnx").is_file() and (child / "args.json").is_file():
             found.append((child.name, child))
+        ml_onnx = child / "ml_planner.onnx"
+        if ml_onnx.is_file():
+            found.append((child.name, ml_onnx))
     # unique by path
     seen: set[Path] = set()
     out: list[tuple[str, Path]] = []
@@ -414,12 +417,16 @@ def main() -> None:
         if not model_opts:
             st.warning(
                 "No models found. Pick a folder containing ONNX model directories "
-                "(diffusion_planner.onnx + args.json) or *.param.yaml files."
+                "(diffusion_planner.onnx + args.json, or a single ml_planner.onnx) "
+                "or *.param.yaml files."
             )
         selected_models = []
         for name, path in model_opts:
             if st.checkbox(name, value=False, key=f"m_{path}"):
-                selected_models.append({"name": name, "model_config": str(path)})
+                entry = {"name": name, "model_config": str(path)}
+                if path.name == "ml_planner.onnx":
+                    entry["planning_setting"] = "ml_planner"
+                selected_models.append(entry)
 
         selected_bags: list[Path] = []
         selected_scenarios: list[Path] = []

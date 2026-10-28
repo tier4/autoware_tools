@@ -970,7 +970,7 @@ def run_scenario_simulator_job(cfg: JobConfig) -> JobResult:
                 "Install Scenario Simulator v2 (simulator.repos) and source the workspace."
             )
 
-        make_model_overlay(cfg.model_config, overlay_root)
+        make_model_overlay(cfg.model_config, overlay_root, cfg.planning_setting)
         env = env_with_overlay(env, overlay_root, cfg.domain_id)
         vehicle_id = cfg.vehicle_id or env.get("VEHICLE_ID")
         if vehicle_id:
@@ -1143,7 +1143,7 @@ def run_reproducer_job(cfg: JobConfig) -> JobResult:
         if not bag_path.exists():
             raise FileNotFoundError(f"bag_path not found: {bag_path}")
 
-        make_model_overlay(cfg.model_config, overlay_root)
+        make_model_overlay(cfg.model_config, overlay_root, cfg.planning_setting)
         env = env_with_overlay(env, overlay_root, cfg.domain_id)
         vehicle_id = cfg.vehicle_id or env.get("VEHICLE_ID")
         if vehicle_id:
