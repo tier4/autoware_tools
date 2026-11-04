@@ -66,6 +66,9 @@ private:
   void on_republish_route_service(
     const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
     const std::shared_ptr<std_srvs::srv::Trigger::Response> response);
+  void on_nudge_ego_pose_service(
+    const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+    const std::shared_ptr<std_srvs::srv::Trigger::Response> response);
   void on_autoware_state(const autoware_system_msgs::msg::AutowareState::SharedPtr msg);
 
   // find nearest ego odom index by position (same-heading preferred)
@@ -135,6 +138,7 @@ private:
 
   // service
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr republish_route_srv_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr nudge_ego_pose_srv_;
 
   // state management
   std::deque<size_t> reproduce_sequence_indices_;
