@@ -613,7 +613,7 @@ void PerceptionReplayerCommon::kill_online_perception_node()
 {
   // kill the object recognition node
   if (param_.tracked_object && !rosbag_tracked_objects_data_.empty()) {
-    kill_process("multi_object_tracker");
+    kill_process("multi_object_tracker_node");
   } else if (!rosbag_predicted_objects_data_.empty()) {
     kill_process("map_based_prediction");
   }
