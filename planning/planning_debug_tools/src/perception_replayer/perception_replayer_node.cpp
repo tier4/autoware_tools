@@ -74,7 +74,8 @@ int main(int argc, char * argv[])
     QCommandLineOption rosbag_format_option(
       QStringList() << "f"
                     << "rosbag-format",
-      "rosbag data format", "{sqlite3,mcap}", "sqlite3");
+      "rosbag data format (auto-detected from bag metadata or file extension when omitted)",
+      "{sqlite3,mcap}", "sqlite3");
     options << rosbag_format_option;
 
     QCommandLineOption replay_route_option(
@@ -107,8 +108,11 @@ int main(int argc, char * argv[])
       return 1;
     }
 
-    perception_replayer_param.rosbag_format = parser.value(rosbag_format_option).toStdString();
+    if (parser.isSet(rosbag_format_option)) {
+      perception_replayer_param.rosbag_format = parser.value(rosbag_format_option).toStdString();
+    }
     if (
+      !perception_replayer_param.rosbag_format.empty() &&
       perception_replayer_param.rosbag_format != "sqlite3" &&
       perception_replayer_param.rosbag_format != "mcap") {
       std::cerr << "Error: invalid rosbag format: " << perception_replayer_param.rosbag_format

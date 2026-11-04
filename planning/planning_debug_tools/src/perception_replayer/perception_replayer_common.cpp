@@ -101,6 +101,74 @@ bool natural_path_less(const std::string & a, const std::string & b)
   return compare_natural(basename(a), basename(b)) < 0;
 }
 
+bool is_supported_rosbag_format(const std::string & format)
+{
+  return format == "sqlite3" || format == "mcap";
+}
+
+std::string extension_to_rosbag_format(const std::string & extension)
+{
+  if (extension == ".mcap") {
+    return "mcap";
+  }
+  if (extension == ".db3") {
+    return "sqlite3";
+  }
+  return "";
+}
+
+std::string detect_rosbag_format(const std::string & path, const std::string & fallback_format)
+{
+  const std::filesystem::path bag_path(path);
+
+  // Prefer metadata.yaml when the path is a bag directory.
+  rosbag2_storage::MetadataIo metadata_io;
+  if (std::filesystem::is_directory(bag_path) && metadata_io.metadata_file_exists(path)) {
+    const auto metadata = metadata_io.read_metadata(path);
+    if (is_supported_rosbag_format(metadata.storage_identifier)) {
+      return metadata.storage_identifier;
+    }
+    for (const auto & relative_path : metadata.relative_file_paths) {
+      const auto format =
+        extension_to_rosbag_format(std::filesystem::path(relative_path).extension());
+      if (!format.empty()) {
+        return format;
+      }
+    }
+  }
+
+  if (std::filesystem::is_regular_file(bag_path)) {
+    const auto format = extension_to_rosbag_format(bag_path.extension());
+    if (!format.empty()) {
+      return format;
+    }
+  }
+
+  if (std::filesystem::is_directory(bag_path)) {
+    bool has_mcap = false;
+    bool has_db3 = false;
+    for (const auto & entry : std::filesystem::directory_iterator(bag_path)) {
+      if (!entry.is_regular_file()) {
+        continue;
+      }
+      if (entry.path().extension() == ".mcap") {
+        has_mcap = true;
+      }
+      if (entry.path().extension() == ".db3") {
+        has_db3 = true;
+      }
+    }
+    if (has_mcap && !has_db3) {
+      return "mcap";
+    }
+    if (has_db3 && !has_mcap) {
+      return "sqlite3";
+    }
+  }
+
+  return fallback_format;
+}
+
 }  // namespace
 
 namespace autoware::planning_debug_tools
@@ -312,20 +380,27 @@ PerceptionReplayerCommon::PerceptionReplayerCommon(
   uniform_dist_(0.0, 1.0),
   standard_dist_(0.0, 1.0)
 {
+  std::string rosbag_format = param_.rosbag_format;
+  if (rosbag_format.empty()) {
+    rosbag_format = detect_rosbag_format(param_.rosbag_path, "sqlite3");
+    std::cout << "Auto-detected rosbag format: " << rosbag_format
+              << " (use -f/--rosbag-format to override)" << std::endl;
+  }
+
   // check if rosbag_path is a directory or file
   if (std::filesystem::is_directory(param_.rosbag_path)) {
     std::cout << "Processing rosbag directory: " << param_.rosbag_path << std::endl;
-    const auto rosbag_files = find_rosbag_files(param_.rosbag_path, param_.rosbag_format);
+    const auto rosbag_files = find_rosbag_files(param_.rosbag_path, rosbag_format);
     std::cout << "Found " << rosbag_files.size() << " bag files" << std::endl;
 
     for (size_t i = 0; i < rosbag_files.size(); ++i) {
       std::cout << "Loading bag file " << (i + 1) << "/" << rosbag_files.size() << ": "
                 << rosbag_files[i] << std::endl;
-      load_rosbag(rosbag_files[i], param_.rosbag_format);
+      load_rosbag(rosbag_files[i], rosbag_format);
     }
   } else {
     std::cout << "Loading single bag file: " << param_.rosbag_path << std::endl;
-    load_rosbag(param_.rosbag_path, param_.rosbag_format);
+    load_rosbag(param_.rosbag_path, rosbag_format);
   }
   std::cout << "Ended loading rosbag" << std::endl;
 

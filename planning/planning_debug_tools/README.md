@@ -245,7 +245,7 @@ With `--auto-tackle-stuck`, if Autoware is in `DRIVING`, the live ego is stopped
 - `-p`, `--pub-route`: Initialize localization and publish a route based on poses from the rosbag
 - `--replay-route`: Replay route and route state topics from rosbag data with transient_local QoS (only publishes when the message changes)
 - `-n`, `--noise`: Apply perception noise to objects when publishing repeated messages (default: False)
-- `-f`, `--rosbag-format`: Specify rosbag data format (default: "db3")
+- `-f`, `--rosbag-format`: Specify rosbag data format (`sqlite3` or `mcap`). If omitted, the format is auto-detected from `metadata.yaml` or the `.db3`/`.mcap` file extension.
 - `--reference-image-topics`: Comma-separated list of CompressedImage topics to load and publish (e.g., `"/sensing/camera/camera0/image_raw/compressed,/sensing/camera/camera1/image_raw/compressed"`)
 - `--auto-tackle-stuck`: When Autoware is `DRIVING`, ego is stopped, and reproducer stays in repeat longer than `--stuck-duration`, first rebuild with scaled search radius once; if still stuck for another `--stuck-duration` without ego motion, call `/localization/initialize` (DIRECT) with a pose further along the bag trajectory
 - `--stuck-duration`: Seconds stuck in ego-stopped + repeat before tackle steps (expand, then perturb) (default: 5.0)
@@ -354,7 +354,7 @@ The following topics are published during replay:
 - `-b`, `--bag`: Rosbag file path (required)
 - `-t`, `--tracked-object`: Publish tracked objects
 - `--replay-route`: Replay route and route state topics from rosbag data with transient_local QoS (only publishes when the message changes)
-- `-f`, `--rosbag-format`: Specify rosbag data format (default: "db3")
+- `-f`, `--rosbag-format`: Specify rosbag data format (`sqlite3` or `mcap`). If omitted, the format is auto-detected from `metadata.yaml` or the `.db3`/`.mcap` file extension.
 - `--filter-radius`, `--filter-angle`, `--filter-class`, `--filter-invert`: Filter the published objects (same as [Perception reproducer](#available-options))
 - `-v`, `--verbose`: Output debug data
 - `-h`, `--help`: Show help message
