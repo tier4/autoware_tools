@@ -237,18 +237,28 @@ void PerceptionReproducer::on_nudge_ego_pose_service(
 
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
-    if (last_published_timestamp_.has_value()) {
+    // Anchor on live ego. last_published_timestamp_ is the perception replay cursor and can
+    // sit on a stopped bag cluster, so walking from it republishes the same XY.
+    if (const auto ego_odom_opt = get_latest_ego_odom(); ego_odom_opt.has_value()) {
+      start_idx = find_nearest_ego_odom_index(ego_odom_opt.value().pose.pose);
+    } else if (last_published_timestamp_.has_value()) {
       start_idx =
         utils::get_nearest_index(rosbag_ego_odom_data_, last_published_timestamp_.value());
-    } else if (const auto ego_odom_opt = get_latest_ego_odom(); ego_odom_opt.has_value()) {
-      start_idx = find_nearest_ego_odom_index(ego_odom_opt.value().pose.pose);
     }
 
-    const auto nudge_idx_opt = find_perturb_index_along_bag(start_idx, nudge_distance);
+    const auto & start_pos = rosbag_ego_odom_data_[start_idx].second.pose.pose.position;
+    std::optional<size_t> nudge_idx_opt;
+    for (size_t i = start_idx + 1; i < rosbag_ego_odom_data_.size(); ++i) {
+      const auto & pos = rosbag_ego_odom_data_[i].second.pose.pose.position;
+      if (utils::calculate_distance_2d(start_pos, pos) >= nudge_distance) {
+        nudge_idx_opt = i;
+        break;
+      }
+    }
     if (!nudge_idx_opt.has_value() || nudge_idx_opt.value() <= start_idx) {
       response->success = false;
       response->message =
-        "Cannot nudge: recorded trajectory has no pose ahead of the current index.";
+        "Cannot nudge: recorded trajectory does not move far enough ahead of the current pose.";
       return;
     }
 
