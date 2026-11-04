@@ -29,6 +29,7 @@ ament_auto_add_library(${PROJECT_NAME} SHARED
   src/metrics/epdms/subscores/traffic_light_compliance.cpp
   src/metrics/trajectory_metrics.cpp
   src/utils/bag_utils.cpp
+  src/utils/frame_geometry.cpp
   src/utils/json_utils.cpp
   src/utils/override_windows.cpp
   src/utils/path_utils.cpp
@@ -64,6 +65,7 @@ if(BUILD_TESTING)
     test/metrics/test_traffic_light_compliance.cpp
     test/metrics/test_evaluator_metrics.cpp
     test/utils/test_override_windows.cpp
+    test/utils/test_frame_geometry.cpp
   )
 
   target_include_directories(test_metrics
@@ -87,6 +89,11 @@ if(BUILD_TESTING)
   target_link_libraries(test_offline_evaluation ${PROJECT_NAME})
   ament_target_dependencies(test_offline_evaluation autoware_test_utils)
 endif()
+
+install(PROGRAMS
+  scripts/plot_error_map.py
+  DESTINATION lib/${PROJECT_NAME}
+)
 
 ament_auto_package(
   INSTALL_TO_SHARE
