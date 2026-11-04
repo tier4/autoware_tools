@@ -112,21 +112,20 @@ def generate_manifest(
                 key = bag_key(bag, rosbag_dir)
                 job_id = f"{name}__{key.replace('/', '__')}"
                 out = results_root / name / key
-                jobs.append(
-                    {
-                        "job_id": job_id,
-                        "mode": mode,
-                        "model_name": name,
-                        "model_config_path": model_config,
-                        "bag_path": str(bag.resolve()),
-                        "scenario_path": None,
-                        "bag_key": key,
-                        "output_dir": str(out),
-                        "status": "pending",
-                        "error": None,
-                        "attempts": 0,
-                    }
-                )
+                job: dict[str, Any] = {
+                    "job_id": job_id,
+                    "mode": mode,
+                    "model_name": name,
+                    "model_config_path": model_config,
+                    "bag_path": str(bag.resolve()),
+                    "scenario_path": None,
+                    "bag_key": key,
+                    "output_dir": str(out),
+                    "status": "pending",
+                    "error": None,
+                    "attempts": 0,
+                }
+                jobs.append(job)
         return {
             "version": 2,
             "mode": mode,
@@ -168,23 +167,22 @@ def generate_manifest(
                     key = f"{base_key}/run{run_i:02d}"
                 job_id = f"{name}__{key.replace('/', '__')}"
                 out = results_root / name / key
-                jobs.append(
-                    {
-                        "job_id": job_id,
-                        "mode": mode,
-                        "model_name": name,
-                        "model_config_path": model_config,
-                        "bag_path": None,
-                        "scenario_path": str(scenario.resolve()),
-                        "bag_key": key,
-                        "repeat_index": run_i,
-                        "repeat_count": repeats,
-                        "output_dir": str(out),
-                        "status": "pending",
-                        "error": None,
-                        "attempts": 0,
-                    }
-                )
+                job = {
+                    "job_id": job_id,
+                    "mode": mode,
+                    "model_name": name,
+                    "model_config_path": model_config,
+                    "bag_path": None,
+                    "scenario_path": str(scenario.resolve()),
+                    "bag_key": key,
+                    "repeat_index": run_i,
+                    "repeat_count": repeats,
+                    "output_dir": str(out),
+                    "status": "pending",
+                    "error": None,
+                    "attempts": 0,
+                }
+                jobs.append(job)
     return {
         "version": 2,
         "mode": mode,

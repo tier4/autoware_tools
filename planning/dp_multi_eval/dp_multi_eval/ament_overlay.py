@@ -4,9 +4,10 @@ Autoware's diffusion planner launch resolves:
   $(find-pkg-share autoware_launch)/config/planning/neural_net_planner/diffusion_planner.param.yaml
 
 The overlay clones ``share/autoware_launch`` from the real install (hardlinks when
-possible) and replaces only ``diffusion_planner.param.yaml``. A minimal overlay that
-only contained the param file would shadow the whole package and break
-``ros2 launch autoware_launch planning_simulator.launch.xml``.
+possible) and replaces the planner param for this job. ``planning_setting=ml_planner``
+writes ``ml_planner.param.yaml``; otherwise it writes ``diffusion_planner.param.yaml``.
+A minimal overlay that only contained the param file would shadow the whole package
+and break ``ros2 launch autoware_launch planning_simulator.launch.xml``.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import subprocess
 from pathlib import Path
 
 PARAM_REL = Path("config/planning/neural_net_planner/diffusion_planner.param.yaml")
+ML_PARAM_REL = Path("config/planning/neural_net_planner/ml_planner.param.yaml")
 
 
 def resolve_autoware_launch_share() -> Path:
@@ -64,7 +66,11 @@ def _clone_share_tree(src: Path, dst: Path) -> None:
     )
 
 
-def make_model_overlay(model_config: Path, overlay_root: Path) -> Path:
+def make_model_overlay(
+    model_config: Path,
+    overlay_root: Path,
+    planning_setting: str = "diffusion_planner",
+) -> Path:
     """
     Create overlay_root with a full autoware_launch share tree and the job param.
     Returns overlay_root (prepend this to AMENT_PREFIX_PATH).
@@ -76,7 +82,8 @@ def make_model_overlay(model_config: Path, overlay_root: Path) -> Path:
     real_share = resolve_autoware_launch_share()
     overlay_share = overlay_root / "share" / "autoware_launch"
     _clone_share_tree(real_share, overlay_share)
-    shutil.copy2(model_config, overlay_share / PARAM_REL)
+    param_rel = ML_PARAM_REL if planning_setting == "ml_planner" else PARAM_REL
+    shutil.copy2(model_config, overlay_share / param_rel)
 
     (overlay_root / "share" / "ament_index" / "resource_index" / "packages").mkdir(
         parents=True, exist_ok=True
