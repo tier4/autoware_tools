@@ -72,7 +72,8 @@ int main(int argc, char ** argv)
     const QCommandLineOption rosbag_format_option(
       QStringList() << "f"
                     << "rosbag-format",
-      "rosbag data format", "{sqlite3,mcap}", "sqlite3");
+      "rosbag data format (auto-detected from bag metadata or file extension when omitted)",
+      "{sqlite3,mcap}", "sqlite3");
     options << rosbag_format_option;
 
     const QCommandLineOption search_radius_option(
@@ -172,7 +173,9 @@ int main(int argc, char ** argv)
 
     autoware::planning_debug_tools::PerceptionReproducerParam param;
     param.rosbag_path = parser.value(bag_option).toStdString();
-    param.rosbag_format = parser.value(rosbag_format_option).toStdString();
+    if (parser.isSet(rosbag_format_option)) {
+      param.rosbag_format = parser.value(rosbag_format_option).toStdString();
+    }
     param.tracked_object = parser.isSet(tracked_object_option);
     param.search_radius = parser.value(search_radius_option).toDouble();
     param.reproduce_cool_down = parser.value(cool_down_option).toDouble();
@@ -214,7 +217,9 @@ int main(int argc, char ** argv)
                 << " topics configured" << std::endl;
     }
 
-    if (param.rosbag_format != "sqlite3" && param.rosbag_format != "mcap") {
+    if (
+      !param.rosbag_format.empty() && param.rosbag_format != "sqlite3" &&
+      param.rosbag_format != "mcap") {
       std::cerr << "Error: invalid rosbag format: " << param.rosbag_format << std::endl;
       return 1;
     }
