@@ -79,6 +79,12 @@ struct OpenLoopTrajectoryMetrics
   double extended_comfort{0.0};  // Binary extended comfort subscore
   bool extended_comfort_available{false};
   std::string extended_comfort_reason{"unavailable"};
+  std::string extended_comfort_debug_summary;
+  std::vector<double> extended_comfort_sample_times;
+  std::vector<double> extended_comfort_delta_acceleration;
+  std::vector<double> extended_comfort_delta_jerk;
+  std::vector<double> extended_comfort_delta_yaw_rate;
+  std::vector<double> extended_comfort_delta_yaw_accel;
   double time_to_collision_within_bound{0.0};
   bool time_to_collision_within_bound_available{false};
   std::string time_to_collision_within_bound_reason{"unavailable"};
@@ -160,6 +166,7 @@ struct EnabledOpenLoopMetrics
   bool driving_direction_compliance{true};
   bool traffic_light_compliance{true};
   bool synthetic_epdms{true};
+  bool enable_epdms_calculation{true};
 };
 
 class OpenLoopEvaluator : public BaseEvaluator
@@ -204,6 +211,11 @@ public:
   void set_metric_variant(const std::string & metric_variant) { metric_variant_ = metric_variant; }
 
   void set_enabled_metrics(const std::vector<std::string> & enabled_metric_names);
+
+  void set_epdms_calculation_enabled(bool enabled)
+  {
+    enabled_metrics_.enable_epdms_calculation = enabled;
+  }
 
   void set_debug_topics_enabled(bool enabled) { debug_topics_enabled_ = enabled; }
 
