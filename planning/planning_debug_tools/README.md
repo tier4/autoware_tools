@@ -314,6 +314,14 @@ ros2 service call /perception_reproducer/republish_route std_srvs/srv/Trigger {}
 
 This publishes `/initialpose` from the rosbag start and `/planning/mission_planning/goal` from the rosbag end, same as the `-p` option at startup. The reproduce cool-down state is also reset.
 
+To relocate ego `search-radius` meters along the recorded trajectory (default 1.5 m), call:
+
+```bash
+ros2 service call /perception_reproducer/nudge_ego_pose std_srvs/srv/Trigger {}
+```
+
+This publishes `/initialpose` at that bag pose and resets reproduce cool-down so replay continues from the nudged index.
+
 ## Perception replayer
 
 A part of the feature is under development.

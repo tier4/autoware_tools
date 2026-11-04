@@ -82,6 +82,10 @@ PerceptionReproducer::PerceptionReproducer(
     "~/republish_route", std::bind(
                            &PerceptionReproducer::on_republish_route_service, this,
                            std::placeholders::_1, std::placeholders::_2));
+  nudge_ego_pose_srv_ = this->create_service<std_srvs::srv::Trigger>(
+    "~/nudge_ego_pose", std::bind(
+                          &PerceptionReproducer::on_nudge_ego_pose_service, this,
+                          std::placeholders::_1, std::placeholders::_2));
 
   if (param_.publish_route) {
     publish_localization_and_route();
@@ -213,6 +217,64 @@ void PerceptionReproducer::on_republish_route_service(
   }
 
   response->success = true;
+  RCLCPP_INFO(get_logger(), "%s", response->message.c_str());
+}
+
+void PerceptionReproducer::on_nudge_ego_pose_service(
+  const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+  const std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+{
+  if (rosbag_ego_odom_data_.empty()) {
+    response->success = false;
+    response->message = "No ego odom data loaded from rosbag.";
+    return;
+  }
+
+  const double nudge_distance = param_.search_radius > 0.0 ? param_.search_radius : 1.5;
+  size_t start_idx = 0;
+  size_t nudge_idx = 0;
+  std::optional<rclcpp::Time> nudge_timestamp;
+
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    // Anchor on live ego. last_published_timestamp_ is the perception replay cursor and can
+    // sit on a stopped bag cluster, so walking from it republishes the same XY.
+    if (const auto ego_odom_opt = get_latest_ego_odom(); ego_odom_opt.has_value()) {
+      start_idx = find_nearest_ego_odom_index(ego_odom_opt.value().pose.pose);
+    } else if (last_published_timestamp_.has_value()) {
+      start_idx =
+        utils::get_nearest_index(rosbag_ego_odom_data_, last_published_timestamp_.value());
+    }
+
+    const auto & start_pos = rosbag_ego_odom_data_[start_idx].second.pose.pose.position;
+    std::optional<size_t> nudge_idx_opt;
+    for (size_t i = start_idx + 1; i < rosbag_ego_odom_data_.size(); ++i) {
+      const auto & pos = rosbag_ego_odom_data_[i].second.pose.pose.position;
+      if (utils::calculate_distance_2d(start_pos, pos) >= nudge_distance) {
+        nudge_idx_opt = i;
+        break;
+      }
+    }
+    if (!nudge_idx_opt.has_value() || nudge_idx_opt.value() <= start_idx) {
+      response->success = false;
+      response->message =
+        "Cannot nudge: recorded trajectory does not move far enough ahead of the current pose.";
+      return;
+    }
+
+    nudge_idx = nudge_idx_opt.value();
+    nudge_timestamp = rosbag_ego_odom_data_[nudge_idx].first;
+    reset_reproduce_tracking(nudge_timestamp);
+    tried_expand_while_stopped_ = false;
+    stuck_since_.reset();
+  }
+
+  publish_recorded_ego_pose(nudge_timestamp.value());
+
+  response->success = true;
+  response->message = "Published /initialpose " + std::to_string(nudge_distance) +
+                      " m along the recorded trajectory (idx " + std::to_string(start_idx) +
+                      " -> " + std::to_string(nudge_idx) + ").";
   RCLCPP_INFO(get_logger(), "%s", response->message.c_str());
 }
 
