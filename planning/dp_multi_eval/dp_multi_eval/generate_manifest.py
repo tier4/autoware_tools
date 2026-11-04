@@ -10,7 +10,7 @@ from typing import Any
 
 import yaml
 
-from dp_multi_eval.model_config import is_ml_planner_source, resolve_model_config
+from dp_multi_eval.model_config import resolve_model_config
 from dp_multi_eval.scenario_sim import (
     SCENARIO_EXTENSIONS,
     discover_scenarios,
@@ -55,15 +55,6 @@ def discover_bags(rosbag_dir: Path) -> list[Path]:
             seen.add(b)
             unique.append(b)
     return unique
-
-
-def _planning_setting_for_model(model: dict[str, Any]) -> str | None:
-    explicit = str(model.get("planning_setting") or "").strip()
-    if explicit:
-        return explicit
-    if is_ml_planner_source(Path(str(model["model_config"]))):
-        return "ml_planner"
-    return None
 
 
 def bag_key(bag: Path, rosbag_dir: Path) -> str:
@@ -117,7 +108,6 @@ def generate_manifest(
                     model_opts=model,
                 )
             )
-            planning_setting = _planning_setting_for_model(model)
             for bag in bag_list:
                 key = bag_key(bag, rosbag_dir)
                 job_id = f"{name}__{key.replace('/', '__')}"
@@ -135,8 +125,6 @@ def generate_manifest(
                     "error": None,
                     "attempts": 0,
                 }
-                if planning_setting:
-                    job["planning_setting"] = planning_setting
                 jobs.append(job)
         return {
             "version": 2,
@@ -170,7 +158,6 @@ def generate_manifest(
                 model_opts=model,
             )
         )
-        planning_setting = _planning_setting_for_model(model)
         for scenario in scenario_list:
             base_key = scenario_key(scenario, scenario_dir)
             for run_i in range(1, repeats + 1):
@@ -195,8 +182,6 @@ def generate_manifest(
                     "error": None,
                     "attempts": 0,
                 }
-                if planning_setting:
-                    job["planning_setting"] = planning_setting
                 jobs.append(job)
     return {
         "version": 2,

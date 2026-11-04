@@ -423,10 +423,16 @@ def main() -> None:
         selected_models = []
         for name, path in model_opts:
             if st.checkbox(name, value=False, key=f"m_{path}"):
-                entry = {"name": name, "model_config": str(path)}
-                if path.name == "ml_planner.onnx":
-                    entry["planning_setting"] = "ml_planner"
-                selected_models.append(entry)
+                selected_models.append({"name": name, "model_config": str(path)})
+        selection_key = tuple(sorted(m["model_config"] for m in selected_models))
+        if selection_key != st.session_state.get("_model_selection_for_planning_setting"):
+            st.session_state["_model_selection_for_planning_setting"] = selection_key
+            settings = {
+                "ml_planner" if Path(m["model_config"]).name == "ml_planner.onnx" else "diffusion_planner"
+                for m in selected_models
+            }
+            if len(settings) == 1:
+                st.session_state["planning_setting"] = next(iter(settings))
 
         selected_bags: list[Path] = []
         selected_scenarios: list[Path] = []
@@ -508,11 +514,24 @@ def main() -> None:
                 value=str(base.get("vehicle_id", "6_lv828l")),
                 help="Matches manual launch: autoware.vehicle_id:=6_lv828l",
             )
+            if "planning_setting" not in st.session_state:
+                st.session_state["planning_setting"] = str(
+                    base.get("planning_setting", "diffusion_planner")
+                )
             planning_setting = st.text_input(
                 "planning_setting",
-                value=str(base.get("planning_setting", "diffusion_planner")),
-                help="autoware.planning_setting:=… (use diffusion_planner)",
+                key="planning_setting",
+                help="Taken from the selected model. Launch uses this displayed value.",
             )
+            selected_settings = {
+                "ml_planner" if Path(m["model_config"]).name == "ml_planner.onnx" else "diffusion_planner"
+                for m in selected_models
+            }
+            if len(selected_settings) > 1:
+                st.warning(
+                    "Selected models use different planning settings. "
+                    "Every job uses the planning_setting shown above."
+                )
         with col_a3:
             map_path = st.text_input(
                 "map_path",
