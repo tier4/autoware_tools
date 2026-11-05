@@ -2,7 +2,7 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>autoware_pointcloud_saver_rviz_plugin</name>
-  <version>0.7.0</version>
+  <version>0.8.0</version>
   <description>The autoware_pointcloud_saver_rviz_plugin package</description>
   <maintainer email="yamato.ando@tier4.jp">Yamato Ando</maintainer>
   <license>Apache License 2.0</license>
@@ -13,13 +13,9 @@
 
   <build_depend>qtbase5-dev</build_depend>
 
-  <depend>autoware_lanelet2_extension</depend>
   <depend>autoware_map_msgs</depend>
   <depend>autoware_utils</depend>
-  <depend>autoware_utils_geometry</depend>
-  <depend>autoware_utils_pcl</depend>
   <depend>geometry_msgs</depend>
-  <depend>lanelet2_core</depend>
   <depend>libpcl-all</depend>
   <depend>nav_msgs</depend>
   <depend>pcl_conversions</depend>

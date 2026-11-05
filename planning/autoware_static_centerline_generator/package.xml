@@ -2,10 +2,9 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>autoware_static_centerline_generator</name>
-  <version>0.7.0</version>
+  <version>0.8.0</version>
   <description>The autoware_static_centerline_generator package</description>
   <maintainer email="takayuki.murooka@tier4.jp">Takayuki Murooka</maintainer>
-  <maintainer email="kosuke.takeuchi@tier4.jp">Kosuke Takeuchi</maintainer>
   <license>Apache License 2.0</license>
 
   <author email="takayuki.murooka@tier4.jp">Takayuki Murooka</author>
@@ -41,7 +40,8 @@
   <depend>rclcpp_components</depend>
   <depend>tier4_map_msgs</depend>
 
-  <exec_depend>autoware_launch</exec_depend>
+  <exec_depend>autoware_map_config</exec_depend>
+  <exec_depend>autoware_planning_config</exec_depend>
   <exec_depend>libqt5-core</exec_depend>
   <exec_depend>libqt5-widgets</exec_depend>
   <exec_depend>python3-flask-cors</exec_depend>

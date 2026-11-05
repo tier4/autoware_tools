@@ -32,10 +32,9 @@
 #include "utils.hpp"
 
 #include <autoware/geography_utils/lanelet2_projector.hpp>
-#include <autoware/mission_planner_universe/mission_planner_plugin.hpp>
+#include <autoware/mission_planner_universe/default_planner.hpp>
 #include <autoware/qos_utils/qos_compatibility.hpp>
 #include <autoware/universe_utils/ros/marker_helper.hpp>
-#include <pluginlib/class_loader.hpp>
 
 #include "std_msgs/msg/empty.hpp"
 #include "std_msgs/msg/float32.hpp"
@@ -167,6 +166,12 @@ void assign_centerline_points_to_lanelets(
   size_t points_outside_any = 0;
 
   for (const auto & traj_point : optimized_traj_points) {
+    // The first point may lie just outside the entrance due to numerical error.
+    if (&traj_point == &optimized_traj_points.front() && !route_lanelets.empty()) {
+      points_per_lanelet.front().push_back(traj_point.pose.position);
+      continue;
+    }
+
     const auto pt = convert_to_lanelet_point(traj_point.pose.position);
 
     if (
@@ -336,7 +341,9 @@ StaticCenterlineGeneratorNode::StaticCenterlineGeneratorNode(
   sub_validate_ = create_subscription<std_msgs::msg::Empty>(
     "/static_centerline_generator/validate", rclcpp::QoS{1},
     [this]([[maybe_unused]] const std_msgs::msg::Empty & msg) {
-      connect_centerline_to_lanelet();
+      const auto mode = get_parameter("mode").as_string();
+      connect_centerline_to_lanelet(
+        (mode == "AUTO" || mode == "VMB") && centerline_handler_.start_index == 0);
       validate_centerline();
     });
 
@@ -363,6 +370,17 @@ StaticCenterlineGeneratorNode::StaticCenterlineGeneratorNode(
 
   // vehicle info
   vehicle_info_ = autoware::vehicle_info_utils::VehicleInfoUtils(*this).getVehicleInfo();
+
+  // parameters of the route planner
+  default_planner_param_.goal_angle_threshold_deg =
+    declare_parameter<double>("goal_angle_threshold_deg");
+  default_planner_param_.enable_correct_goal_pose =
+    declare_parameter<bool>("enable_correct_goal_pose");
+  default_planner_param_.consider_no_drivable_lanes =
+    declare_parameter<bool>("consider_no_drivable_lanes");
+  default_planner_param_.check_footprint_inside_lanes =
+    declare_parameter<bool>("check_footprint_inside_lanes");
+  default_planner_param_.allow_area = declare_parameter<bool>("allow_area", false);
 
   centerline_source_ = [&]() {
     const auto centerline_source_param = declare_parameter<std::string>("centerline_source");
@@ -683,18 +701,11 @@ LaneletRoute StaticCenterlineGeneratorNode::plan_route(
   const auto check_points =
     std::vector<geometry_msgs::msg::Pose>{start_center_pose, end_center_pose};
 
-  // create mission_planner plugin
-  auto plugin_loader = pluginlib::ClassLoader<autoware::mission_planner_universe::PlannerPlugin>(
-    "autoware_mission_planner_universe", "autoware::mission_planner_universe::PlannerPlugin");
-  auto mission_planner = plugin_loader.createSharedInstance(
-    "autoware::mission_planner_universe::lanelet2::DefaultPlanner");
-
-  // initialize mission_planner
-  auto node = rclcpp::Node("mission_planner");
-  mission_planner->initialize(&node, map_bin_ptr_);
-
   // plan route
-  return mission_planner->plan(check_points);
+  autoware::mission_planner_universe::lanelet2::DefaultPlanner mission_planner(
+    default_planner_param_, vehicle_info_);
+  mission_planner.set_map(*map_bin_ptr_);
+  return mission_planner.plan(check_points).route;
 }
 
 void StaticCenterlineGeneratorNode::on_plan_route(
@@ -795,13 +806,14 @@ void StaticCenterlineGeneratorNode::on_plan_path(
     optimized_traj_points, route_lanelets, response, get_logger());
 
   // publish unsafe_footprints and run validation (for rviz / logging only)
-  connect_centerline_to_lanelet();
+  connect_centerline_to_lanelet(true);
   validate_centerline();
 
   response->message = "";
 }
 
-void StaticCenterlineGeneratorNode::connect_centerline_to_lanelet()
+void StaticCenterlineGeneratorNode::connect_centerline_to_lanelet(
+  const bool assign_first_point_to_first_lanelet)
 {
   centerline_handler_.clear_centerline_lane_ids();
 
@@ -814,7 +826,10 @@ void StaticCenterlineGeneratorNode::connect_centerline_to_lanelet()
 
   // 1. calculate the lanelet of the centerline's front.
   std::optional<size_t> centerline_front_lanelet_idx{std::nullopt};
-  for (size_t i = 0; i < route_lanelets.size(); ++i) {
+  if (assign_first_point_to_first_lanelet) {
+    centerline_front_lanelet_idx = 0;
+  }
+  for (size_t i = 0; !centerline_front_lanelet_idx && i < route_lanelets.size(); ++i) {
     const auto & lanelet = route_lanelets.at(i);
     const bool is_inside =
       lanelet::geometry::inside(lanelet, convert_to_lanelet_point(centerline.at(0).pose.position));
@@ -842,6 +857,9 @@ void StaticCenterlineGeneratorNode::connect_centerline_to_lanelet()
       }
 
       const bool is_target_lanelet = [&]() {
+        if (assign_first_point_to_first_lanelet && centerline_idx == 0 && lanelet_idx == 0) {
+          return true;
+        }
         if (!centerline_front_lanelet_idx && !was_once_inside_lanelet) {
           // If the centerline's front is before the route_lanelets, use the first
           // lane in the route_lanelets as a target.
@@ -1214,7 +1232,9 @@ void StaticCenterlineGeneratorNode::save_map()
   // after validate (e.g. the GUI index updates were applied after the validate request), the cache
   // goes stale and the size check below aborts the save. Refreshing here keeps the centerline and
   // its lane ids consistent for the selection actually being saved.
-  connect_centerline_to_lanelet();
+  const auto mode = get_parameter("mode").as_string();
+  connect_centerline_to_lanelet(
+    (mode == "AUTO" || mode == "VMB") && centerline_handler_.start_index == 0);
 
   const auto centerline = centerline_handler_.get_selected_centerline();
   const auto centerline_lane_ids = centerline_handler_.get_centerline_lane_ids();

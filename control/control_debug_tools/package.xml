@@ -2,7 +2,7 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>control_debug_tools</name>
-  <version>0.7.0</version>
+  <version>0.8.0</version>
   <description>The control_debug_tools package</description>
   <maintainer email="zhe.shen@tier4.jp">Zhe Shen</maintainer>
   <maintainer email="takayuki.murooka@tier4.jp">Takayuki Murooka</maintainer>
@@ -12,6 +12,8 @@
 
   <buildtool_depend>ament_cmake_auto</buildtool_depend>
   <buildtool_depend>autoware_cmake</buildtool_depend>
+
+  <exec_depend>autoware_control_config</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>autoware_lint_common</test_depend>

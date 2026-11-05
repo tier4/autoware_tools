@@ -15,6 +15,7 @@
 #ifndef STATIC_CENTERLINE_GENERATOR_NODE_HPP_
 #define STATIC_CENTERLINE_GENERATOR_NODE_HPP_
 
+#include "autoware/mission_planner_universe/default_planner.hpp"
 #include "autoware/universe_utils/ros/parameter.hpp"
 #include "autoware_static_centerline_generator/srv/load_map.hpp"
 #include "autoware_static_centerline_generator/srv/plan_path.hpp"
@@ -119,7 +120,7 @@ public:
   explicit StaticCenterlineGeneratorNode(const rclcpp::NodeOptions & node_options);
   void generate_centerline();
   void load_centerline();
-  void connect_centerline_to_lanelet();
+  void connect_centerline_to_lanelet(bool assign_first_point_to_first_lanelet = false);
   void validate_centerline();
   void save_map();
 
@@ -209,6 +210,9 @@ private:
 
   // vehicle info
   autoware::vehicle_info_utils::VehicleInfo vehicle_info_;
+
+  // parameters of the route planner
+  autoware::mission_planner_universe::lanelet2::DefaultPlannerParameters default_planner_param_;
 };
 }  // namespace autoware::static_centerline_generator
 #endif  // STATIC_CENTERLINE_GENERATOR_NODE_HPP_
