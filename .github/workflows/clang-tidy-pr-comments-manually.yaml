@@ -1,7 +1,7 @@
 name: clang-tidy-pr-comments-manually
 
 on:
-  workflow_dispatch:
+  pull_request:
     inputs:
       workflow_run_id_or_url:
         description: The target workflow run ID or URL of the build-and-test-differential workflow
