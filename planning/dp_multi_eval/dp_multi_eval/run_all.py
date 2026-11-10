@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ import yaml
 
 from dp_multi_eval.build_dashboard import build_dashboard
 from dp_multi_eval.generate_manifest import generate_manifest, load_pipeline_config
+from dp_multi_eval.job_config import PIPELINE_KNOBS
 from dp_multi_eval.run_orchestrator import load_manifest, run_orchestrator, save_manifest
 
 
@@ -21,16 +23,21 @@ def job_has_real_output(job: dict[str, Any]) -> bool:
 
 
 def reconcile_manifest(manifest: dict[str, Any]) -> int:
-    """Reset bogus done/dry_run entries so real runs are not skipped."""
+    """Re-queue entries that cannot be what they say: done/dry_run without a
+    recorded output bag, and "running" — run_all is the only orchestrator of a
+    results root, so at its start a running job is one whose run_all died
+    (terminal closed, 2026-09-16: two orphaned stacks and two jobs no later
+    run would ever pick up)."""
     reset = 0
     for job in manifest.get("jobs", []):
-        if job.get("status") not in ("done", "dry_run"):
-            continue
-        if job_has_real_output(job):
-            continue
-        job["status"] = "pending"
-        job["error"] = None
-        reset += 1
+        if job.get("status") == "running":
+            job["status"] = "pending"
+            job["error"] = "interrupted (previous run_all died)"
+            reset += 1
+        elif job.get("status") in ("done", "dry_run") and not job_has_real_output(job):
+            job["status"] = "pending"
+            job["error"] = None
+            reset += 1
     return reset
 
 
@@ -55,6 +62,12 @@ def merge_manifests(existing: dict[str, Any], fresh: dict[str, Any]) -> dict[str
             merged_jobs.append(job)
         else:
             merged_jobs.append(job)
+    # Jobs the fresh manifest does not mention — a run of a subset of the
+    # bags, another model, the other playback mode — are still results;
+    # they stay, status and all. Rebuilding from a subset config dropped 30
+    # of 38 finished jobs from the manifest (2026-09-15).
+    fresh_ids = {j["job_id"] for j in fresh["jobs"]}
+    merged_jobs.extend(j for j in existing.get("jobs", []) if j["job_id"] not in fresh_ids)
     fresh["jobs"] = merged_jobs
     return fresh
 
@@ -65,7 +78,9 @@ def run_all(
     max_workers: int | None = None,
     dry_run: bool = False,
     max_retries: int = 1,
+    only: str | None = None,
 ) -> int:
+    t_start = time.monotonic()
     cfg = load_pipeline_config(config_path)
     results_root = Path(cfg["results_root"]).expanduser().resolve()
     results_root.mkdir(parents=True, exist_ok=True)
@@ -77,6 +92,11 @@ def run_all(
         mode=str(cfg.get("mode", "reproducer")),
         rosbag_dir=Path(cfg["rosbag_dir"]) if cfg.get("rosbag_dir") else None,
         scenario_dir=Path(cfg["scenario_dir"]) if cfg.get("scenario_dir") else None,
+        # A subset of the folder (the GUI's selection); without it every bag runs.
+        bags=[Path(b) for b in cfg["bag_whitelist"]] if cfg.get("bag_whitelist") else None,
+        scenarios=(
+            [Path(s) for s in cfg["scenario_whitelist"]] if cfg.get("scenario_whitelist") else None
+        ),
         param_template=(
             Path(cfg["param_template_path"]).expanduser()
             if cfg.get("param_template_path")
@@ -100,65 +120,9 @@ def run_all(
     domain_start = int(cfg.get("domain_id_start", 10))
     domain_ids = list(range(domain_start, domain_start + max(workers, 1)))
 
-    extra = {
-        k: cfg[k]
-        for k in (
-            "mode",
-            "vehicle_model",
-            "sensor_model",
-            "vehicle_id",
-            "end_condition",
-            "bag_duration_margin_sec",
-            "route_timeout_sec",
-            "psim_startup_sec",
-            "route_setup_timeout_sec",
-            "auto_engage_timeout_sec",
-            "perception_warmup_sec",
-            "perception_ready_timeout_sec",
-            "perception_ready_min_objects",
-            "perception_ready_stable_sec",
-            "require_perception_ready",
-            "bag_load_base_sec",
-            "bag_load_duration_factor",
-            "bag_load_timeout_cap_sec",
-            "reproducer_search_radius_m",
-            "reproducer_cool_down_sec",
-            "multi_goal",
-            "multi_goal_source",
-            "multi_goal_stop_speed_mps",
-            "multi_goal_stop_min_sec",
-            "multi_goal_min_spacing_m",
-            "multi_goal_stop_order",
-            "stop_points_csv",
-            "stuck_blinker_nudge",
-            "stuck_blinker_speed_mps",
-            "stuck_blinker_trigger_sec",
-            "stuck_blinker_hold_sec",
-            "stuck_blinker_cooldown_sec",
-            "stuck_abort_sec",
-            "stuck_reposition_trigger_sec",
-            "stuck_reposition_forward_m",
-            "stuck_reposition_max_count",
-            "multi_goal_arrival_tolerance_m",
-            "multi_goal_leg_timeout_sec",
-            "live_web_monitor",
-            "live_web_sample_sec",
-            "architecture_type",
-            "scenario_timeout_sec",
-            "scenario_record_warmup_sec",
-            "planning_setting",
-            "video_fps",
-            "video_sample_dt",
-            "video_view_frame",
-            "video_view_range_m",
-            "show_planning_factors",
-            "rviz",
-            "thresholds",
-            "topics_yaml",
-            "vehicle_info_yaml",
-        )
-        if k in cfg
-    }
+    # A key missing from the config map is skipped, not an error; a key missing
+    # from PIPELINE_KNOBS is silently ignored — keep that list complete.
+    extra = {k: cfg[k] for k in PIPELINE_KNOBS if k in cfg}
     extra.setdefault("mode", str(cfg.get("mode", "reproducer")))
 
     # Pass 1 + optional retries for failed
@@ -175,16 +139,25 @@ def run_all(
             save_manifest(manifest_path, manifest)
             print(f"[info] Retry pass {attempt}/{max_retries}")
 
-        run_orchestrator(
-            manifest_path,
-            max_workers=workers,
-            domain_ids=domain_ids,
-            map_path=Path(cfg.get("map_path", "/opt/autoware/maps")),
-            dry_run=dry_run,
-            retry_failed=True,
-            render_video_flag=bool(cfg.get("render_video", True)),
-            extra_opts=extra,
-        )
+        try:
+            run_orchestrator(
+                manifest_path,
+                max_workers=workers,
+                domain_ids=domain_ids,
+                map_path=Path(cfg.get("map_path", "/opt/autoware/maps")),
+                dry_run=dry_run,
+                retry_failed=True,
+                render_video_flag=bool(cfg.get("render_video", True)),
+                extra_opts=extra,
+                only=only,
+            )
+        except KeyboardInterrupt:
+            # The orchestrator has already cancelled the queue and stopped the
+            # simulators; a stack trace here would only obscure that.
+            manifest = load_manifest(manifest_path)
+            build_dashboard(manifest, results_root / "dashboard.html")
+            print("[warn] Run interrupted; interrupted jobs left pending for a rerun")
+            return 130
         manifest = load_manifest(manifest_path)
 
     dashboard = build_dashboard(manifest, results_root / "dashboard.html")
@@ -213,9 +186,10 @@ def run_all(
             f"no simulations launched; see {manifest_path}"
         )
     else:
+        elapsed_min = (time.monotonic() - t_start) / 60.0
         print(
-            f"DONE: {n_done}/{n} completed ({n_pass} metric-pass), {n_fail} failed — "
-            f"see {manifest_path}"
+            f"DONE: {n_done}/{n} completed ({n_pass} metric-pass), {n_fail} failed "
+            f"in {elapsed_min:.1f} min — see {manifest_path}"
         )
     print(f"Dashboard: {dashboard}")
     return 0 if dry_run or n_fail == 0 else 1
@@ -227,12 +201,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max_workers", type=int, default=None)
     p.add_argument("--dry_run", action="store_true")
     p.add_argument("--max_retries", type=int, default=1)
+    p.add_argument(
+        "--only",
+        default=None,
+        help="run only the jobs whose id contains this string (e.g. a bag key); "
+        "every other job keeps its status and its results",
+    )
     args = p.parse_args(argv)
     return run_all(
         args.config,
         max_workers=args.max_workers,
         dry_run=args.dry_run,
         max_retries=args.max_retries,
+        only=args.only,
     )
 
 

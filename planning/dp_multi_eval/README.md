@@ -1,47 +1,36 @@
 # dp_multi_eval
 
-Parallel-friendly **Diffusion Planner evaluation** for Autoware planning simulator.
+Closed-loop evaluation of Diffusion Planner models on recorded Isuzu Erga
+drives. Each model drives every recording in the planning simulator while the
+recorded traffic, lights and indicators are replayed around it. Output: one
+dashboard, models side by side, a verdict and a video per run.
 
-Two ways to run the same pipeline:
-
-| Mode | Description | Documentation |
-|------|-------------|---------------|
-| **Headless** | CLI batch — no RViz, no Streamlit; `run_all.py` + HTML dashboard | **[docs/HEADLESS.md](docs/HEADLESS.md)** |
-| **GUI** | Streamlit wrapper around the same orchestrator | [docs/GUI_TESTING.md](docs/GUI_TESTING.md) |
-
-**Status:** early integration — see [docs/REVIEW.md](docs/REVIEW.md) for code review.
-
----
-
-## Documentation index
-
-| Doc | For |
-|-----|-----|
-| **[docs/HEADLESS.md](docs/HEADLESS.md)** | **Headless batch pipeline** — config, CLI, resume, metrics, engineer test checklist |
-| [docs/GUI_TESTING.md](docs/GUI_TESTING.md) | Streamlit `app.py` test checklist |
-| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Shared ops (metrics detail, troubleshooting) |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Design, phases, code map |
-| [docs/REVIEW.md](docs/REVIEW.md) | PR review checklist |
-
-Related: [diffusion_planner_batch_eval](../diffusion_planner_batch_eval/README.md) — interactive RViz-based debugging.
-
----
-
-## 30-second start (headless)
+## Quick start
 
 ```bash
-colcon build --packages-select dp_multi_eval diffusion_planner_batch_eval --allow-overriding dp_multi_eval
 source install/setup.bash
 cp src/tools/planning/dp_multi_eval/config/example_pipeline.yaml ~/dp_multi_eval_pipeline.yaml
-# edit paths
-
-ros2 run dp_multi_eval run_all.py -c ~/dp_multi_eval_pipeline.yaml --max_workers 1
+# edit rosbag_dir, results_root, map_path, models
+ros2 run dp_multi_eval run_all.py -c ~/dp_multi_eval_pipeline.yaml --dry_run   # manifest only
+ros2 run dp_multi_eval run_all.py -c ~/dp_multi_eval_pipeline.yaml             # run
+python3 -m http.server 8765 --directory <results_root>                         # open /dashboard.html
 ```
 
-Full guide: **[docs/HEADLESS.md](docs/HEADLESS.md)**
+Re-running resumes. `--only <bag|model>` runs a subset. Ctrl-C stops cleanly.
+`ros2 run dp_multi_eval rescore.py -c <yaml>` re-judges finished runs after a metric change.
 
----
+## Docs
 
-## Maintainer
+| | |
+|---|---|
+| [SETUP](docs/SETUP.md) | what the machine needs |
+| [RUNNING](docs/RUNNING.md) | config keys, commands, reruns, stopping, rescore |
+| [EVALUATION_METHOD](docs/EVALUATION_METHOD.md) | how a recording becomes a test |
+| [METRICS](docs/METRICS.md) | what is measured, what fails a run |
+| [RESULTS](docs/RESULTS.md) | result files and the dashboard |
+| [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) | symptoms → fixes |
+| [ARCHITECTURE](docs/ARCHITECTURE.md) | modules and design decisions |
+| [LEGACY](docs/LEGACY.md) | GUI, scenario simulator, old drive loop |
 
-Takahiko Hasegawa — see `package.xml`.
+Tests: `python3 tests/run_tests.py` (source the workspace to include the map/overlay
+integration tests; they skip otherwise). Maintainer: see `package.xml`.

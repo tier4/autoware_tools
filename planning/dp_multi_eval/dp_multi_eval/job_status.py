@@ -24,6 +24,40 @@ def write_job_status(output_dir: Path, payload: dict[str, Any]) -> Path:
     return path
 
 
+def finalize_job_status(
+    output_dir: Path,
+    *,
+    status: str,
+    error: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    """Stamp a terminal status onto an existing job_status.json.
+
+    Post-processing writes progress updates that hardcode ``status: running``, so
+    without a final write the file keeps claiming the job is mid-render long after
+    it finished. Merges onto whatever is already there so start_time, domain_id and
+    the recorded paths survive.
+    """
+    payload: dict[str, Any] = {}
+    path = output_dir / "job_status.json"
+    if path.is_file():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+    payload["status"] = status
+    payload["error"] = error
+    payload["end_time"] = utc_now_iso()
+    payload.pop("phase", None)
+    payload.pop("phase_start_time", None)
+    if extra:
+        payload.update(extra)
+    try:
+        write_job_status(output_dir, payload)
+    except OSError:
+        pass
+
+
 def preview_video_filename(job: dict[str, Any]) -> str:
     """Unique per-job preview name so flat cloud uploads do not collide."""
     job_id = str(job.get("job_id") or "").strip()

@@ -150,7 +150,10 @@ class LiveDriveMonitor:
         bag_key: str = "",
         goals: list[dict[str, Any]] | None = None,
         extra_paths: list[Path] | None = None,
+        env: dict[str, str] | None = None,
     ) -> None:
+        # The job's environment: the ROS domain the simulator publishes on.
+        self.env = dict(env or {})
         self.output_path = Path(output_path)
         self.extra_paths = [Path(p) for p in (extra_paths or [])]
         self.sample_sec = max(0.5, float(sample_sec))
@@ -252,9 +255,13 @@ class LiveDriveMonitor:
             return
 
         # Own ROS context so this daemon thread does not collide with the job's
-        # main-thread rclpy.spin_once (route setup / perception wait).
-        context = rclpy.Context()
-        rclpy.init(context=context)
+        # main-thread rclpy.spin_once (route setup / perception wait) — opened
+        # on the JOB'S domain. A plain rclpy.init() here listened on domain 0
+        # while psim published on the job's, and every live_drive.json ever
+        # written said "waiting_for_ego_pose" (found 2026-09-10).
+        from dp_multi_eval.job_waiters import open_job_context
+
+        context = open_job_context(self.env)
 
         class Sampler(Node):
             def __init__(self_inner) -> None:

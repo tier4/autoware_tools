@@ -23,12 +23,16 @@ def ego_local_footprint(
     rear_overhang: float = 2.5,
     width: float = 2.5,
     margin: float = 0.0,
+    left: float | None = None,
+    right: float | None = None,
 ) -> Polygon:
-    """Approximate bus footprint in base_link (axis-aligned box)."""
+    """Bus footprint in base_link (axis-aligned box). ``left`` / ``right`` are
+    the half widths to each side when they differ (vehicle_info overhangs)."""
     x_f = front_overhang + wheel_base + margin
     x_r = -(rear_overhang + margin)
-    half_w = width * 0.5 + margin
-    return [(x_f, half_w), (x_f, -half_w), (x_r, -half_w), (x_r, half_w)]
+    y_l = (width * 0.5 if left is None else left) + margin
+    y_r = (width * 0.5 if right is None else right) + margin
+    return [(x_f, y_l), (x_f, -y_r), (x_r, -y_r), (x_r, y_l)]
 
 
 def box_local(length: float, width: float) -> Polygon:
@@ -168,12 +172,43 @@ def load_vehicle_footprint(vehicle_info_yaml: Path | None, margin: float = 0.0) 
 
         raw = yaml.safe_load(vehicle_info_yaml.read_text(encoding="utf-8")) or {}
         params = raw.get("/**", {}).get("ros__parameters", raw.get("ros__parameters", raw))
+        left = right = None
+        if "vehicle_width" not in params and "wheel_tread" in params:
+            # Autoware's vehicle_info: the body reaches tread/2 + the side
+            # overhang on each side. "tread + 0.5" made the lv828l 2.60 m wide
+            # instead of 2.87 m, and contacts along the sides went uncounted.
+            tread = float(params["wheel_tread"])
+            left = tread / 2.0 + float(params.get("left_overhang", 0.25))
+            right = tread / 2.0 + float(params.get("right_overhang", 0.25))
         return ego_local_footprint(
             wheel_base=float(params.get("wheel_base", 5.3)),
             front_overhang=float(params.get("front_overhang", 2.5)),
             rear_overhang=float(params.get("rear_overhang", 2.5)),
             width=float(params.get("vehicle_width", params.get("wheel_tread", 2.0) + 0.5)),
             margin=margin,
+            left=left,
+            right=right,
         )
     except Exception:  # noqa: BLE001
         return ego_local_footprint(margin=margin)
+
+
+def resolve_vehicle_info_yaml(configured: str | Path | None, vehicle_model: str | None) -> Path | None:
+    """The vehicle_info the metrics and the video measure the ego with: the
+    configured file, else ``<vehicle_model>_description``'s own. Without it
+    the 10.3 x 2.5 m default stood in for the 10.88 x 2.87 m lv828l, and
+    contacts up to 0.19 m into its sides and 0.82 m into its rear went
+    uncounted (2026-11-05 review)."""
+    if configured:
+        return Path(configured).expanduser()
+    if not vehicle_model:
+        return None
+    pkg = f"{vehicle_model}_description"
+    try:
+        from ament_index_python.packages import get_package_share_directory
+
+        share = Path(get_package_share_directory(pkg))
+    except Exception:  # noqa: BLE001  (not sourced / package not installed)
+        return None
+    candidate = share / "config" / "vehicle_info.param.yaml"
+    return candidate if candidate.is_file() else None

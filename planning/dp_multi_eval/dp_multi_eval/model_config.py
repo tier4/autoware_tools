@@ -27,8 +27,8 @@ def _launch_param_path(filename: str) -> Path:
     if fallback.is_file():
         return fallback
     raise FileNotFoundError(
-        f"{filename} not found. Source autoware_launch or set param_template_path "
-        "in the pipeline config."
+        f"{filename} template not found. "
+        "Source autoware_launch or set param_template_path in the pipeline config."
     )
 
 
@@ -40,14 +40,71 @@ def default_ml_param_template_path() -> Path:
     return _launch_param_path("ml_planner.param.yaml")
 
 
-def is_ml_planner_source(path: Path) -> bool:
-    """True for a lone ml_planner.onnx, or a directory that only has that file."""
-    path = Path(path)
-    if path.is_file():
-        return path.name == ML_PLANNER_ONNX
-    if path.is_dir() and (path / ML_PLANNER_ONNX).is_file():
-        return not (path / "diffusion_planner.onnx").is_file()
-    return False
+def _param_kind(text: str) -> str | None:
+    """Which planner a param YAML configures: the diffusion planner sets
+    args_path, the ML planner (one ONNX, no args.json) does not."""
+    if "args_path:" in text:
+        return "diffusion_planner"
+    ml_markers = ("ml_planner", "onnx_model_filename:", "remap_unsupported_objects_to_pedestrian:")
+    if any(m in text for m in ml_markers):
+        return "ml_planner"
+    return None
+
+
+def planning_setting_for(model_config: str | Path) -> str:
+    """The launch ``planning_setting`` a model needs: "ml_planner" for an
+    ml_planner.onnx (or its folder, or its param YAML), else "diffusion_planner"."""
+    path = Path(model_config).expanduser()
+    if path.is_dir():
+        if (path / "diffusion_planner.onnx").is_file() or (
+            path / "diffusion_planner.param.yaml"
+        ).is_file():
+            return "diffusion_planner"
+        return "ml_planner" if (path / ML_PLANNER_ONNX).is_file() else "diffusion_planner"
+    if path.name == ML_PLANNER_ONNX:
+        return "ml_planner"
+    if path.suffix == ".yaml" and path.is_file():
+        return _param_kind(path.read_text(encoding="utf-8", errors="ignore")) or "diffusion_planner"
+    return "diffusion_planner"
+
+
+def discover_model_configs(models_dir: Path) -> list[tuple[str, Path]]:
+    """Planner models under ``models_dir``, at any depth: a diffusion planner
+    directory (diffusion_planner.onnx + args.json), an ml_planner.onnx file, or
+    a planner param YAML. Other *.param.yaml files (the perception models next
+    to the planners in autoware_data) are skipped."""
+    if not models_dir.is_dir():
+        return []
+    found: list[tuple[str, Path]] = []
+    for path in sorted(models_dir.rglob("*.param.yaml")):
+        try:
+            if _param_kind(path.read_text(encoding="utf-8", errors="ignore")) is None:
+                continue
+        except OSError:
+            continue
+        if path.name in ("diffusion_planner.param.yaml", "ml_planner.param.yaml"):
+            found.append((path.parent.name, path))
+        else:
+            found.append((path.name.removesuffix(".param.yaml"), path))
+    for onnx in sorted(models_dir.rglob("diffusion_planner.onnx")):
+        if (onnx.parent / "args.json").is_file():
+            found.append((onnx.parent.name, onnx.parent))
+    for onnx in sorted(models_dir.rglob(ML_PLANNER_ONNX)):
+        found.append((onnx.parent.name, onnx))
+    return unique_models(found)
+
+
+def unique_models(models: list[tuple[str, Path]]) -> list[tuple[str, Path]]:
+    """Keep the first entry per resolved path."""
+    seen: set[Path] = set()
+    out: list[tuple[str, Path]] = []
+    for name, path in models:
+        path = path.expanduser().resolve()
+        if path in seen:
+            continue
+        seen.add(path)
+        out.append((name, path))
+    return out
 
 
 def patch_param_yaml(
@@ -62,42 +119,39 @@ def patch_param_yaml(
     lines: list[str] = []
     for line in template_path.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
+        # Keep the template's indent: since the 2026-10-15 package update the
+        # paths sit under model: / single_step_model:, not at the top level.
+        indent = line[: len(line) - len(line.lstrip())]
         if stripped.startswith("onnx_model_path:"):
-            lines.append(f"    onnx_model_path: {onnx_path}")
+            lines.append(f"{indent}onnx_model_path: {onnx_path}")
         elif stripped.startswith("args_path:"):
-            lines.append(f"    args_path: {args_path}")
+            lines.append(f"{indent}args_path: {args_path}")
         elif stripped.startswith("ignore_neighbors:") and ignore_neighbors is not None:
-            lines.append(f"    ignore_neighbors: {str(ignore_neighbors).lower()}")
+            lines.append(f"{indent}ignore_neighbors: {str(ignore_neighbors).lower()}")
         else:
             lines.append(line)
     output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _patch_ml_param_yaml(template_path: Path, output_path: Path, onnx_path: Path) -> None:
-    """Point ml_planner.param.yaml at one ml_planner.onnx file."""
+def patch_ml_param_yaml(template_path: Path, output_path: Path, onnx_path: Path) -> None:
+    """Point ml_planner.param.yaml at one ONNX file. The template sets
+    model.onnx_model_path; older ones split it into base_model_directory +
+    onnx_model_filename. Indent is kept."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    replacements = {
+    values = {
+        "onnx_model_path": str(onnx_path),
         "base_model_directory": str(onnx_path.parent),
         "onnx_model_filename": onnx_path.name,
     }
     lines: list[str] = []
     for line in template_path.read_text(encoding="utf-8").splitlines():
-        stripped = line.lstrip(" ")
+        stripped = line.lstrip()
         key = stripped.split(":", 1)[0]
-        if key in replacements:
-            indent = line[: len(line) - len(stripped)]
-            lines.append(f"{indent}{key}: {replacements[key]}")
+        if key in values and ":" in stripped:
+            lines.append(f"{line[: len(line) - len(stripped)]}{key}: {values[key]}")
         else:
             lines.append(line)
     output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def _write_ml_param(onnx_path: Path, cache_dir: Path, model_name: str | None) -> Path:
-    fallback_name = onnx_path.parent.name
-    safe_name = (model_name or fallback_name).replace("/", "_")
-    target = cache_dir / f"{safe_name}.param.yaml"
-    _patch_ml_param_yaml(default_ml_param_template_path(), target, onnx_path)
-    return target
 
 
 def resolve_model_config(
@@ -106,23 +160,26 @@ def resolve_model_config(
     cache_dir: Path,
     model_name: str | None = None,
     param_template: Path | None = None,
+    ml_param_template: Path | None = None,
     model_opts: dict[str, Any] | None = None,
 ) -> Path:
     """
     Accept either:
-    - a planner param YAML file, or
-    - ml_planner.onnx (single-file model, no args.json), or
-    - a model directory containing diffusion_planner.onnx + args.json,
-      or only ml_planner.onnx.
-    Directories are turned into a cached param YAML from the autoware_launch template.
+    - a planner param YAML file (diffusion or ML planner), or
+    - an ml_planner.onnx file, or a directory holding one (no args.json), or
+    - a model directory containing diffusion_planner.onnx + args.json.
+    ONNX inputs get a cached param YAML from the autoware_launch template.
     """
     path = Path(model_config).expanduser().resolve()
     cache_dir = cache_dir.expanduser().resolve()
     cache_dir.mkdir(parents=True, exist_ok=True)
     opts = model_opts or {}
 
-    if path.is_file() and path.name == ML_PLANNER_ONNX:
-        return _write_ml_param(path, cache_dir, model_name)
+    ml_onnx = path if path.name == ML_PLANNER_ONNX else path / ML_PLANNER_ONNX
+    if ml_onnx.is_file() and planning_setting_for(path) == "ml_planner":
+        target = cache_dir / f"{(model_name or ml_onnx.parent.name).replace('/', '_')}.param.yaml"
+        patch_ml_param_yaml(ml_param_template or default_ml_param_template_path(), target, ml_onnx)
+        return target
 
     if path.is_file():
         return path
@@ -134,16 +191,12 @@ def resolve_model_config(
     if nested.is_file():
         return nested
 
-    ml_onnx = path / ML_PLANNER_ONNX
     onnx = path / "diffusion_planner.onnx"
-    if ml_onnx.is_file() and not onnx.is_file():
-        return _write_ml_param(ml_onnx, cache_dir, model_name)
-
     args_json = path / "args.json"
     if not onnx.is_file():
         raise FileNotFoundError(
             f"model_config directory has no diffusion_planner.param.yaml, "
-            f"diffusion_planner.onnx, or {ML_PLANNER_ONNX}: {path}"
+            f"diffusion_planner.onnx or {ML_PLANNER_ONNX}: {path}"
         )
     if not args_json.is_file():
         raise FileNotFoundError(f"args.json missing next to ONNX model: {path}")

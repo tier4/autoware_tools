@@ -20,9 +20,16 @@ vehicle_model: lv828l
 sensor_model: aip_x2_gen2
 vehicle_id: 6_lv828l
 
+# Jobs run in parallel, each on its own ROS_DOMAIN_ID. Every worker launches a full
+# Autoware stack and a TensorRT engine, so the ceiling is GPU memory rather than CPU;
+# raise this only with the GPU headroom to match, and watch for "Cuda Runtime (out of
+# memory)" in the first job that fails.
 max_workers: 1
 domain_id_start: 10
 render_video: true
+# Also render the preview for stuck/timeout/failed runs. These are the runs you
+# actually need to watch, so leave this on unless disk space forces otherwise.
+render_video_on_failure: true
 video_fps: 6.0
 video_sample_dt: 0.5   # fewer video frames → faster post-processing (0.2 = smoother)
 # Preview camera: map = fit full path; base_link = ego-centered (less zoomed out)
@@ -49,13 +56,25 @@ require_perception_ready: true
 bag_load_base_sec: 120.0
 bag_load_duration_factor: 1.0
 bag_load_timeout_cap_sec: 3600.0
-# perception_reproducer -r [m]. 0 = always nearest (recommended when ego may diverge)
-reproducer_search_radius_m: 0.0
-reproducer_cool_down_sec: 80.0
-# Multi-goal bag replay: bus stop → ARRIVED → next goal (single-goal bags still work).
-# Off by default. When on: extract legs from goal topics, stop segments, or stop_points.csv.
-multi_goal: false
-multi_goal_source: stop_points   # stop_points | auto | goal_topic | stop_segments
+# Multi-goal bag replay: bus stop → ARRIVED → next goal.
+#
+# auto (default) reads the answer off the bag, because getting it wrong fails either
+# way and neither failure names its cause. A recording that stops at intermediate
+# points needs each of them as a goal: without that the ego stops there on the
+# planner's own decision, never receives ARRIVED, and is recorded as stuck. A single
+# stop-to-stop cut has no intermediate stop, and forcing multi-goal on it makes leg
+# extraction come up empty and the job fail outright.
+#
+# true/false force the choice. Legs come from goal topics, stop segments or
+# stop_points.csv per multi_goal_source below.
+multi_goal: auto
+# auto = the bag's recorded route (/planning/mission_planning/route) when present,
+# else published goal topics, else the bag's own dwell points. The recorded route is
+# the only source that does not guess: its goals were produced and accepted by the
+# recording vehicle's own mission planner, republished per leg.
+# stop_points needs multi_goal_stop_order below and only suits a known bus route;
+# it cannot work on an arbitrary bag, so it is not the default.
+multi_goal_source: auto   # auto | recorded_route | goal_topic | stop_segments | stop_points
 # Ordered stop names from {map_path}/stop_points.csv (used when source=stop_points)
 multi_goal_stop_order:
   - 平塚駅南口
@@ -76,18 +95,53 @@ stop_points_csv: stop_points.csv
 multi_goal_stop_speed_mps: 0.2
 multi_goal_stop_min_sec: 8.0
 multi_goal_min_spacing_m: 15.0
-# If ego is nearly stopped while waiting for ARRIVED, publish LEFT then RIGHT
-# blinker on /vehicle/status/turn_indicators_status (DP input) to try triggering
-# a new trajectory (lane-change / pull-out stalls).
-stuck_blinker_nudge: true
+# How far a map stop point may sit from the bag's own start/goal and still replace it
+# when routing fails. -1 = no limit (default), 0 = never substitute, N = within N m.
+# Unlimited is safe because metrics now follow the goal the planner accepted: the run
+# is scored where the ego actually drove, and how far the goal moved is recorded as
+# goal_substituted_m. Set a positive limit only if a scenario must stay within a
+# radius of the recorded one.
+stop_fallback_max_dist_m: -1.0
+
+# Wall-clock cap on one route-setting call, recovery ladder included.
+# route_setup_timeout_sec bounds a single attempt, and the ladder multiplies it:
+# attempts x backends x backoff steps x stop fallbacks. Measured on a leg goal that
+# was simply unroutable, that came to 581 s inside one advance_route — ten minutes
+# of an evaluation run re-asking a question already answered. 0 disables the cap.
+route_total_timeout_sec: 180.0
+
+# Metres to pull the goal back along its lane when the mission planner rejects it
+# ("Goal's footprint exceeds lane!"). These rejections are marginal: measured at
+# 八間通り入口 the bus overhung by 7 cm² at one corner and 0.15 m cleared it, with the
+# goal already 0.03 m from the lane centerline. So the ladder opens at 0.25 m rather
+# than metres — a big first step would move the goal far more than needed and change
+# where the run is scored. Omit for the default; set [] to disable.
+goal_backoff_steps_m: [0.25, 0.5, 1.0, 2.0, 4.0]
+
+# Speed at or below which the ego counts as stalled, for stuck_abort_sec and the
+# near-goal arrival test. Kept equal to thresholds.yaml stuck_speed_mps so a job is
+# never abandoned for stalling at a speed the metric then scores as moving.
+stall_speed_mps: 0.05
+
+# Diagnostic probe, off for scoring runs: this publishes
+# /vehicle/status/turn_indicators_status, which a real vehicle interface owns, so
+# it feeds the planner a signal that cannot occur on the road. Turn it on to
+# investigate a stall; any run that used it is reported as assisted, not a clean pass.
+stuck_blinker_nudge: false
 stuck_blinker_speed_mps: 0.15
 stuck_blinker_trigger_sec: 12.0
 stuck_blinker_hold_sec: 3.0
 stuck_blinker_cooldown_sec: 25.0
+# Give up on a leg once ego has held near-zero speed this long in TOTAL. Counted
+# across repositions, so a scenario that can never move is abandoned here rather
+# than teleporting until the route timeout.
 stuck_abort_sec: 90.0
 stuck_reposition_trigger_sec: 30.0
 stuck_reposition_forward_m: 5.0
-stuck_reposition_max_count: 0
+# 0 = never reposition, N>0 = at most N shifts, negative = unlimited.
+# Repositioning is a harness intervention: it is counted and reported per job,
+# and any run that needed one is marked assisted rather than a clean pass.
+stuck_reposition_max_count: 3
 multi_goal_arrival_tolerance_m: 5.0
 multi_goal_leg_timeout_sec: 300.0
 live_web_monitor: true

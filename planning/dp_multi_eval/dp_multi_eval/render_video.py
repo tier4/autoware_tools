@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import bisect
 import json
+import math
 import sys
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -15,6 +16,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection, PolyCollection
 from matplotlib.patches import Polygon as MplPolygon
 from matplotlib.patches import Patch
 
@@ -25,6 +27,7 @@ from dp_multi_eval.bag_reader import (
     TURN_RIGHT,
     downsample_ego,
     load_bag_series,
+    load_reference_ego,
 )
 from dp_multi_eval.geometry import box_local, load_vehicle_footprint, transform_local_polygon
 from dp_multi_eval.topics import TopicSet, load_topics
@@ -53,6 +56,7 @@ class MapOverlay:
     crosswalks: list[list[tuple[float, float]]] = field(default_factory=list)
     stop_lines: list[list[tuple[float, float]]] = field(default_factory=list)
     traffic_signs: list[tuple[float, float, str]] = field(default_factory=list)  # x,y,label
+    traffic_lights: list[tuple[float, float, int]] = field(default_factory=list)  # x,y,group_id
     road_borders: list[list[tuple[float, float]]] = field(default_factory=list)
 
 
@@ -163,49 +167,56 @@ def _load_map_overlay(
         elif ltype == "zebra_marking":
             overlay.crosswalks.append(pts)
 
+    # Traffic lights, drawn live-coloured per frame: a 48 s red wait reads as
+    # "the ego is broken" when the video shows no reason for it.
+    try:
+        for elem in lanelet_map.regulatoryElementLayer:
+            try:
+                if elem.attributes.get("subtype", "") != "traffic_light":
+                    continue
+                refers = elem.parameters.get("refers", [])
+                if not refers:
+                    continue
+                pts = _linestring_xy(refers[0])
+                if not pts or not _pts_in_bbox(pts, bx0, bx1, by0, by1):
+                    continue
+                mid = pts[len(pts) // 2]
+                overlay.traffic_lights.append((mid[0], mid[1], int(elem.id)))
+            except Exception:  # noqa: BLE001
+                continue
+    except Exception:  # noqa: BLE001
+        pass
+
     return overlay
 
 
 def _draw_map_overlay(ax: Any, overlay: MapOverlay) -> list[Any]:
+    """One collection per line class. The map is redrawn every frame (the view
+    follows the ego), and as ~1900 separate Line2D artists it was 170 s of a
+    290 s render; a handful of collections draw in a few seconds."""
     artists: list[Any] = []
-    for line in overlay.road_borders:
-        (ln,) = ax.plot(
-            [p[0] for p in line], [p[1] for p in line],
-            color="#6e7681", lw=1.0, alpha=0.7, zorder=0,
-        )
-        artists.append(ln)
-    for line in overlay.left_bounds + overlay.right_bounds:
-        (ln,) = ax.plot(
-            [p[0] for p in line], [p[1] for p in line],
-            color="#9aa0a6", lw=0.7, alpha=0.85, zorder=0,
-        )
-        artists.append(ln)
-    for line in overlay.centerlines:
-        (ln,) = ax.plot(
-            [p[0] for p in line], [p[1] for p in line],
-            color="#c5c9ce", lw=0.35, alpha=0.6, zorder=0, linestyle="--",
-        )
-        artists.append(ln)
-    for poly in overlay.crosswalks:
-        if len(poly) >= 3 and abs(poly[0][0] - poly[-1][0]) + abs(poly[0][1] - poly[-1][1]) > 1e-3:
-            patch = MplPolygon(
-                poly, closed=True, facecolor="#f0e68c", edgecolor="#c4a000",
-                alpha=0.35, lw=0.6, zorder=0.5,
-            )
-            ax.add_patch(patch)
-            artists.append(patch)
-        else:
-            (ln,) = ax.plot(
-                [p[0] for p in poly], [p[1] for p in poly],
-                color="#c4a000", lw=1.2, alpha=0.7, zorder=0.5,
-            )
-            artists.append(ln)
-    for line in overlay.stop_lines:
-        (ln,) = ax.plot(
-            [p[0] for p in line], [p[1] for p in line],
-            color="#d62728", lw=2.0, alpha=0.9, zorder=1,
-        )
-        artists.append(ln)
+
+    def lines(segs: list[list[tuple[float, float]]], **style: Any) -> None:
+        segs = [seg for seg in segs if len(seg) >= 2]
+        if segs:
+            coll = LineCollection(segs, **style)
+            ax.add_collection(coll)
+            artists.append(coll)
+
+    lines(overlay.road_borders, colors="#6e7681", linewidths=1.0, alpha=0.7, zorder=0)
+    lines(overlay.left_bounds + overlay.right_bounds, colors="#9aa0a6", linewidths=0.7, alpha=0.85, zorder=0)
+    lines(overlay.centerlines, colors="#c5c9ce", linewidths=0.35, alpha=0.6, zorder=0, linestyles="--")
+    closed = [
+        poly for poly in overlay.crosswalks
+        if len(poly) >= 3 and abs(poly[0][0] - poly[-1][0]) + abs(poly[0][1] - poly[-1][1]) > 1e-3
+    ]
+    open_ = [poly for poly in overlay.crosswalks if poly not in closed]
+    if closed:
+        pc = PolyCollection(closed, facecolors="#f0e68c", edgecolors="#c4a000", alpha=0.35, linewidths=0.6, zorder=0.5)
+        ax.add_collection(pc)
+        artists.append(pc)
+    lines(open_, colors="#c4a000", linewidths=1.2, alpha=0.7, zorder=0.5)
+    lines(overlay.stop_lines, colors="#d62728", linewidths=2.0, alpha=0.9, zorder=1)
     if overlay.traffic_signs:
         xs = [s[0] for s in overlay.traffic_signs]
         ys = [s[1] for s in overlay.traffic_signs]
@@ -272,16 +283,24 @@ def _index_objects_per_frame(
 ) -> list[list]:
     if not objs or not ego_frames:
         return [[] for _ in ego_frames]
+    # One box per object per frame: the sample nearest the frame's instant.
+    # Appending every sample inside the window drew a moving object up to ten
+    # times per frame, a smear trailing behind it (2026-09-10).
     out: list[list] = [[] for _ in ego_frames]
     oi = 0
     for fi, ego in enumerate(ego_frames):
         t0, t1 = ego.stamp_sec - sample_dt, ego.stamp_sec + sample_dt
         while oi < len(objs) and objs[oi].stamp_sec < t0:
             oi += 1
+        best: dict = {}
         j = oi
         while j < len(objs) and objs[j].stamp_sec <= t1:
-            out[fi].append(objs[j])
+            o = objs[j]
+            key = o.object_id or id(o)
+            if key not in best or abs(o.stamp_sec - ego.stamp_sec) < abs(best[key].stamp_sec - ego.stamp_sec):
+                best[key] = o
             j += 1
+        out[fi] = list(best.values())
     return out
 
 
@@ -321,6 +340,36 @@ def _wall_style(source: str) -> tuple[str, str, str]:
     return _WALL_STYLE.get(leaf, _WALL_DEFAULT_STYLE)
 
 
+from dp_multi_eval.lag import scene_time_map as _scene_time_map  # noqa: E402
+
+
+def window_labels(windows_json: Path) -> list[tuple[float, float, str]]:
+    """(wall from, wall to, title text) per segment of a leg-window run: the
+    window number, and while the harness places the ego at a planned cut (its
+    lead along the recording, +2 s) that it was placed — a jump the viewer
+    should read as the cut, not as a defect (2026-11-10)."""
+    try:
+        payload = json.loads(Path(windows_json).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    lead = float((payload.get("params") or {}).get("lead_sec", 3.5))
+    legs = payload.get("legs") or []
+    out: list[tuple[float, float, str]] = []
+    for leg in legs:
+        tag = f"window {leg.get('index')}/{len(legs)}" + (" (cut)" if leg.get("opens") == "cut" else "")
+        for seg in leg.get("segments") or []:
+            a, b = seg.get("wall_handover"), seg.get("wall_end")
+            if a is None:
+                continue
+            if seg.get("placed"):
+                out.append((float(a) - lead - 0.5, float(a) + 2.0, tag + "  PLACED on the recording (planned cut)"))
+            if seg.get("scene_jumped"):
+                out.append((float(a) - 0.5, float(a) + 2.0,
+                            tag + f"  SCENE JUMPED {float(seg.get('skipped_sec') or 0):+.0f}s (the ego did not wait here)"))
+            out.append((float(a), float(b) if b is not None else float("inf"), tag))
+    return out
+
+
 def render_video(
     bag_path: Path,
     output_path: Path,
@@ -337,8 +386,23 @@ def render_video(
     view_frame: str = "map",
     view_range_m: float = 40.0,
     show_planning_factors: bool = True,
+    reference_bag: Path | None = None,
 ) -> Path:
     topics = topics or TopicSet()
+    # The recording this replay is driving against. Showing where that vehicle was
+    # at the same place — not the same instant — turns divergence from a number in
+    # metrics.json into something visible: a ghost that falls behind is a replay
+    # running fast, and that is the root of most conflicts in these runs.
+    reference_ego: list[Any] = []
+    if reference_bag is not None:
+        try:
+            reference_ego = load_reference_ego(
+                reference_bag,
+                ego_topic=topics.ego_pose,
+                velocity_topic=topics.vehicle_status_velocity,
+            )
+        except Exception:  # noqa: BLE001
+            reference_ego = []
     view_frame = (view_frame or "map").strip().lower()
     if view_frame not in ("map", "base_link"):
         view_frame = "map"
@@ -378,6 +442,31 @@ def render_video(
     ymin, ymax = min(ys) - pad, max(ys) + pad
 
     map_overlay = _load_map_overlay(map_path, xmin=xmin, xmax=xmax, ymin=ymin, ymax=ymax)
+
+    # Live traffic-light colours from the run's own recorded signal stream.
+    signal_series: list[tuple[float, dict[int, int]]] = []
+    if map_overlay.traffic_lights:
+        try:
+            from rclpy.serialization import deserialize_message
+            from rosbag2_py import StorageFilter
+            from rosidl_runtime_py.utilities import get_message
+
+            from dp_multi_eval.bag_reader import _type_map, open_bag_reader
+
+            _reader = open_bag_reader(bag_path)
+            _types = _type_map(_reader)
+            if topics.traffic_signals in _types:
+                _reader.set_filter(StorageFilter(topics=[topics.traffic_signals]))
+                while _reader.has_next():
+                    _t, _d, _ns = _reader.read_next()
+                    _m = deserialize_message(_d, get_message(_types[topics.traffic_signals]))
+                    st = {
+                        g.traffic_light_group_id: (g.elements[0].color if g.elements else 0)
+                        for g in _m.traffic_light_groups
+                    }
+                    signal_series.append((_ns * 1e-9, st))
+        except Exception:  # noqa: BLE001
+            signal_series = []
     objs = series.objects
     trajectories = series.trajectories
     walls = series.virtual_walls if show_planning_factors else []
@@ -390,7 +479,65 @@ def render_video(
     output_path = output_path.expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    fig, ax = plt.subplots(figsize=(8, 8), dpi=dpi)
+    # Two different pairings, because they answer two different questions.
+    #
+    # The speed strip pairs by *position*: what was the recorded speed at this place.
+    # Pairing it on the clock would compare unrelated stretches of road, since the
+    # replay reaches a place at its own moment.
+    #
+    # The ghost pairs by *elapsed time*: where had the recorded vehicle got to by now.
+    # That is the one that has to be on the clock — a ghost matched by position sits
+    # under the ego by construction and shows nothing. Matched by time it falls behind
+    # when the replay runs fast, which is exactly the divergence worth seeing.
+    #
+    # A leg-window run (windows.json beside the bag) is different: the scene is
+    # on recorded time, jumped at each window and held while the ego is set up,
+    # so the recorded vehicle at the SAME SCENE TIME is the one the ego is
+    # driving beside, for the strip and the ghost alike; paired by place the
+    # strip hid every departure delay behind a curve that rose with the ego.
+    speed_pairs: list[Any] = []
+    ghost_pairs: list[Any] = []
+    scene_time = _scene_time_map(Path(bag_path).parent / "windows.json")
+    win_labels = window_labels(Path(bag_path).parent / "windows.json")
+    if reference_ego:
+        ref_t0 = reference_ego[0].stamp_sec
+        ego_t0 = ego_frames[0].stamp_sec
+        ref_stamps = [r.stamp_sec for r in reference_ego]
+        for e in ego_frames:
+            if scene_time is not None:
+                import bisect as _b
+
+                k = min(_b.bisect_left(ref_stamps, scene_time(e.stamp_sec)), len(reference_ego) - 1)
+                speed_pairs.append(reference_ego[k])
+                ghost_pairs.append(reference_ego[k])
+                continue
+            best = None
+            best_d2 = 25.0
+            for r in reference_ego:
+                d2 = (r.x - e.x) ** 2 + (r.y - e.y) ** 2
+                if d2 <= best_d2:
+                    best_d2 = d2
+                    best = r
+            speed_pairs.append(best)
+
+            elapsed = e.stamp_sec - ego_t0
+            ghost_pairs.append(
+                min(reference_ego, key=lambda r: abs((r.stamp_sec - ref_t0) - elapsed))
+            )
+    ref_label = "recorded, same time" if scene_time is not None else "recorded, same place"
+    ghost_label = (
+        "recorded ego (same scene time)" if scene_time is not None else "recorded ego (same elapsed time)"
+    )
+
+    have_ref = any(g is not None for g in speed_pairs)
+    if have_ref:
+        fig, (ax, ax_v) = plt.subplots(
+            2, 1, figsize=(8, 9.4), dpi=dpi,
+            gridspec_kw={"height_ratios": [8, 1.4], "hspace": 0.22},
+        )
+    else:
+        fig, ax = plt.subplots(figsize=(8, 8), dpi=dpi)
+        ax_v = None
     fail = not metrics.get("pass", True) if metrics else False
     fail_reason = []
     if metrics:
@@ -408,6 +555,12 @@ def render_video(
     trail_line, = ax.plot([], [], color="#1f77b4", lw=1.2, alpha=0.85, zorder=1, label="ego path")
     plan_line, = ax.plot([], [], color="#ff7f0e", lw=2.2, alpha=0.95, zorder=2, label="planned trajectory")
     ego_patch = MplPolygon([[0, 0]], closed=True, facecolor="#d62728", edgecolor="k", alpha=0.8, zorder=3)
+    ghost_patch = MplPolygon(
+        [[0, 0]], closed=True, facecolor="none", edgecolor="#7b5ea7",
+        linestyle="--", linewidth=1.6, alpha=0.9, zorder=2,
+    )
+    ax.add_patch(ghost_patch)
+    ghost_patch.set_visible(False)
     ax.add_patch(ego_patch)
     blinker_left = MplPolygon(
         [[0, 0]], closed=True, facecolor="#ffdd57", edgecolor="#b8860b", alpha=0.0, zorder=6, lw=0.8
@@ -445,15 +598,70 @@ def render_video(
         Patch(facecolor="#9467bd", edgecolor="k", label="traffic sign"),
         Patch(facecolor="#ffdd57", edgecolor="#b8860b", label="blinker ON"),
     ]
+    if have_ref:
+        legend_handles.append(
+            Patch(facecolor="none", edgecolor="#7b5ea7", linewidth=1.6, label=ghost_label)
+        )
     if show_planning_factors:
+        # Only the wall sources this run actually published: a legend line for a
+        # module that never spoke (the fixer, switched off) read as its flag.
+        present = {w.source.rstrip("/").split("/")[-1] for w in walls}
         for name, (face, edge, short) in _WALL_STYLE.items():
+            if name in present:
+                legend_handles.append(
+                    Patch(facecolor=face, edgecolor=edge, linewidth=1.5, alpha=0.9, label=f"wall:{short}")
+                )
+        if present - set(_WALL_STYLE):
+            face, edge, short = _WALL_DEFAULT_STYLE
             legend_handles.append(
                 Patch(facecolor=face, edgecolor=edge, linewidth=1.5, alpha=0.9, label=f"wall:{short}")
             )
     ax.legend(handles=legend_handles, loc="upper right", fontsize=6, framealpha=0.7)
 
+    # Speed strip: ego against the recorded speed at the same place, with a playhead.
+    # A single glance answers the question the map alone cannot — is this run driving
+    # the road the way the road was driven.
+    playhead = None
+    if ax_v is not None:
+        t_rel = [e.stamp_sec - ego_frames[0].stamp_sec for e in ego_frames]
+        ego_v = [e.speed_mps for e in ego_frames]
+        ref_v = [(g.speed_mps if g is not None else float("nan")) for g in speed_pairs]
+        ax_v.plot(t_rel, ref_v, color="#7b5ea7", lw=1.4, ls="--", label=ref_label)
+        ax_v.plot(t_rel, ego_v, color="#d62728", lw=1.6, label="ego")
+        ax_v.set_xlim(t_rel[0], max(t_rel[-1], t_rel[0] + 1.0))
+        top = max([v for v in ego_v + ref_v if v == v] + [1.0])
+        ax_v.set_ylim(0, top * 1.15)
+        ax_v.set_ylabel("m/s", fontsize=7)
+        ax_v.set_xlabel("t [s]", fontsize=7)
+        ax_v.tick_params(labelsize=6)
+        ax_v.grid(True, alpha=0.25, lw=0.5)
+        ax_v.legend(loc="upper right", fontsize=6, framealpha=0.7, ncol=2)
+        playhead = ax_v.axvline(t_rel[0], color="#333333", lw=1.0)
+        for side in ("top", "right"):
+            ax_v.spines[side].set_visible(False)
+
     title = ax.set_title("")
     half = max(5.0, float(view_range_m))
+
+    _SIG_COLORS = {1: "#d62728", 2: "#ff9900", 3: "#2ca02c"}
+    light_dots = None
+    if map_overlay.traffic_lights and signal_series:
+        light_dots = ax.scatter(
+            [tl[0] for tl in map_overlay.traffic_lights],
+            [tl[1] for tl in map_overlay.traffic_lights],
+            s=42, c="#9aa0a6", edgecolors="k", linewidths=0.6, zorder=9, marker="o",
+        )
+        _sig_times = [t for t, _ in signal_series]
+
+    def _light_colors_at(t: float) -> list[str]:
+        import bisect as _b
+
+        k = min(_b.bisect_left(_sig_times, t), len(signal_series) - 1)
+        st = signal_series[k][1]
+        return [
+            _SIG_COLORS.get(st.get(gid, 0), "#9aa0a6")
+            for _x, _y, gid in map_overlay.traffic_lights
+        ]
 
     def draw_frame(idx: int):
         e = ego_frames[idx]
@@ -469,6 +677,9 @@ def render_video(
 
         ego_poly = transform_local_polygon(footprint, e.x, e.y, e.yaw_rad)
         ego_patch.set_xy(ego_poly)
+
+        if light_dots is not None:
+            light_dots.set_facecolors(_light_colors_at(e.stamp_sec))
 
         turn_state, turn_src = _turn_state_at(turn_samples, e.stamp_sec)
         # Blink ~2 Hz when on
@@ -561,6 +772,18 @@ def render_video(
                 patch.set_visible(False)
                 label.set_visible(False)
 
+        ghost = ghost_pairs[idx] if idx < len(ghost_pairs) else None
+        same_place = speed_pairs[idx] if idx < len(speed_pairs) else None
+        if ghost is not None:
+            ghost_patch.set_xy(
+                transform_local_polygon(footprint, ghost.x, ghost.y, ghost.yaw_rad)
+            )
+            ghost_patch.set_visible(True)
+        else:
+            ghost_patch.set_visible(False)
+        if playhead is not None:
+            playhead.set_xdata([e.stamp_sec - ego_frames[0].stamp_sec] * 2)
+
         if view_frame == "base_link":
             ax.set_xlim(e.x - half, e.x + half)
             ax.set_ylim(e.y - half, e.y + half)
@@ -569,10 +792,21 @@ def render_video(
             f"t={e.stamp_sec - ego_frames[0].stamp_sec:.1f}s  "
             f"speed={e.speed_mps:.2f} m/s  view={view_frame}"
         )
+        if same_place is not None:
+            t_title += (
+                f"  ref_here={same_place.speed_mps:.2f} "
+                f"({e.speed_mps - same_place.speed_mps:+.2f})"
+            )
+        if ghost is not None:
+            lead = math.hypot(e.x - ghost.x, e.y - ghost.y)
+            t_title += f"  ahead_of_ref={lead:.0f}m"
         if turn_state == TURN_LEFT:
             t_title += f"  blinker=LEFT({turn_src or '?'})"
         elif turn_state == TURN_RIGHT:
             t_title += f"  blinker=RIGHT({turn_src or '?'})"
+        label = next((txt for a_, b_, txt in win_labels if a_ <= e.stamp_sec <= b_), None)
+        if label:
+            t_title += "  " + label
         if fail_reason:
             t_title += "  FAIL: " + ",".join(fail_reason)
         if frame_walls:
@@ -583,6 +817,8 @@ def render_video(
             trail_line,
             plan_line,
             ego_patch,
+            ghost_patch,
+            *([playhead] if playhead is not None else []),
             blinker_left,
             blinker_right,
             title,
@@ -591,26 +827,22 @@ def render_video(
             *wall_labels,
         ]
 
-    from matplotlib.animation import FFMpegWriter, FuncAnimation, PillowWriter
+    from matplotlib.animation import FFMpegWriter, PillowWriter
 
-    anim = FuncAnimation(
-        fig,
-        draw_frame,
-        frames=len(ego_frames),
-        interval=1000.0 / fps,
-        blit=False,
-        repeat=False,
-    )
+    # Drive the writer directly: FuncAnimation.save drew every frame twice
+    # (once for the animation step, once more inside grab_frame's savefig).
+    def _write(writer: Any, path: Path) -> None:
+        with writer.saving(fig, str(path), dpi):
+            for idx in range(len(ego_frames)):
+                draw_frame(idx)
+                writer.grab_frame()
 
-    writer: Any
     try:
-        writer = FFMpegWriter(fps=fps, metadata={"artist": "dp_multi_eval"})
-        anim.save(str(output_path), writer=writer)
+        _write(FFMpegWriter(fps=fps, metadata={"artist": "dp_multi_eval"}), output_path)
     except Exception as exc:  # noqa: BLE001
         alt = output_path.with_suffix(".gif")
         print(f"[warn] ffmpeg writer failed ({exc}); writing {alt}")
-        writer = PillowWriter(fps=max(1, int(fps)))
-        anim.save(str(alt), writer=writer)
+        _write(PillowWriter(fps=max(1, int(fps))), alt)
         output_path = alt
     plt.close(fig)
     return output_path
