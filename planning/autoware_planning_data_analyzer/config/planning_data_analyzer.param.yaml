@@ -78,6 +78,16 @@
         max_continuous_violation_time: 2.0  # Continuous over-threshold duration allowed for LK [s]
         lane_change_pre_grace_time: 1.0  # Time before turn/hazard activation exempted from LK [s]
         lane_change_post_grace_time: 1.0  # Time after turn/hazard deactivation exempted from LK [s]
+      frame_geometry:
+        # Export time_step_based_trajectory_frame_geometry.jsonl (ego pose, predicted trajectory and
+        # ground truth of each frame) and time_step_based_trajectory_route.json (route centerline).
+        # Overridden by the export_frame_geometry argument of planning_data_analyzer.launch.xml.
+        enabled: false
+        position_decimals: 3  # Decimal digits of x, y, route_s, route_lateral_offset, ade, fde [m]
+        angle_decimals: 4  # Decimal digits of yaw [rad]
+        curvature_decimals: 5  # Decimal digits of curvature [1/m]
+        route_resample_interval_m: 1.0  # Resampling interval of the route centerline [m]
+        max_route_lateral_offset_m: 5.0  # Points farther than this from the route get null route_* [m]
       override:
         # Time window [s] after every AUTONOMOUS->MANUAL transition used to compute
         # the override_only/* aggregate statistics in the summary JSON.
