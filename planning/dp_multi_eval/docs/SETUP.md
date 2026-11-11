@@ -19,9 +19,14 @@
 | `autoware_trajectory_modifier` | must be in the launch tree — on this workspace: universe branch `feat/cherry-pick-poincloud-fusion` (`beta/v0.41` lacks it → "planning simulator exited early") |
 | `topic_tools`, `rosbag2` (sqlite3) | recording |
 
-Python: `yaml`, `numpy`, `scipy`, `matplotlib`, `psutil`, `lanelet2` + `autoware_lanelet2_extension_python`. `ffmpeg` on PATH.
+Python modules (`yaml`, `numpy`, `scipy`, `matplotlib`, `lanelet2`, `autoware_lanelet2_extension_python`), `ffmpeg` and `streamlit` (the GUI) are declared in `package.xml`: the `rosdep` line below installs them.
+
+| Rule | Why |
+|---|---|
+| run from a shell with no virtualenv active (`deactivate`) | a virtualenv hides the system modules; `run_all.py` refuses to start and names what is missing |
 
 ```bash
+rosdep install --from-paths src/tools/planning/dp_multi_eval --ignore-src -y
 colcon build --packages-select dp_multi_eval planning_debug_tools diffusion_planner_batch_eval   # --symlink-install optional
 source install/setup.bash
 ros2 run dp_multi_eval scene_driver.py --help | grep -c window-clock                  # 1

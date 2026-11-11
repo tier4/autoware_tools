@@ -17,11 +17,17 @@
   <depend>rosbag2_py</depend>
   <depend>rosidl_runtime_py</depend>
   <exec_depend>autoware_adapi_v1_msgs</exec_depend>
+  <exec_depend>autoware_lanelet2_extension_python</exec_depend>
   <exec_depend>autoware_launch</exec_depend>
-  <exec_depend>planning_debug_tools</exec_depend>
-  <exec_depend>python3-yaml</exec_depend>
-  <exec_depend>python3-matplotlib</exec_depend>
   <exec_depend>diffusion_planner_batch_eval</exec_depend>
+  <exec_depend>ffmpeg</exec_depend>
+  <exec_depend>lanelet2_python</exec_depend>
+  <exec_depend>planning_debug_tools</exec_depend>
+  <exec_depend>python3-matplotlib</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-scipy</exec_depend>
+  <exec_depend>python3-streamlit-pip</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>autoware_lint_common</test_depend>

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -195,7 +196,37 @@ def run_all(
     return 0 if dry_run or n_fail == 0 else 1
 
 
+# What a run imports somewhere along the way (package.xml declares them). The
+# metrics need scipy only after the drive: without this check a run in a Python
+# that lacks it drove for ten minutes and then failed (compute_metrics_failed).
+REQUIRED_MODULES = ("yaml", "numpy", "scipy", "matplotlib", "rclpy", "rosbag2_py", "lanelet2",
+                    "autoware_lanelet2_extension_python")
+
+
+def missing_modules(names: tuple[str, ...] = REQUIRED_MODULES) -> list[str]:
+    """The modules this interpreter cannot import."""
+    import importlib.util
+
+    out = []
+    for name in names:
+        try:
+            if importlib.util.find_spec(name) is None:
+                out.append(name)
+        except (ImportError, ValueError):
+            out.append(name)
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
+    missing = missing_modules()
+    if missing:
+        venv = os.environ.get("VIRTUAL_ENV")
+        print(f"[error] this Python ({sys.executable}) cannot import: {', '.join(missing)}. Nothing was started.\n"
+              "        Install them: rosdep install --from-paths src/tools/planning/dp_multi_eval --ignore-src -y, "
+              "and source install/setup.bash (docs/SETUP.md)."
+              + (f"\n        A virtualenv is active ({venv}): it hides the system packages — deactivate it." if venv else ""),
+              file=sys.stderr)
+        return 2
     p = argparse.ArgumentParser(description="Phase 6: full evaluation pipeline")
     p.add_argument("-c", "--config", type=Path, required=True)
     p.add_argument("--max_workers", type=int, default=None)
