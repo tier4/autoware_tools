@@ -1030,11 +1030,17 @@ def metric_windows(
         # an intermediate leg's late grace running out (end_dist_m is set then).
         # A final leg has only FINAL_GRACE_SEC after the recording's end, so an
         # ego still short of it then is late, not missing (04-28 leg 3: 27.5 m
-        # out at 1.6 m/s when the window closed).
+        # out at 1.6 m/s when the window closed). Nor is one the window closed
+        # on while it rolled in to its stop — slow, and no further on than
+        # its closest to the goal: that one is late too, and judged below on
+        # how far behind it was (H82, 2026-11-11: 0.7 m short at 0.4 m/s when
+        # the grace ran out, reported as a drive past).
         goal_missed = None
         if not reached and leg.get("arrival") and ego_leg:
             ax, ay = float(leg["arrival"][0]), float(leg["arrival"][1])
-            if min(math.hypot(e.x - ax, e.y - ay) for e in ego_leg) <= ARRIVE_M:
+            dists = [math.hypot(e.x - ax, e.y - ay) for e in ego_leg]
+            rolling_in = ego_leg[-1].speed_mps <= ROLL_IN_MPS and dists[-1] <= min(dists) + DROVE_PAST_M
+            if min(dists) <= ARRIVE_M and not rolling_in:
                 goal_missed = "drove_past"
             elif leg.get("end_dist_m") is not None:
                 goal_missed = "late_grace_ran_out"
@@ -1076,12 +1082,25 @@ def metric_windows(
                         lag_end = recorded_lag_sec(ref_track, last.x, last.y, last.yaw_rad, scene_time(last.stamp_sec), driving=True)
                     except Exception:  # noqa: BLE001
                         lag_end = None
-                credit = sum(w["credit_sec"] for w in waits if wa <= w["t0"] <= wb)
+                # The scene's clock stops at the recording's end while the window
+                # runs on for its grace: the lag is the one the ego had when the
+                # recording ended, not what is left of it by a stopped clock once
+                # the ego has driven on (H82, 2026-11-11: 17 s behind at the
+                # end, 1.6 s when the window closed 20 s later).
+                ended_w = _recording_end_wall(in_w, scene_time, rec_end) if final and not cut_closed else None
+                if lag_end is not None and ended_w is not None:
+                    at_end = next(e for e in in_w if e.stamp_sec >= ended_w)
+                    try:
+                        lag_end = max(lag_end, recorded_lag_sec(
+                            ref_track, at_end.x, at_end.y, at_end.yaw_rad, scene_time(at_end.stamp_sec), driving=True) or 0.0)
+                    except Exception:  # noqa: BLE001
+                        pass
+                credit = sum(w["credit_sec"] for w in waits if wa <= w["t0"] <= (wb if ended_w is None else ended_w))
                 unexplained = None if lag_end is None else max(0.0, lag_end - credit)
                 # standing where the window closed; a reset closes on a driving
                 # ego (window_eval resets only a moving one)
                 standing = final and not cut_closed and last.speed_mps < INCOMPLETE_SPEED_MPS
-                ended = _recording_end_wall(in_w, scene_time, rec_end) if standing else None
+                ended = ended_w if standing else None
                 if standing and ended is not None:
                     # The recording ran out while the ego stood: past its end the
                     # scene keeps only what stood still, a stand there tells
@@ -1941,6 +1960,8 @@ def _recording_end_wall(samples, scene_time, rec_end) -> float | None:
 
 
 ARRIVE_M = 5.0  # window_eval.ARRIVE_M: stopping this close to the leg goal is arriving
+ROLL_IN_MPS = 1.0   # an ego this slow at the window's close is rolling in to its stop (window_eval: "rolling in")
+DROVE_PAST_M = 1.0  # ...unless it has gone this far on from its closest to the goal: it drove past
 
 
 SHIELD_LOG = "shield_log.jsonl"  # scene_driver.ShieldLog

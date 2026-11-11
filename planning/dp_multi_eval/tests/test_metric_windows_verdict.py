@@ -172,6 +172,35 @@ def main() -> int:
     assert w["legs"][0]["goal_missed"] == "late_grace_ran_out" and not w["legs"][0]["passed"], w["legs"][0]
     print("PASS: a drive past the goal or a run-out grace fails; late at the window end passes")
 
+    # H82, 2026-11-11: the window closed on an ego rolling in to its stop, 0.7 m
+    # short at 0.4 m/s — late, no drive past. One that went 9 m on and stood
+    # there (H39) did drive past.
+    def ending(tail):
+        out = profile([], end=54.0)
+        x = out[-1].x
+        for k, v in enumerate(tail):
+            x += v * 0.1
+            out.append(ego(round(54.0 + 0.1 * k, 1), x, v, wall=True))
+        return out
+    rolling = ending([0.4] * 60)
+    w = run_metric(rolling, leg_payload(rolling[-1].x + 0.7, drive_through=False, arrived=False))
+    assert w["legs"][0]["goal_missed"] != "drove_past" and not w["legs"][0]["reached"], w["legs"][0]
+    beyond = ending([5.0] * 20 + [0.0] * 40)
+    w = run_metric(beyond, leg_payload(beyond[-1].x - 9.0, drive_through=False, arrived=False))
+    assert w["legs"][0]["goal_missed"] == "drove_past" and not w["legs"][0]["passed"], w["legs"][0]
+    print("PASS: rolling in when the window closes is late, not a drive past; 9 m on from the stop is one")
+
+    # H82, 2026-11-11: the lag of the last window is the one at the recording's
+    # end. An ego that stood 20 s with no reason is 20 s behind when the 60 s
+    # recording ends; the window runs on 20 s and by the stopped clock it has
+    # caught up when it closes — not completed all the same.
+    behind = profile([(10.0, 20.0)], end=80.0)
+    pl = leg_payload(10_000.0, drive_through=False, arrived=False)
+    pl["legs"][0]["wall_end"] = WALL0 + 80.0
+    leg = run_metric(behind, pl, clamp=True)["legs"][0]
+    assert leg["goal_missed"] == "did_not_complete" and 19.0 <= leg["incomplete"]["lag_sec"] <= 21.0, leg
+    print("PASS: the last window's lag is measured at the recording's end, not after the grace against a stopped clock")
+
     # A reset is a window boundary (2026-11-10). Segment 1 ends at 30 s, the ego is
     # set back onto the recording (standing 30-34 s while placed), segment 2 runs on.
     def two_segments(kind):
