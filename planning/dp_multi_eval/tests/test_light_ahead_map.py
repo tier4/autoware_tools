@@ -25,7 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dp_multi_eval.compute_metrics import _light_ahead, _load_lanelet_map  # noqa: E402
 
-MAP = Path(os.environ.get("DP_EVAL_MAP", "/home/kaan/autoware_map/hiratsuka-map"))
+MAP = Path(os.environ.get("DP_EVAL_MAP", str(Path.home() / "autoware_map" / "hiratsuka-map")))
 
 
 def main() -> int:

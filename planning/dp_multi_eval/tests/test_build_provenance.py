@@ -59,6 +59,26 @@ def main() -> int:
         assert bp.repo_state(repo)["dirty"] is True
         assert bp.repo_state(root / "not_a_repo") is None
         print("PASS: repo state — commit, branch, dirty; None off git")
+
+        # A standard install: the file runs from <ws>/install, its source is under <ws>/src.
+        ws = root / "ws"
+        installed = ws / "install/dp_multi_eval/local/lib/python3.10/dist-packages/dp_multi_eval/build_provenance.py"
+        source = ws / "src/tools/planning/dp_multi_eval"
+        for d in (installed.parent, source, ws / "src/autoware/universe", ws / "src/autoware/launcher"):
+            d.mkdir(parents=True)
+        (source / "package.xml").write_text("<package/>")
+        installed.write_text("")
+        assert bp.workspace_src(installed) == (ws / "src").resolve()
+        repos = bp.source_repos(installed)
+        assert repos["dp_multi_eval"] == source.resolve() and repos["universe"] == (ws / "src/autoware/universe").resolve(), repos
+        # a symlink install: the file is the source
+        linked = source / "dp_multi_eval" / "build_provenance.py"
+        linked.parent.mkdir()
+        linked.write_text("")
+        assert bp.source_repos(linked)["dp_multi_eval"] == linked.parent.resolve()
+        # outside any workspace: the tool's own folder, nothing else
+        assert set(bp.source_repos(root / "elsewhere" / "pkg" / "build_provenance.py")) == {"dp_multi_eval"}
+        print("PASS: the source repositories are found from a standard install and from a symlink install")
     return 0
 
 

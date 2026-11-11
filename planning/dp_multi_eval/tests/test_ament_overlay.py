@@ -31,11 +31,6 @@ from dp_multi_eval.ament_overlay import (  # noqa: E402
     resolve_autoware_launch_share,
 )
 
-VEHICLE_CFG = Path(
-    "/home/kaan/projects/pilot-auto.x2.isuzu.erga2/src/autoware/launcher/autoware_launch/"
-    "config/planning/neural_net_planner/trajectory_modifier.param.yaml"
-)
-
 
 def main() -> int:
     try:
@@ -86,11 +81,11 @@ def main() -> int:
     )
     print("PASS: installed launch file untouched")
 
-    if VEHICLE_CFG.is_file():  # this workspace's source tree; absent elsewhere
-        orig = yaml.safe_load(VEHICLE_CFG.read_text())
-        so = orig["/**"]["ros__parameters"]["stop_point_fixer"]
-        assert so["force_stop_long_stopped_trajectories"] is True
-        assert so["force_stop_close_stopped_trajectories"] is True
+    vehicle_cfg = resolve_autoware_launch_share() / TRAJ_MOD_REL   # the installed one: the overlay is a copy
+    orig = yaml.safe_load(vehicle_cfg.read_text())
+    so = orig["/**"]["ros__parameters"]["stop_point_fixer"]
+    assert so["force_stop_long_stopped_trajectories"] is True
+    assert so["force_stop_close_stopped_trajectories"] is True
     print("PASS: vehicle config untouched")
     return 0
 

@@ -98,13 +98,37 @@ def checkpoint_version(model_config: Path | str | None) -> int | None:
     return int(value) if isinstance(value, int) else None
 
 
-# This file sits at <ws>/src/tools/planning/dp_multi_eval/dp_multi_eval/.
-_WS_SRC = Path(__file__).resolve().parents[4]
-_REPOS = {
-    "dp_multi_eval": Path(__file__).resolve().parent,
-    "universe": _WS_SRC / "autoware" / "universe",
-    "launcher": _WS_SRC / "autoware" / "launcher",
-}
+def workspace_src(here: Path | None = None) -> Path | None:
+    """<ws>/src of the workspace this file runs from: the nearest parent with
+    ``src/autoware``. That holds for a symlink install (the file is in the
+    source tree) and for a standard one (it is under <ws>/install), where
+    counting parents from the file found nothing and no result said which
+    code it came from."""
+    here = Path(__file__).resolve() if here is None else Path(here).resolve()
+    for parent in here.parents:
+        if (parent / "src" / "autoware").is_dir():
+            return parent / "src"
+    return None
+
+
+def source_repos(here: Path | None = None) -> dict[str, Path]:
+    """The repositories a result depends on, where this workspace has them."""
+    here = Path(__file__).resolve() if here is None else Path(here).resolve()
+    src = workspace_src(here)
+    out: dict[str, Path] = {}
+    tool = here.parent                      # a symlink install: this file is the source
+    if src is not None and src not in here.parents:
+        # A standard install: the package's source, wherever under src/ it was cloned.
+        tool = next((d for pat in ("*/planning/dp_multi_eval", "*/*/planning/dp_multi_eval", "*/*/*/planning/dp_multi_eval")
+                     for d in sorted(src.glob(pat)) if (d / "package.xml").is_file()), tool)
+    out["dp_multi_eval"] = tool
+    if src is not None:
+        out["universe"] = src / "autoware" / "universe"
+        out["launcher"] = src / "autoware" / "launcher"
+    return out
+
+
+_REPOS = source_repos()
 
 
 def repo_state(path: Path) -> dict[str, Any] | None:

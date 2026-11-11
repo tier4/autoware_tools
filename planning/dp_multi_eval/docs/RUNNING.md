@@ -2,7 +2,7 @@
 
 ## Config (`config/example_pipeline.yaml`)
 
-Unknown keys are ignored silently — the accepted list is `PIPELINE_KNOBS` in `job_config.py`.
+A key this version does not read is ignored, with a warning at start — the accepted lists are `PIPELINE_KNOBS` (`job_config.py`) and `PIPELINE_KEYS` (`run_all.py`).
 
 | Key | Default | |
 |---|---|---|

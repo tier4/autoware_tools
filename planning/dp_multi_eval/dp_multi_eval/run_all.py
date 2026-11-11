@@ -97,6 +97,8 @@ def run_all(
 ) -> int:
     t_start = time.monotonic()
     cfg = load_pipeline_config(config_path)
+    for key in unknown_keys(cfg):
+        print(f"[warn] {config_path.name}: '{key}' is not a setting of this version — ignored")
     results_root = Path(cfg["results_root"]).expanduser().resolve()
     results_root.mkdir(parents=True, exist_ok=True)
     manifest_path = results_root / "manifest.json"
@@ -135,8 +137,9 @@ def run_all(
     domain_start = int(cfg.get("domain_id_start", 10))
     domain_ids = list(range(domain_start, domain_start + max(workers, 1)))
 
-    # A key missing from the config map is skipped, not an error; a key missing
-    # from PIPELINE_KNOBS is silently ignored — keep that list complete.
+    # A key missing from the config map is skipped, not an error; a key that
+    # is in neither PIPELINE_KNOBS nor PIPELINE_KEYS is ignored (and warned
+    # about above) — keep those lists complete.
     extra = {k: cfg[k] for k in PIPELINE_KNOBS if k in cfg}
     extra.setdefault("mode", str(cfg.get("mode", "reproducer")))
 
@@ -215,6 +218,19 @@ def run_all(
 # that lacks it drove for ten minutes and then failed (compute_metrics_failed).
 REQUIRED_MODULES = ("yaml", "numpy", "scipy", "matplotlib", "rclpy", "rosbag2_py", "lanelet2",
                     "autoware_lanelet2_extension_python")
+
+
+# The keys run_all reads itself, and the GUI's own; every other setting a run takes is in PIPELINE_KNOBS.
+PIPELINE_KEYS = ("models", "results_root", "mode", "rosbag_dir", "scenario_dir", "bag_whitelist", "scenario_whitelist",
+                 "param_template_path", "scenario_repeat_count", "max_workers", "domain_id_start", "map_path",
+                 "render_video", "models_dir")
+
+
+def unknown_keys(cfg: dict) -> list[str]:
+    """Config keys this version does not read. They were ignored without a
+    word: a config written for another version said ``scene_mode: realtime``
+    and ran in the only mode this one has (2026-11-11)."""
+    return sorted(k for k in cfg if k not in PIPELINE_KEYS and k not in PIPELINE_KNOBS)
 
 
 def missing_modules(names: tuple[str, ...] = REQUIRED_MODULES) -> list[str]:

@@ -39,6 +39,14 @@ def main() -> int:
     for mod in run_all.REQUIRED_MODULES:
         assert f">{key.get(mod, mod)}<" in xml, f"{mod} is not declared in package.xml"
     print("PASS: missing modules are named; each required module is declared in package.xml")
+    # a key no code reads is named; the example config has none
+    import yaml
+
+    assert run_all.unknown_keys({"models": [], "window_eval": True, "scene_mode": "realtime", "max_workerz": 2}) == [
+        "max_workerz", "scene_mode"]
+    example = yaml.safe_load((ROOT / "config" / "example_pipeline.yaml").read_text(encoding="utf-8"))
+    assert run_all.unknown_keys(example) == [], run_all.unknown_keys(example)
+    print("PASS: config keys this version does not read are named; the example config has none")
     # the entry point stops before anything is started, and says which Python it is
     code = ("import sys; sys.argv=['run_all.py','-c','/nonexistent.yaml']\n"
             "from dp_multi_eval import run_all\n"

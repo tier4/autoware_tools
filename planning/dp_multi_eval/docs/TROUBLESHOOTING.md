@@ -34,7 +34,7 @@ Start with the job's `diagnosis` (dashboard card / `job_status.json`), then the 
 | a leg is `inconclusive` | a stuck stretch was the scene's (`scene_limited` in the leg): a held NPC stood on the ego's way, or the scene had run past the recording's end |
 | an NPC appears from nothing, stands mid-road or vanishes near the ego (video) | look at `scene_audit` in metrics.json: it lists each such event with its cause (`why`/`src`); a `blip` is the recording's own noise |
 | a pedestrian or car swerves round the standing ego (video) | deadlock detour: it waited ≥ 3 s on the ego's way while the ego stood (`held` reason `deadlock` if no detour fitted) |
-| a shield change looks better on one bag | run `scene_bench.py --all --baseline <old.json>`; a change goes in only without regressions |
+| a shield change looks better on one bag | run `ros2 run dp_multi_eval scene_bench.py --bag-dir <recordings> --all --map <map> --baseline <old.json>`; a change goes in only without regressions |
 | NPC teleports into the ego | `replay_jump`, not gating |
 | a yaml knob does nothing | not in `PIPELINE_KNOBS` or misspelt |
 | passing run shows `(assisted)` | a re-init/nudge happened → `segments` in the leg |

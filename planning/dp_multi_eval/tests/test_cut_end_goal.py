@@ -17,6 +17,7 @@ cut pose. Pure geometry; no ROS needed.
 
 Run directly: python3 tests/test_cut_end_goal.py
 """
+import os
 import math
 import sys
 import tempfile
@@ -60,7 +61,7 @@ def main() -> int:
     # 平塚駅南口, 商工会議所前（往路）, 教会前（往路） and was cut before 松風公園入口 —
     # the next stop in order, present in the map, so it is the goal (whether
     # the planner routes there is the planner's verdict at run time).
-    real = Path("/home/kaan/autoware_map/hiratsuka-map")
+    real = Path(os.environ.get("DP_EVAL_MAP", str(Path.home() / "autoware_map" / "hiratsuka-map")))
     if (real / "stop_points.csv").is_file():
         import csv
         pts = {r["name"]: (float(r["x"]), float(r["y"])) for r in csv.DictReader(open(real / "stop_points.csv", encoding="utf-8"))}

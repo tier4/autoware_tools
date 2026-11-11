@@ -42,8 +42,9 @@ away ahead of it.
 | off_rec_sec | NPC-seconds shown more than 2 m from their recording, within 40 m of the ego |
 | audit.* | the scene audit's findings (stand_in_zone, pop_in, vanish, jump, through; blip apart) |
 
-    ros2 run dp_multi_eval scene_bench.py --bags H78 H95 --map ~/autoware_map/hiratsuka-map
-    ros2 run dp_multi_eval scene_bench.py --all --map ... --out bench.json --baseline old.json
+    ros2 run dp_multi_eval scene_bench.py --bag-dir <recordings> --bags H78 H95 --map <map>
+    ros2 run dp_multi_eval scene_bench.py --bag-dir <recordings> --all --map <map> --out bench.json --baseline old.json
+    ros2 run dp_multi_eval scene_bench.py --replay-run <job dir> --map <map>     # the scene as a finished job's ego met it
 
 Recordings are read once (three topics) and cached under
 ~/.cache/dp_multi_eval/scene_bench.

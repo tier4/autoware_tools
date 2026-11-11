@@ -19,8 +19,8 @@
 Reads <results_root>/<model>/<bag_key> and <results_root>/_archive/<bag_key>__*.
 """
 import sys, json, glob, os
-sys.path.insert(0, "/home/kaan/projects/pilot-auto.x2.isuzu.erga2/src/tools/planning/dp_multi_eval")
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dp_multi_eval.bag_reader import load_bag_series, load_reference_ego
 from dp_multi_eval.stop_go import stop_go
 BAG = Path(sys.argv[1]); ROOT = Path(sys.argv[2]); KEY = sys.argv[3] if len(sys.argv) > 3 else BAG.name

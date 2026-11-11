@@ -22,6 +22,7 @@ install(PROGRAMS
   scripts/rescore.py
   scripts/app.py
   scripts/scene_driver.py
+  scripts/scene_bench.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
