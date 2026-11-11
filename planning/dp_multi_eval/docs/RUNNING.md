@@ -8,7 +8,7 @@ A key this version does not read is ignored, with a warning at start — the acc
 |---|---|---|
 | `rosbag_dir`, `results_root`, `map_path`, `models` | — | required |
 | `bag_whitelist`, `scenario_whitelist` | all | run only these paths under the folder (the GUI writes them) |
-| `max_workers` | 2 | parallel jobs (GPU-bound) |
+| `max_workers` | 2 | parallel jobs (GPU-bound). For verdicts use 1: two jobs starve each other ([limits](EVALUATION_METHOD.md#limits)) |
 | `domain_id_start` | 10 | first `ROS_DOMAIN_ID` |
 | `vehicle_model`, `sensor_model`, `vehicle_id` | `lv828l`, `aip_x2_gen2`, — | psim launch |
 | `disable_long_stop_fixer`, `match_vehicle_dynamics`, `indicator_merge` | on | stack overlay ([method](EVALUATION_METHOD.md#stack-overlay)) |

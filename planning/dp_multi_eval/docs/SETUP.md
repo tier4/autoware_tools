@@ -16,7 +16,7 @@
 | `diffusion_planner_batch_eval` | route helper |
 | `autoware_launch`, planning simulator, `autoware_diffusion_planner` | only `major_version` 4 weights load |
 | `<vehicle_model>_description` | its `vehicle_info.param.yaml` is the ego's body everywhere; without it the scene warns and uses a default body |
-| `autoware_trajectory_modifier` | must be in the launch tree — on this workspace: universe branch `feat/cherry-pick-poincloud-fusion` (`beta/v0.41` lacks it → "planning simulator exited early") |
+| `autoware_trajectory_modifier` | must be in the launch tree. The workspace's `autoware.repos` pins have it (universe `93ea7a3c98`, launcher `6f6fc6744a`); universe `beta/v0.41` lacks it → "planning simulator exited early" |
 | `topic_tools`, `rosbag2` (sqlite3) | recording |
 
 Python modules (`yaml`, `numpy`, `scipy`, `matplotlib`, `lanelet2`, `autoware_lanelet2_extension_python`), `ffmpeg` and `streamlit` (the GUI) are declared in `package.xml`: the `rosdep` line below installs them.
@@ -26,17 +26,29 @@ Python modules (`yaml`, `numpy`, `scipy`, `matplotlib`, `lanelet2`, `autoware_la
 | run from a shell with no virtualenv active (`deactivate`) | a virtualenv hides the system modules; `run_all.py` refuses to start and names what is missing |
 
 ```bash
-rosdep install --from-paths src/tools/planning/dp_multi_eval --ignore-src -y
+# from the workspace root
+rosdep install --from-paths src/tools/planning/dp_multi_eval src/tools/planning/planning_debug_tools src/tools/planning/diffusion_planner_batch_eval --ignore-src -y
 colcon build --packages-select dp_multi_eval planning_debug_tools diffusion_planner_batch_eval   # --symlink-install optional
 source install/setup.bash
-ros2 run dp_multi_eval scene_driver.py --help | grep -c window-clock                  # 1
-ros2 pkg list | grep -c autoware_trajectory_modifier                                  # 1
 ```
+
+## Check the install
+
+```bash
+ros2 run dp_multi_eval scene_driver.py --help | grep -q -- --window-clock && echo ok   # ok
+ros2 pkg list | grep -c autoware_trajectory_modifier                                   # 1
+(cd src/tools/planning/dp_multi_eval && python3 tests/run_tests.py)                    # 0 failed
+ros2 run dp_multi_eval run_all.py -c <yaml> --dry_run                                  # N/N validated
+```
+
+The dry run stops with one line when the config names no recordings folder, no
+`lanelet2_map.osm`, no model, or a result folder it cannot create.
 
 ## Map
 
 `map_path` = the vehicle's Hiratsuka map directory (v206): `lanelet2_map.osm`,
-`map_projector_info.yaml`, `stop_points.csv` (`name,x,y,yaw`), `pointcloud_map.pcd`.
+`map_projector_info.yaml`, `pointcloud_map.pcd`, and the line's `stop_points.csv`
+(a header row with at least `name,x,y,yaw`; one row per bus stop — the legs' goals).
 The older v106 map cannot route into the bus bays.
 
 ## Models
