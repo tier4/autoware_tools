@@ -1,152 +1,60 @@
 # Architecture
 
-Design and code map for `dp_multi_eval`.
-
----
-
-## Data flow
-
-```mermaid
-flowchart LR
-  subgraph inputs
-    CFG[pipeline.yaml]
-    BAGS[scenario bags]
-    MODELS[ONNX / param.yaml]
-  end
-
-  subgraph orchestration
-    RA[run_all.py]
-    ORCH[run_orchestrator.py]
-    MAN[manifest.json]
-  end
-
-  subgraph per_job
-    JOB[run_single_job.py]
-    PSIM[planning_simulator]
-    REPRO[perception_reproducer]
-    REC[ros2 bag record]
-    MET[compute_metrics.py]
-    VID[render_video.py]
-  end
-
-  subgraph outputs
-    DASH[dashboard.html]
-    GUI[Streamlit app.py]
-  end
-
-  CFG --> RA
-  BAGS --> RA
-  MODELS --> RA
-  RA --> MAN
-  RA --> ORCH
-  ORCH --> JOB
-  JOB --> PSIM --> REPRO --> REC
-  REC --> MET --> VID
-  MAN --> DASH
-  GUI --> RA
-  DASH --> GUI
+```
+pipeline.yaml ─► run_all.py ─► manifest.json ─► run_orchestrator (worker pool, domain pool, GPU gate)
+                                                      │ per job, own ROS_DOMAIN_ID
+                                                      ▼
+   ament_overlay ─► planning_simulator ◄──► scene_driver ─► perception_reproducer (original, -r 0)
+                          │                        ▲  scene_time / hold / objects  (harness topics)
+                    routing, multi_goal ─► window_eval (legs: hand-over, reveal, divergence)
+                          │
+                    ros2 bag record ─► output/ ─► compute_metrics ─► metrics.json ─► build_dashboard
+                                                 render_video    ─► videos/*.mp4  ─►   dashboard.html
 ```
 
----
+## One job
 
-## Pipeline phases
+1. Overlay: clone `autoware_launch` share to `/tmp/dp_multi_eval_overlays/<sha1>/`, swap the model param, fixer rules off, indicator topic, delayed vehicle model; prepend to `AMENT_PREFIX_PATH`.
+2. GPU gate; kill leftovers on this domain.
+3. Launch psim and the reproducer in parallel (bag loads while psim boots).
+4. Wait for services; check the planner loaded weights.
+5. Goals (`multi_goal.py`) and route (`routing.py`, candidate ladder) → `route_goals.json`.
+6. Perception ready → object throttle → `ros2 bag record` → first trajectory (engine build) → engage.
+7. `window_eval.run_legs`: per leg hold + jump + place + follow 3.5 s + hand-over, reveal at departure, divergence checks, arrival → `windows.json`.
+8. Teardown in reverse; `job_status.json`. Orchestrator: `goal_pose.json`, metrics, video (separate pool), diagnosis.
 
-| Phase | Module | Responsibility |
-|-------|--------|----------------|
-| 1 | `run_single_job.py` | Launch psim with per-job AMENT overlay, route setup, engage, record bag |
-| 2 | `compute_metrics.py` | Stuck, OOB, collision, goal-stop precision → `metrics.json` |
-| 3 | `render_video.py` | Headless top-down `preview.mp4` with ego trail + planned trajectory |
-| 4 | `generate_manifest.py`, `run_orchestrator.py` | Build job matrix, parallel workers, resumable execution |
-| 5 | `build_dashboard.py` | Single-file HTML summary (auto-refresh while running) |
-| 6 | `run_all.py` | End-to-end: manifest → orchestrate → retry failed → dashboard |
-| 7 | `app.py` | Streamlit GUI (start/stop run, live progress, embedded dashboard) |
+## Modules
 
----
+| Module | Role |
+|---|---|
+| `run_all.py`, `rescore.py`, `generate_manifest.py` | entry points; manifest merge; job ids; model/bag discovery |
+| `run_orchestrator.py` | pool, free-domain pool, 15 s dashboard refresh, SIGINT/SIGTERM, post-processing |
+| `job_config.py` | `JobConfig` (every knob + reason), `PIPELINE_KNOBS` |
+| `run_single_job.py`, `job_waiters.py`, `process_utils.py` | job lifecycle, readiness waits, process groups / cleanup / GPU |
+| `ament_overlay.py`, `model_config.py` | overlay rewrites; model → param yaml |
+| `routing.py`, `route_control.py`, `multi_goal.py`, `dwell_profile.py` | goals and routes |
+| `window_eval.py`, `lag.py` | leg harness; lag vs recording, wall→scene time |
+| `compute_metrics.py`, `stop_go.py`, `geometry.py`, `bag_reader.py`, `bag_cache.py`, `diagnose.py` | scoring |
+| `render_video.py`, `build_dashboard.py`, `job_status.py`, `live_monitor.py` | outputs |
+| `resync.py`, `fixer_replay.py`, `app.py`, `scenario_sim.py` | legacy ([LEGACY](LEGACY.md)) |
+| `scene_driver.py`, `scene_clock.py`, `reactive_shield.py`, `shield_map.py`, `prebirth.py`, `scene_audit.py`, `scene_bench.py` | scene player: runs the original `perception_reproducer` and feeds it the clock's instant; object gate with the reactive shield (map, lights, ego plan) objects the recording saw late, the audit of what is published, and the offline bench (`build_scene` builds the same pipeline for both); `shield_log.jsonl` |
 
-## Key design choices
+Tests: `python3 tests/run_tests.py` runs every `tests/test_*.py` here
+(plain scripts; PASS / SKIP / FAIL table). Unit tests
+need no ROS; `test_ament_overlay` and `test_light_ahead_map` need the sourced
+workspace (and the map) and skip otherwise; `test_sigterm_stop` runs the
+orchestrator in a child process with a fake job.
 
-- **Per-job AMENT overlay** (`ament_overlay.py`): clones `autoware_launch` share tree and swaps `diffusion_planner.param.yaml` so parallel jobs do not fight over the same ONNX path. Overlay root is under `/tmp/dp_multi_eval_overlays/` (cross-device safe via copy fallback).
-- **Route setup in-process** (reuses `diffusion_planner_batch_eval` route helpers): no Auto engage during route; engage after perception reproducer is warm.
-- **Hiratsuka stop-point fallbacks**: if primary start→goal routing fails, alternate start poses from bag metadata are tried.
-- **RViz off** by default (`rviz: false`): all visualization is offline.
-- **Single bag read** in orchestrator post-phase: metrics + video share one `load_bag_series()` call for speed.
-- **Process groups** (`process_utils.py`): psim and reproducer run in new sessions; GUI `run_all` uses `start_new_session=True` for clean stop via `killpg`.
+## Decisions
 
----
-
-## Code map
-
-| Area | Files |
-|------|-------|
-| Job lifecycle | `run_single_job.py`, `job_status.py`, `process_utils.py` |
-| Parallel safety | `ament_overlay.py`, `model_config.py` |
-| Orchestration | `run_orchestrator.py`, `run_all.py`, `generate_manifest.py` |
-| Metrics | `compute_metrics.py`, `geometry.py`, `bag_reader.py`, `config/thresholds.yaml` |
-| Video | `render_video.py` |
-| Dashboard / GUI | `build_dashboard.py`, `app.py` |
-| Route setup (external) | `diffusion_planner_batch_eval` route_setup helpers |
-
----
-
-## Output layout
-
-```
-{results_root}/{run_name}/
-  manifest.json
-  dashboard.html
-  pipeline_config.yaml
-  run_all.log
-  .gui_run_state.json          # only while GUI run is active
-  {model_name}/{bag_key}/
-    job_status.json
-    goal_pose.json
-    metrics.json
-    preview.mp4
-    psim_launch.log
-    output/                    # recorded rosbag2 (absent if route setup failed)
-    .ament_overlay/
-```
-
----
-
-## Package layout
-
-```
-src/tools/planning/dp_multi_eval/
-  README.md
-  docs/
-    HEADLESS.md               # headless CLI pipeline (main feature)
-    GUI_TESTING.md
-    OPERATIONS.md
-    ARCHITECTURE.md
-    REVIEW.md
-  package.xml
-  CMakeLists.txt
-  config/
-    example_pipeline.yaml
-    thresholds.yaml
-    topics.yaml
-  dp_multi_eval/
-    app.py
-    run_all.py
-    run_single_job.py
-    run_orchestrator.py
-    compute_metrics.py
-    render_video.py
-    build_dashboard.py
-    ament_overlay.py
-    ...
-  scripts/                    # ros2 run wrappers
-```
-
----
-
-## Dependency on `diffusion_planner_batch_eval`
-
-| Concern | Owner |
-|---------|-------|
-| Route setup, Hiratsuka fallbacks, engage flow | `diffusion_planner_batch_eval` |
-| Headless M×N orchestration, offline metrics/video, dashboard | [HEADLESS.md](HEADLESS.md) |
-| Streamlit GUI | `app.py` — [GUI_TESTING.md](GUI_TESTING.md) |
-
-Do not duplicate route-setup logic in `dp_multi_eval`; extend batch_eval if routing behavior must change for both tools.
+- **Original reproducer, clock outside** — `planning_debug_tools` stays unmodified. With `-r 0` it shows the frame nearest the ego pose it reads; `scene_driver` remaps that input and feeds the recorded pose of the instant its clock picks.
+- **Overlay, not remaps** — psim reads the planner param by share path; parallel models need parallel share trees. `src/autoware` untouched.
+- **The recording is the timeline** — legs, hand-over, reveal, 1× clock ([method](EVALUATION_METHOD.md)).
+- **The vehicle and the line from their own data** — the ego's body from `<vehicle_model>_description`'s vehicle_info; the stop a cut recording was heading for from the routes the vehicle recorded (its own, else the other recordings' sequence). A written stop order had two stops out of place.
+- **Free-domain pool** — a domain returns only when its job ends; round-robin once started a job on a domain still in use and its cleanup killed the running simulator.
+- **GPU gate** — two engines built at once → OOM → a planner that stays up silent and reads as a stall.
+- **One bag read, video on its own pool** — rendering on the simulator worker cost 264 s per job.
+- **Reference ego cache** — recordings are 37–79 GB.
+- **Objects recorded at 10 Hz** — the raw stream was 88 % of the output bag.
+- **Manifest merge keeps unmentioned jobs** — a subset yaml once dropped 30 finished jobs.
+- **All metrics offline** — rules change without re-driving; refactors verified by bit-identical `metrics.json`.
