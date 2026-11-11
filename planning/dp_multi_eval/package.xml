@@ -8,6 +8,7 @@
     (single-job runner → metrics → offline video → orchestrator → dashboard → Streamlit GUI).
   </description>
   <maintainer email="takahiko.hasegawa@tier4.jp">Takahiko Hasegawa</maintainer>
+  <maintainer email="kaan.colak.dev@gmail.com">Kaan Colak</maintainer>
   <license>Apache License 2.0</license>
 
   <buildtool_depend>ament_cmake_auto</buildtool_depend>

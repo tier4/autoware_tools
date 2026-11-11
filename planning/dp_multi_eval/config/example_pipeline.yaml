@@ -10,10 +10,10 @@
 mode: reproducer
 # mode: scenario_simulator
 
-rosbag_dir: /media/takahikohasegawa/71435f24-d875-4ded-b7ba-9a42505405e5/hiratsuka
+rosbag_dir: /path/to/rosbags        # a folder with one sub-folder per recording
 # scenario_dir: /path/to/scenarios   # required when mode=scenario_simulator (.yaml/.yml/.xosc)
 
-results_root: /media/takahikohasegawa/71435f24-d875-4ded-b7ba-9a42505405e5/dp_multi_eval_results
+results_root: /path/to/dp_multi_eval_results
 map_path: /opt/autoware/maps
 
 vehicle_model: lv828l
@@ -144,7 +144,7 @@ live_web_sample_sec: 2.0
 #     scenario:=/path/to/case.yaml vehicle_model:=lv828l sensor_model:=aip_x2_gen2 \
 #     autoware.vehicle_id:=6_lv828l autoware.planning_setting:=diffusion_planner \
 #     initialize_duration:=120 global_timeout:=300
-# scenario_dir: /home/takahikohasegawa/Documents/scenario_sim/_run
+# scenario_dir: /path/to/scenarios
 architecture_type: awf/universe/20250130
 planning_setting: diffusion_planner
 # initialize_duration reuses psim_startup_sec above; global_timeout → scenario_timeout_sec
