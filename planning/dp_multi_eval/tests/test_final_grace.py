@@ -26,6 +26,10 @@ def main() -> int:
     assert over(g, dist=0.5, drive_through=True)               # a cut pose: nothing to dwell for
     assert over(g, dist=0.9, arrived=0.0)                      # arrived long ago: dwell already measured
     print("PASS: the last window waits for a late ego's stop dwell, within bounds")
+    # H95 (2026-11-11): a recording with one leg — its "start" leg is the last
+    assert we.is_last_leg("start", 60.0, 60.0) and we.is_last_leg("final", 50.0, 120.0)
+    assert not we.is_last_leg("start", 40.0, 120.0) and not we.is_last_leg("departure", 80.0, 120.0)
+    print("PASS: the leg the recording ends in is the last one, whatever its kind")
     return 0
 
 

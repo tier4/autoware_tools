@@ -243,6 +243,15 @@ class ObjectGate:
             if tr.times[-1] - tr.times[getattr(tr, "ext", 0)] >= END_STANDING_SEC
             and ReactiveShield.end_speed(tr, END_STANDING_SEC) < STATIONARY_MPS
         }
+        # A track the recording's end cut short inside that second is never
+        # shown: it cannot be kept past the end, so all it could be is a car
+        # flashing up and gone. H95 (2026-11-11): the tracker's 0.3 s double
+        # of a car in the queue appeared 36 m ahead of a late ego, in the lane
+        # it was about to pull out into, and vanished at the end.
+        end = getattr(shield, "bag_end", None)
+        self._born_at_end = set() if end is None else {
+            k for k, tr in tracks.items() if end - tr.times[getattr(tr, "ext", 0)] < END_STANDING_SEC
+        }
 
     def apply(
         self,
@@ -255,6 +264,8 @@ class ObjectGate:
         objects_on: bool,
         now_ns: int,
     ) -> Any:
+        if self._born_at_end:
+            msg.objects = [o for o in msg.objects if bytes(o.object_id.uuid) not in self._born_at_end]
         if at_end:
             # The recording has run out: what stood still is still there, what
             # was moving has no recorded future — a car frozen mid-road with

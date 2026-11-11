@@ -364,6 +364,20 @@ def test_born_driving_at_the_nose_comes_out_of_its_shadow():
         sh2.apply(msg, ego, BASE + k * 0.1, 0.1, ego_speed_mps=0.0)
         shown += len(msg.objects)
     assert shown == 30, shown
+    # H82, 2026-11-11: a car that drove up at 5 m/s and has stood 1 m beside
+    # the ego since — first shown there after a scene jump (reset): no birth,
+    # shown where it stands (it was withheld 10 s and came out behind the ego)
+    queue = lambda k: mkobj(U3, min(-40.0 + 0.5 * k, 5.0), 3.4, 0.0, 5.0 if k < 90 else 0.0)  # noqa: E731
+    sh3 = ReactiveShield(P)
+    sh3.build_tracks([(int(k * 0.1 * 1e9 + 2e18), NS(objects=[queue(k)])) for k in range(200)])
+    sh3.apply(NS(objects=[queue(0)]), ego, BASE, 0.1, ego_speed_mps=0.0)
+    sh3.reset()
+    shown = 0
+    for k in range(120, 150):
+        msg = NS(objects=[queue(k)])
+        sh3.apply(msg, ego, BASE + k * 0.1, 0.1, ego_speed_mps=0.0)
+        shown += len(msg.objects)
+    assert shown == 30, f"a car standing beside the ego after a scene jump was shown on {shown}/30 ticks"
 
 
 def test_held_npc_never_reverses():

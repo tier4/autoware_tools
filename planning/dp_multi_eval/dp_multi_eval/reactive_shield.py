@@ -39,6 +39,7 @@ from types import SimpleNamespace
 
 
 BORN_MOVING_MPS = 1.0   # a track faster than this over its first second was born driving
+BIRTH_SEC = 1.0         # a track first shown within this of its recorded start is being born
 PLAN_TIME_STEP_SEC = 0.25   # the ego's timed plan is kept at this spacing
 SPACETIME_EGO_MPS = 0.5     # a moving ego is judged where it will be when the NPC gets there ...
 SPACETIME_MARGIN_SEC = 1.0  # ... or this much later (it crosses ahead of the ego only with this to spare)
@@ -300,6 +301,8 @@ class ReactiveShield:
         # the model was fed a stationary car claiming to drive (H81 realtime,
         # 2026-09-15).
         self.shown_idx: dict[bytes, int] = {}
+        # How fast each object went where the scene first presented it near the ego.
+        self._first_v: dict[bytes, float] = {}
         # The sample an object was last blocked at. It stands still for as long
         # as it is still shown there; the moment it moves on to the next sample
         # it is driving again.
@@ -435,6 +438,7 @@ class ReactiveShield:
         self.held_now.clear()
         self._was_held.clear()
         self.shown_idx.clear()
+        self._first_v.clear()
         self.blocked_idx.clear()
         self.soft_v.clear()
         self.shown_f.clear()
@@ -460,15 +464,19 @@ class ReactiveShield:
         self.parent_of = self._find_duplicates(rosbag_objects_data)
         # Speed over each track's first second of poses (the tracker reports
         # 0 for UNKNOWN objects whatever they do).
-        self.birth_v = {}
-        for key, tr in self.tracks.items():
-            j = bisect.bisect_right(tr.times, tr.times[0] + 1.0) - 1
-            a = tr.samples[0].kinematics.pose_with_covariance.pose.position
-            b = tr.samples[j].kinematics.pose_with_covariance.pose.position
-            dt = tr.times[j] - tr.times[0]
-            tw = tr.samples[0].kinematics.twist_with_covariance.twist.linear
-            v = math.hypot(tw.x, tw.y)
-            self.birth_v[key] = max(v, math.hypot(b.x - a.x, b.y - a.y) / dt) if dt >= 0.3 else v
+        self.birth_v = {key: self.speed_from(tr, 0) for key, tr in self.tracks.items()}
+
+    @staticmethod
+    def speed_from(track: _ObjectTrack, i: int, window_sec: float = 1.0) -> float:
+        """How fast the object goes from sample i on: the larger of its
+        reported speed there and its next window_sec of poses."""
+        j = bisect.bisect_right(track.times, track.times[i] + window_sec) - 1
+        a = track.samples[i].kinematics.pose_with_covariance.pose.position
+        b = track.samples[j].kinematics.pose_with_covariance.pose.position
+        dt = track.times[j] - track.times[i]
+        tw = track.samples[i].kinematics.twist_with_covariance.twist.linear
+        v = math.hypot(tw.x, tw.y)
+        return max(v, math.hypot(b.x - a.x, b.y - a.y) / dt) if dt >= 0.3 else v
 
     def _index_track(self, track: _ObjectTrack) -> None:
         """Path distance and runs of equal samples, from the track's samples."""
@@ -1781,9 +1789,20 @@ class ReactiveShield:
             # Either is born at its first pose, up to the scene's time, that is
             # out of the ego's way — it comes out of the ego's shadow; until
             # there is one it waits unborn, its clock at its first pose.
+            # A track the scene first presents later than its first second is
+            # no birth (a scene jump lands mid-track): it is judged, once, on
+            # how it moves there, and a car that drove up and now stands beside
+            # the ego is shown (H82, 2026-11-11: the first car of an oncoming
+            # queue, standing 2 m off the ego, was withheld for 10 s and came
+            # out behind it).
             if near and key not in self.shown_idx:
                 first = track.samples[reached]
-                moving = self.birth_v.get(key, 0.0) >= BORN_MOVING_MPS
+                v_first = self._first_v.get(key)
+                if v_first is None:
+                    being_born = track.times[reached] - track.times[min(track.ext, reached)] < BIRTH_SEC
+                    v_first = self.birth_v.get(key, 0.0) if being_born else self.speed_from(track, reached)
+                    self._first_v[key] = v_first
+                moving = v_first >= BORN_MOVING_MPS
                 need = (self.p.vru_standoff_m if self._is_vru(first) else self.p.standoff_m) if moving else 0.0
                 if self._rect_clearance(first, ego_pose) <= need:
                     last = bisect.bisect_right(track.times, frame_time_sec + 1e-6) - 1

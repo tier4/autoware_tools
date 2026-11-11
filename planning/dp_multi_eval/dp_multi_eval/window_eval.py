@@ -330,6 +330,14 @@ def passed_cut(
     return lon >= CUT_PASS_M and lon <= 60.0 and abs(lat) <= lateral_max_m and math.cos(yaw - cyaw) > 0.0
 
 
+def is_last_leg(kind: str, t_end: float, recording_end: float) -> bool:
+    """The leg the recording ends in. A recording with one leg has no
+    "final" one (its only leg is the "start"): H95 (2026-11-11) drove through
+    the recording's last pose and 290 m on, the scene held 0.1 s short of its
+    end for 40 s, until a red light stopped it."""
+    return kind == "final" or t_end >= recording_end - 0.5
+
+
 def final_grace_over(
     now: float, end_reached_wall: float, *, arrival_dist_m: float | None, arrived_wall: float | None,
     drive_through: bool,
@@ -818,7 +826,7 @@ def run_legs(
                         rec["arrived_t"] = round(ts, 2)
                         arrived_wall = now
                         print(f"[window] leg {leg.index}: arrived at t={ts - stamps[0]:.1f}s (dist {dist:.1f} m, v={node.v:.2f})")
-                        if leg.kind == "final" and leg.drive_through:
+                        if is_last_leg(leg.kind, leg.t_end, stamps[-1]) and leg.drive_through:
                             # A cut pose: nothing to dwell for. A final bus stop
                             # is served like any other — the window runs on to
                             # the recording's end so the dwell is measured
@@ -884,7 +892,7 @@ def run_legs(
                             f"lateral={lateral_c:.1f}m, v={node.v:.2f})"
                         )
                         break
-                elif leg.kind == "final" or leg.t_end >= stamps[-1] - 0.5:
+                elif is_last_leg(leg.kind, leg.t_end, stamps[-1]):
                     if ts >= leg.t_end - 0.05 and end_reached_wall is None:
                         end_reached_wall = now
                     if end_reached_wall is not None and final_grace_over(

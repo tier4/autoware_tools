@@ -220,6 +220,23 @@ def main() -> int:
     assert [o.object_id.uuid for o in end] == [bytes([5] * 16)], [o.object_id.uuid for o in end]
     print("PASS: past the end, a track born in its last second is dropped (no evidence it stands)")
 
+    # H95, 2026-11-11: ... and it is not shown before the end either — in front
+    # of a late ego it flashed up in the next lane and was gone 0.3 s later.
+    # A short track the recording did not cut (tracker noise mid-drive) stays.
+    def frame3(k):
+        out = frame2(k)
+        if 20 <= k < 23:
+            noise = obj(7, 60.0, 0.0)
+            noise.kinematics.pose_with_covariance.pose.orientation = NS(x=0.0, y=0.0, z=0.0, w=1.0)
+            out.append(noise)
+        return out
+    real3 = ReactiveShield(ShieldParams())
+    real3.build_tracks([(2 * 10**18 + k * TICK, NS(objects=frame3(k))) for k in range(50)])
+    gate3 = ObjectGate(shield=NS(tracks=real3.tracks, bag_end=real3.bag_end, apply=lambda *a: None))
+    shown = lambda k: {o.object_id.uuid[0] for o in gate_apply(gate3, frame3(k), ts_ns=k * TICK)}
+    assert shown(48) == {4, 5} and shown(21) == {4, 5, 7}, (shown(48), shown(21))
+    print("PASS: a track born in the recording's last second is never shown; a short track mid-recording is")
+
     # -- the indicator follows the ego's place (H78, 2026-11-09): the bus
     # turned right at x=100 (t 40-45 s, RIGHT), stood at a stop at x=300
     # (t 80-100 s) and signalled LEFT pulling in, RIGHT pulling out.
