@@ -443,15 +443,33 @@ class IndicatorClock:
         return ans
 
 
+# The shield's wider box around the ego (used where a class is not judged on
+# the real body): the body plus this much, bumper to bumper and side to side.
+BOX_EXTRA_LENGTH_M = 1.62
+BOX_EXTRA_WIDTH_M = 0.13
+
+
+def shield_body_params(body: Any) -> dict[str, float]:
+    """ShieldParams fields for a vehicle body (geometry.VehicleBody): the real
+    body as its vehicle_info gives it, and the wider box around it."""
+    return {
+        "real_length_m": body.length_m, "real_width_m": body.width_m,
+        "real_center_offset_m": body.center_offset_m,
+        "ego_length_m": body.length_m + BOX_EXTRA_LENGTH_M, "ego_width_m": body.width_m + BOX_EXTRA_WIDTH_M,
+        "ego_center_offset_m": body.center_offset_m,
+    }
+
+
 def build_scene(objects_data, odom_data, signals_data, map_path=None, *, log: ShieldLog | None = None,
-                verbose: bool = False) -> Any:
+                verbose: bool = False, body: Any = None) -> Any:
     """The scene player's object pipeline for one recording: the reactive
     shield over its tracks, the map and the recorded lights, the objects'
     pasts (prebirth) and the audit, behind one ObjectGate. The scene driver
     and the offline bench (scene_bench.py) build it here, the same way.
 
     objects_data / odom_data / signals_data: [(stamp ns, msg)] as the
-    reproducer loads them."""
+    reproducer loads them. body: the ego's body from its vehicle_info
+    (geometry.VehicleBody); None keeps the shield's default body."""
     from types import SimpleNamespace
 
     # The shield keeps to the frame's time (frame_clock): the frame
@@ -467,7 +485,8 @@ def build_scene(objects_data, odom_data, signals_data, map_path=None, *, log: Sh
     # traffic set off toward a bus about to turn into its path (H78).
     shield = ReactiveShield(
         ShieldParams(frame_clock=True, vru_real_body=True, soft_stop=True, vehicle_real_body=True,
-                     npc_following=True, ego_plan_sec=EGO_PLAN_SEC, deadlock_sec=DEADLOCK_SEC)
+                     npc_following=True, ego_plan_sec=EGO_PLAN_SEC, deadlock_sec=DEADLOCK_SEC,
+                     **(shield_body_params(body) if body is not None else {}))
     )
     shield.build_tracks(objects_data)
     # The map and the recorded lights: a delayed NPC stops at its red,
@@ -488,7 +507,8 @@ def build_scene(objects_data, odom_data, signals_data, map_path=None, *, log: Sh
     # Before the tracks get their pasts: what stands at the recording's
     # end is judged on recorded poses.
     audit = SceneAudit(shield.tracks, shield_map, ego_path=(
-        [t * 1e-9 for t, _ in odom_data], [m.pose.pose.position.x for m in odom], [m.pose.pose.position.y for m in odom]))
+        [t * 1e-9 for t, _ in odom_data], [m.pose.pose.position.x for m in odom], [m.pose.pose.position.y for m in odom]),
+        body=body)
     gate = ObjectGate(shield=shield, log=log, prebirth=prebirth, audit=audit)
     prebirth.extend(shield)
     if verbose:
@@ -613,10 +633,11 @@ def make_scene_driver(reproducer: Any, opts: argparse.Namespace, indicators: Ind
                 departure_hold=not opts.no_departure_hold,
             )
             self.shield_log = ShieldLog(opts.shield_log)
+            body = vehicle_body_for(opts.vehicle_model)
             scene = build_scene(
                 reproducer.rosbag_objects_data, data,
                 getattr(reproducer, "rosbag_traffic_signals_data", []) or [],
-                opts.map_path, log=self.shield_log, verbose=True,
+                opts.map_path, log=self.shield_log, verbose=True, body=body,
             )
             self._shield, self.gate = scene.shield, scene.gate
             self._ego: Any = None
@@ -765,6 +786,23 @@ def make_scene_driver(reproducer: Any, opts: argparse.Namespace, indicators: Ind
     return SceneDriver()
 
 
+def vehicle_body_for(vehicle_model: str | None) -> Any:
+    """The ego's body from ``<vehicle_model>_description``'s vehicle_info, or
+    None (said aloud) when it cannot be read: the shield then keeps its
+    default body, which is right for no vehicle in particular."""
+    from dp_multi_eval.geometry import load_vehicle_body, resolve_vehicle_info_yaml
+
+    path = resolve_vehicle_info_yaml(None, vehicle_model)
+    body = load_vehicle_body(path)
+    if body is None:
+        print(f"[warn] no vehicle_info for vehicle model {vehicle_model!r}: the scene measures the ego "
+              "with the shield's default body", flush=True)
+    else:
+        print(f"Ego body from {path}: {body.length_m:.2f} x {body.width_m:.2f} m, centre "
+              f"{body.center_offset_m:.2f} m ahead of base_link", flush=True)
+    return body
+
+
 def nearest_object_m(objects, x: float, y: float) -> float:
     """Centre distance from (x, y) to the nearest object; NO_OBJECT_M for none."""
     best = NO_OBJECT_M
@@ -797,6 +835,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--no-departure-hold", action="store_true",
         help="window clock: do not freeze the scene at a recorded departure while the ego still stands (planned cuts)",
     )
+    p.add_argument("--vehicle-model", default=None,
+                   help="the ego's vehicle model: its body is read from <model>_description's vehicle_info")
     p.add_argument("--map-path", default=None, help="lanelet2 map (dir or .osm): stop lines, junctions, crosswalks for the shield")
     p.add_argument("--shield-log", default=None, help="write held NPCs and recording-end events here (JSON lines)")
     # The forked reproducer's legacy options: accepted, ignored.

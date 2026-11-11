@@ -72,7 +72,7 @@ recorded bus crosses the mapped curb on up to 19 % of its frames. Any other
 (`ego_caused_episodes`) fails the run.
 
 The ego is measured with the vehicle's real body (`vehicle_info_yaml`, else
-`<vehicle_model>_description`'s): lv828l 10.88 × 2.87 m.
+`<vehicle_model>_description`'s), in the metrics, the video and the scene (shield, audit) alike; no vehicle's size is written in the code.
 
 ## Contacts (`collision_rate`) — gating on `ego_caused`
 

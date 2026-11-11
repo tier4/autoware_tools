@@ -739,28 +739,6 @@ def main() -> None:
                             n for n in multi_goal_stop_order if n in available_stops
                         ] or list(multi_goal_stop_order)
 
-                    if st.button("Use Hiratsuka default loop order"):
-                        default_order = [
-                            "平塚駅南口",
-                            "商工会議所前（往路）",
-                            "教会前（往路）",
-                            "松風公園入口",
-                            "花水小学校前",
-                            "すみれ平",
-                            "松風町",
-                            "八間通り入口",
-                            "袖ヶ浜",
-                            "湘南海岸公園前",
-                            "なぎさプロムナード",
-                            "教会前（復路）",
-                            "商工会議所前（復路）",
-                            "平塚駅南口",
-                        ]
-                        st.session_state[order_key] = [
-                            n for n in default_order if n in available_stops
-                        ]
-                        st.rerun()
-
                     add_col, btn_col = st.columns([3, 1])
                     with add_col:
                         to_add = st.selectbox(

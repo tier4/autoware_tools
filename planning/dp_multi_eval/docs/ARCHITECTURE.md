@@ -50,6 +50,7 @@ orchestrator in a child process with a fake job.
 - **Original reproducer, clock outside** — `planning_debug_tools` stays unmodified. With `-r 0` it shows the frame nearest the ego pose it reads; `scene_driver` remaps that input and feeds the recorded pose of the instant its clock picks.
 - **Overlay, not remaps** — psim reads the planner param by share path; parallel models need parallel share trees. `src/autoware` untouched.
 - **The recording is the timeline** — legs, hand-over, reveal, 1× clock ([method](EVALUATION_METHOD.md)).
+- **The vehicle and the line from their own data** — the ego's body from `<vehicle_model>_description`'s vehicle_info; the stop a cut recording was heading for from the routes the vehicle recorded (its own, else the other recordings' sequence). A written stop order had two stops out of place.
 - **Free-domain pool** — a domain returns only when its job ends; round-robin once started a job on a domain still in use and its cleanup killed the running simulator.
 - **GPU gate** — two engines built at once → OOM → a planner that stays up silent and reads as a stall.
 - **One bag read, video on its own pool** — rendering on the simulator worker cost 264 s per job.

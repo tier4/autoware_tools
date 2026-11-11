@@ -53,15 +53,12 @@ OBJECTS_TOPIC = "/perception/object_recognition/tracking/objects"
 ODOM_TOPIC = "/localization/kinematic_state"
 SIGNALS_TOPIC = "/perception/traffic_light_recognition/traffic_signals"
 CACHE_VERSION = "v1"
-DEFAULT_BAG_DIR = "/media/kaan/KaanSSD/bags/00_hiratsuka/diffusion_planner_eval/test_bag"
 DEFAULT_PROGRAMS = ("recorded", "lag15", "ahead8", "zone_stops20")
 
 CONTACT_M = 0.1
 NEAR_M = 40.0
 OFF_REC_M = 2.0
 PLAN_SEC = 5.0
-EGO_FRONT_M = 7.56        # base_link (rear axle) to the front bumper
-EGO_HALF_W = 1.435
 STOP_STANDOFF_M = 3.0     # the generic obstacle stop stands this far off
 STOP_CLEAR_M = 0.5        # ... from anything its body would come this close to
 STOP_DECEL = 2.5
@@ -257,7 +254,8 @@ def _blocker(path, tau, speed, shown, prev_pos, shield):
         if prev is not None:
             ahead = _project(p.x, p.y, way)
             back = _project(prev[0], prev[1], way)
-            if ahead and back and (ahead[0] - back[0]) / 0.1 >= 1.0 and ahead[0] > EGO_FRONT_M + STOP_STANDOFF_M:
+            if ahead and back and (ahead[0] - back[0]) / 0.1 >= 1.0 and ahead[0] > (
+                    shield.p.real_center_offset_m + shield.p.real_length_m / 2.0 + STOP_STANDOFF_M):
                 continue    # driving away ahead: followed, not stopped for
         return key
     return None
@@ -267,10 +265,11 @@ def _quat(yaw: float):
     return SimpleNamespace(x=0.0, y=0.0, z=math.sin(yaw / 2.0), w=math.cos(yaw / 2.0))
 
 
-def run_program(rec: SimpleNamespace, map_path: str | None, program: str, overrides: dict | None = None) -> dict:
+def run_program(rec: SimpleNamespace, map_path: str | None, program: str, overrides: dict | None = None,
+                body: Any = None) -> dict:
     from dp_multi_eval.scene_driver import build_scene
 
-    scene = build_scene(rec.objects, rec.odom, rec.signals, map_path)
+    scene = build_scene(rec.objects, rec.odom, rec.signals, map_path, body=body)
     shield, gate, smap = scene.shield, scene.gate, scene.map
     for k, v in (overrides or {}).items():
         if not hasattr(shield.p, k):
@@ -418,12 +417,12 @@ def load_run(job_dir: Path) -> SimpleNamespace:
 
 
 def replay_run(rec: SimpleNamespace, run: SimpleNamespace, map_path: str | None,
-               trace: str | None = None, overrides: dict | None = None) -> dict:
+               trace: str | None = None, overrides: dict | None = None, body: Any = None) -> dict:
     """The scene played to the ego exactly as the model drove it in a GPU run:
     its poses, speeds and plans at 10 Hz, on the run's scene clock."""
     from dp_multi_eval.scene_driver import build_scene
 
-    scene = build_scene(rec.objects, rec.odom, rec.signals, map_path)
+    scene = build_scene(rec.objects, rec.odom, rec.signals, map_path, body=body)
     shield, gate, smap = scene.shield, scene.gate, scene.map
     for k, v in (overrides or {}).items():
         setattr(shield.p, k, type(getattr(shield.p, k))(v) if not isinstance(getattr(shield.p, k), bool)
@@ -499,14 +498,17 @@ def replay_run(rec: SimpleNamespace, run: SimpleNamespace, map_path: str | None,
 
 # --------------------------------------------------------------------------- runner
 def _job(args: tuple) -> tuple[str, dict]:
-    bag, map_path, programs, overrides = args
+    from dp_multi_eval.scene_driver import vehicle_body_for
+
+    bag, map_path, programs, overrides, vehicle_model = args
     t0 = time.monotonic()
     rec = load_recording(Path(bag))
     load_sec = time.monotonic() - t0
+    body = vehicle_body_for(vehicle_model)
     res = {}
     for prog in programs:
         t1 = time.monotonic()
-        r = run_program(rec, map_path, prog, overrides)
+        r = run_program(rec, map_path, prog, overrides, body=body)
         r["run_sec"] = round(time.monotonic() - t1, 1)
         res[prog] = r
     return Path(bag).name, {"load_sec": round(load_sec, 1), "programs": res}
@@ -552,8 +554,11 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--bags", nargs="*", default=[], help="bag names under --bag-dir, or paths")
     p.add_argument("--all", action="store_true", help="every bag under --bag-dir")
-    p.add_argument("--bag-dir", default=DEFAULT_BAG_DIR)
+    p.add_argument("--bag-dir", default=None, help="folder of recordings (needed for --bags / --all)")
     p.add_argument("--map", dest="map_path", default=None)
+    p.add_argument("--vehicle-model", default=None,
+                   help="the ego's vehicle model (its body from <model>_description); default: the job's own, "
+                   "else the pipeline's default")
     p.add_argument("--programs", nargs="*", default=list(DEFAULT_PROGRAMS))
     p.add_argument("--out", type=Path, default=None)
     p.add_argument("--baseline", type=Path, default=None, help="earlier --out: exit 1 on a regression")
@@ -565,10 +570,22 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--trace", default=None, help="with --replay-run: an object id prefix to trace")
     args = p.parse_args(argv)
     overrides = dict(kv.split("=", 1) for kv in args.set)
+    from dp_multi_eval.job_config import JobConfig
+    from dp_multi_eval.scene_driver import vehicle_body_for
+
+    vehicle_model = args.vehicle_model or JobConfig.__dataclass_fields__["vehicle_model"].default
     if args.replay_run is not None:
         job = args.replay_run
-        rec = load_recording(Path(args.bag_dir) / job.name)
-        res = replay_run(rec, load_run(job), args.map_path, trace=args.trace, overrides=overrides)
+        # The recording the job replayed: its own record of it, else by name under --bag-dir.
+        status = job / "job_status.json"
+        bag = json.loads(status.read_text(encoding="utf-8")).get("bag_path") if status.is_file() else None
+        if not bag:
+            if not args.bag_dir:
+                p.error(f"{job} names no recording: give --bag-dir")
+            bag = Path(args.bag_dir) / job.name
+        rec = load_recording(Path(bag))
+        res = replay_run(rec, load_run(job), args.map_path, trace=args.trace, overrides=overrides,
+                         body=vehicle_body_for(vehicle_model))
         tr = res.pop("trace")
         print(json.dumps({k: v for k, v in res.items() if k not in ("findings",)}, indent=1, default=str))
         for f in res["findings"]:
@@ -577,12 +594,14 @@ def main(argv: list[str] | None = None) -> int:
             print("trace", row)
         return 0
 
-    bag_dir = Path(args.bag_dir)
+    if args.all and not args.bag_dir:
+        p.error("--all needs --bag-dir")
+    bag_dir = Path(args.bag_dir or ".")
     names = sorted(d.name for d in bag_dir.iterdir() if d.is_dir()) if args.all else args.bags
     bags = [str(Path(b) if Path(b).is_dir() else bag_dir / b) for b in names]
     if not bags:
         p.error("no bags (--bags or --all)")
-    jobs = [(b, args.map_path, args.programs, overrides) for b in bags]
+    jobs = [(b, args.map_path, args.programs, overrides, vehicle_model) for b in bags]
     results: dict[str, Any] = {}
     if args.jobs > 1 and len(jobs) > 1:
         import multiprocessing as mp

@@ -8,6 +8,7 @@ dashboard, models side by side, a verdict and a video per run.
 ## Quick start
 
 ```bash
+colcon build --packages-select dp_multi_eval planning_debug_tools diffusion_planner_batch_eval   # again after every pull
 source install/setup.bash
 cp src/tools/planning/dp_multi_eval/config/example_pipeline.yaml ~/dp_multi_eval_pipeline.yaml
 # edit rosbag_dir, results_root, map_path, models

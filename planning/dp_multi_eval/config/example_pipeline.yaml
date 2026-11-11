@@ -75,22 +75,12 @@ multi_goal: auto
 # stop_points needs multi_goal_stop_order below and only suits a known bus route;
 # it cannot work on an arbitrary bag, so it is not the default.
 multi_goal_source: auto   # auto | recorded_route | goal_topic | stop_segments | stop_points
-# Ordered stop names from {map_path}/stop_points.csv (used when source=stop_points)
-multi_goal_stop_order:
-  - 平塚駅南口
-  - 商工会議所前（往路）
-  - 教会前（往路）
-  - 松風公園入口
-  - 花水小学校前
-  - すみれ平
-  - 松風町
-  - 八間通り入口
-  - 袖ヶ浜
-  - 湘南海岸公園前
-  - なぎさプロムナード
-  - 教会前（復路）
-  - 商工会議所前（復路）
-  - 平塚駅南口
+# Ordered stop names from {map_path}/stop_points.csv: needed only for
+# multi_goal_source: stop_points. Nothing else asks for it — where a recording
+# was cut mid-drive, the stop the bus was heading for is read from the routes
+# the vehicle itself recorded (its own, else those of the other recordings in
+# rosbag_dir); a list written here is used only when they say nothing.
+multi_goal_stop_order: []
 stop_points_csv: stop_points.csv
 multi_goal_stop_speed_mps: 0.2
 multi_goal_stop_min_sec: 8.0

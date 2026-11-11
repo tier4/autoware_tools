@@ -19,7 +19,7 @@ Unknown keys are ignored silently — the accepted list is `PIPELINE_KNOBS` in `
 | `bag_load_base_sec`, `bag_load_duration_factor`, `bag_load_timeout_cap_sec` | 120, 1.0, 3600 | reproducer load budget = base + duration × factor |
 | `gpu_min_free_mib`, `gpu_wait_timeout_sec` | 2500, 600 | GPU gate |
 | `multi_goal`, `multi_goal_source` | `auto`, `auto` | legs from the recorded route / goal topic / dwells; bus-stop dwells become leg goals; `true` = `auto`, `false` = whole bag one leg |
-| `multi_goal_stop_order`, `stop_points_csv` | —, `stop_points.csv` | only for `multi_goal_source: stop_points` |
+| `multi_goal_stop_order`, `stop_points_csv` | —, `stop_points.csv` | the written order: only for `multi_goal_source: stop_points`. A cut recording's destination comes from the vehicle's recorded routes (its own, else the other recordings' in `rosbag_dir`) |
 | `leg_cuts` | `auto` | also cut legs at every recorded stand ≥ 3 s ([method](EVALUATION_METHOD.md#legs)); `off` = bus-stop legs only |
 | `thresholds`, `topics_yaml`, `vehicle_info_yaml` | package `config/`; vehicle info from `<vehicle_model>_description` | |
 | `live_web_monitor` | on | live panel on the dashboard |

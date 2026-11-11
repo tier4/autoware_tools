@@ -791,7 +791,8 @@ def metric_windows(
         if not holds:
             return 0.0, None
         ht = [float(h["t"]) for h in holds]
-        cx, cy = x + EGO_CENTER_OFFSET_M * math.cos(yaw), y + EGO_CENTER_OFFSET_M * math.sin(yaw)
+        off = lights["body"].center
+        cx, cy = x + off * math.cos(yaw), y + off * math.sin(yaw)
         c_, s_ = math.cos(yaw), math.sin(yaw)
         ahead_from = lights["body"].front_m - MUTUAL_BEHIND_FRONT_M
         seen: dict[str, int] = {}
@@ -965,7 +966,7 @@ def metric_windows(
             for kind, block in (("stuck", stuck), ("long_stop", long_stops)):
                 for st in block:
                     why = _scene_limited(base + float(st[0]), base + float(st[0]) + float(st[1]),
-                                         ego_slice, ref_slice, holds, ends)
+                                         ego_slice, ref_slice, holds, ends, body=W.body_from_footprint(footprint))
                     if why is not None:
                         scene_limited.append({"kind": kind, "t_rel": float(st[0]), "sec": float(st[1])} | why)
             limited = {(round(d["t_rel"], 1), round(d["sec"], 1)) for d in scene_limited if d["kind"] == "stuck"}
@@ -1966,8 +1967,7 @@ DROVE_PAST_M = 1.0  # ...unless it has gone this far on from its closest to the 
 
 SHIELD_LOG = "shield_log.jsonl"  # scene_driver.ShieldLog
 SCENE_LIMIT_FRAC = 0.5  # a stop is the scene's limit when its cause stood this much of it
-WAY_AHEAD_M = 27.5  # the ego's way: its recorded path from its rear axle, front overhang (7.56 m) + 20 m
-EGO_HALF_W = 1.45
+WAY_BEYOND_FRONT_M = 20.0  # the ego's way: its recorded path from base_link to this far beyond its front bumper
 
 
 def metric_scene_audit(bag_path: Path, series: BagSeries) -> dict[str, Any]:
@@ -2016,7 +2016,7 @@ def _shield_log(path: Path) -> tuple[list[dict], list[tuple[float, float]]]:
     return holds, ends
 
 
-def _scene_limited(t0: float, t1: float, ego, ref, holds, ends) -> dict | None:
+def _scene_limited(t0: float, t1: float, ego, ref, holds, ends, body=None) -> dict | None:
     """Why a stop from t0 to t1 is the scene's limit, or None.
 
     after_recording: the scene stood at the recording's end for most of it.
@@ -2030,6 +2030,11 @@ def _scene_limited(t0: float, t1: float, ego, ref, holds, ends) -> dict | None:
     dur = t1 - t0
     if dur <= 0.0:
         return None
+    if body is None:
+        from dp_multi_eval.waits import EgoBody
+
+        body = EgoBody()
+    way_ahead = body.front_m + WAY_BEYOND_FRONT_M
     after = sum(max(0.0, min(t1, b) - max(t0, a)) for a, b in ends)
     if after >= SCENE_LIMIT_FRAC * dur:
         return {"cause": "after_recording"}
@@ -2047,14 +2052,14 @@ def _scene_limited(t0: float, t1: float, ego, ref, holds, ends) -> dict | None:
         for r in ref[k:]:
             run += math.hypot(r.x - way[-1][0], r.y - way[-1][1])
             way.append((r.x, r.y))
-            if run >= WAY_AHEAD_M:
+            if run >= way_ahead:
                 break
         lo, hi = bisect.bisect_left(hold_t, t - 0.6), bisect.bisect_right(hold_t, t + 0.6)
         hit = None
         for h in holds[lo:hi]:
             if h.get("reason") != "deadlock":
                 continue
-            reach = EGO_HALF_W + float(h.get("w") or 1.0) / 2.0 + 0.5
+            reach = body.half_width_m + float(h.get("w") or 1.0) / 2.0 + 0.5
             if any(_point_segment(h["x"], h["y"], a, b) <= reach for a, b in zip(way, way[1:])):
                 hit = h["id"]
                 break
@@ -2214,7 +2219,6 @@ STOP_LINE_PAST_M = 2.0  # the ego's front this far past its light's stop line: t
 MUTUAL_WAIT_SEC = 10.0  # standing this long with no reason, an NPC held for the ego near: a mutual wait (fails)
 MUTUAL_NEAR_M = 15.0    # ...that near the ego's centre
 MUTUAL_BEHIND_FRONT_M = 1.0  # ...and no further back than this behind its front (one behind it queues)
-EGO_CENTER_OFFSET_M = 2.12  # base_link to the body centre (lv828l)
 
 
 def _past_stop_line(stop_lines, group: int, x: float, y: float, yaw: float, front_m: float) -> bool:

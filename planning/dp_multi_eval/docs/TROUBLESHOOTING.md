@@ -49,3 +49,4 @@ Start with the job's `diagnosis` (dashboard card / `job_status.json`), then the 
 | `/tmp` full | delete `/tmp/dp_multi_eval_overlays/` between campaigns |
 | shell killed (`exit 144`) | a `pkill -f` pattern matched your shell → kill by PID |
 | code edits have no effect | stale install → `--symlink-install`, or `PYTHONPATH=<pkg dir>` |
+| every job fails with `No module named 'dp_multi_eval.…'` | the checkout changed under the install (a pull, a branch switch): rebuild the three packages ([setup](SETUP.md)); never switch branches while a run is going |

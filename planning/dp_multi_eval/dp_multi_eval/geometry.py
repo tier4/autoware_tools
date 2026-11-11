@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
@@ -191,6 +192,43 @@ def load_vehicle_footprint(vehicle_info_yaml: Path | None, margin: float = 0.0) 
         )
     except Exception:  # noqa: BLE001
         return ego_local_footprint(margin=margin)
+
+
+@dataclass(frozen=True)
+class VehicleBody:
+    """The ego's body as its vehicle_info gives it: bumper to bumper, side to
+    side, and how far ahead of base_link (the rear axle) its centre lies."""
+
+    length_m: float
+    width_m: float
+    center_offset_m: float
+
+    @property
+    def front_m(self) -> float:
+        """base_link to the front bumper."""
+        return self.center_offset_m + self.length_m / 2.0
+
+    @property
+    def half_width_m(self) -> float:
+        return self.width_m / 2.0
+
+
+def body_of(footprint: Polygon) -> VehicleBody:
+    """The body a base_link footprint polygon spans."""
+    xs, ys = [p[0] for p in footprint], [p[1] for p in footprint]
+    return VehicleBody(length_m=max(xs) - min(xs), width_m=max(ys) - min(ys),
+                       center_offset_m=(max(xs) + min(xs)) / 2.0)
+
+
+def load_vehicle_body(vehicle_info_yaml: Path | str | None) -> VehicleBody | None:
+    """The body from a vehicle_info.param.yaml; None when there is no such
+    file (the caller says what it falls back to — never silently)."""
+    if not vehicle_info_yaml:
+        return None
+    path = Path(vehicle_info_yaml).expanduser()
+    if not path.is_file():
+        return None
+    return body_of(load_vehicle_footprint(path, margin=0.0))
 
 
 def resolve_vehicle_info_yaml(configured: str | Path | None, vehicle_model: str | None) -> Path | None:

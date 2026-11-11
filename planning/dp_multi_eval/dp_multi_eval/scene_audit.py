@@ -35,21 +35,21 @@ CLOSER_M = 5.0       # appearing this much nearer than the bus first saw it is t
 HANDOVER_SEC = 2.0   # a new id within this long ...
 HANDOVER_M = 3.0     # ... and this close to where one of its class left is the same object
 GAP_SEC = 0.5        # recorded samples further apart than this: the recording lost it between
-EGO_L, EGO_W, EGO_OFF = 10.88, 2.87, 2.12
 
 
 def _yaw(q: Any) -> float:
     return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
 
 
-def _ego_frame(x: float, y: float, ego_pose: Any) -> tuple[float, float, float]:
-    """(distance to the ego's body, longitudinal, lateral) of a point."""
+def _ego_frame(x: float, y: float, ego_pose: Any, body: Any) -> tuple[float, float, float]:
+    """(distance to the ego's body, longitudinal, lateral) of a point.
+    ``body``: length_m, width_m, center_offset_m (geometry.VehicleBody)."""
     yaw = _yaw(ego_pose.orientation)
     dx, dy = x - ego_pose.position.x, y - ego_pose.position.y
     lon = dx * math.cos(yaw) + dy * math.sin(yaw)
     lat = -dx * math.sin(yaw) + dy * math.cos(yaw)
-    gx = max(abs(lon - EGO_OFF) - EGO_L / 2.0, 0.0)
-    gy = max(abs(lat) - EGO_W / 2.0, 0.0)
+    gx = max(abs(lon - body.center_offset_m) - body.length_m / 2.0, 0.0)
+    gy = max(abs(lat) - body.width_m / 2.0, 0.0)
     return math.hypot(gx, gy), lon, lat
 
 
@@ -67,7 +67,14 @@ class _Seen:
 
 
 class SceneAudit:
-    def __init__(self, tracks: dict | None = None, shield_map: Any = None, ego_path=None) -> None:
+    def __init__(self, tracks: dict | None = None, shield_map: Any = None, ego_path=None, body: Any = None) -> None:
+        if body is None:   # no vehicle_info given: the shield's own body, one fallback for both
+            from dp_multi_eval.geometry import VehicleBody
+            from dp_multi_eval.reactive_shield import ShieldParams
+
+            sp = ShieldParams()
+            body = VehicleBody(sp.real_length_m, sp.real_width_m, sp.real_center_offset_m)
+        self.body = body
         """ego_path: the recorded ego as (times s, xs, ys) — where the bus was
         when it first saw each object."""
         self.tracks = tracks or {}
@@ -209,7 +216,7 @@ class SceneAudit:
             present.add(key)
             p = o.kinematics.pose_with_covariance.pose.position
             lin = o.kinematics.twist_with_covariance.twist.linear
-            d, lon, _ = _ego_frame(p.x, p.y, ego_pose)
+            d, lon, _ = _ego_frame(p.x, p.y, ego_pose, self.body)
             cls = getattr(o, "classification", None) or []
             label = int(cls[0].label) if cls else 0
             st = self._seen.get(key)

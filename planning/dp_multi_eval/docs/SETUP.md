@@ -15,13 +15,14 @@
 | `planning_debug_tools` | the original `perception_reproducer.py`, unmodified; `scene_driver.py` runs it. Required. |
 | `diffusion_planner_batch_eval` | route helper |
 | `autoware_launch`, planning simulator, `autoware_diffusion_planner` | only `major_version` 4 weights load |
+| `<vehicle_model>_description` | its `vehicle_info.param.yaml` is the ego's body everywhere; without it the scene warns and uses a default body |
 | `autoware_trajectory_modifier` | must be in the launch tree — on this workspace: universe branch `feat/cherry-pick-poincloud-fusion` (`beta/v0.41` lacks it → "planning simulator exited early") |
 | `topic_tools`, `rosbag2` (sqlite3) | recording |
 
 Python: `yaml`, `numpy`, `scipy`, `matplotlib`, `psutil`, `lanelet2` + `autoware_lanelet2_extension_python`. `ffmpeg` on PATH.
 
 ```bash
-colcon build --symlink-install --packages-select dp_multi_eval planning_debug_tools diffusion_planner_batch_eval
+colcon build --packages-select dp_multi_eval planning_debug_tools diffusion_planner_batch_eval   # --symlink-install optional
 source install/setup.bash
 ros2 run dp_multi_eval scene_driver.py --help | grep -c window-clock                  # 1
 ros2 pkg list | grep -c autoware_trajectory_modifier                                  # 1
@@ -36,8 +37,10 @@ The older v106 map cannot route into the bus bays.
 ## Models
 
 `models:` entries are `{name, model_config}`. `model_config` is a directory with
-`diffusion_planner.onnx` + `args.json` (a param YAML is generated into
-`~/.cache/dp_multi_eval/model_params/`) or a `.param.yaml`. The name is the
+`diffusion_planner.onnx` + `args.json`, an `ml_planner.onnx` file (needs
+`autoware_ml_planner`; such a job launches with `planning_setting: ml_planner`
+on its own), or a `.param.yaml`. A param YAML is generated into
+`~/.cache/dp_multi_eval/model_params/`. The name is the
 dashboard column and part of every job id.
 
 ## Recordings

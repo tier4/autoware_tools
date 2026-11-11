@@ -308,6 +308,7 @@ def build_reproducer_command(
     map_path: Path | None = None,
     shield_log: Path | None = None,
     departure_hold: bool = True,
+    vehicle_model: str | None = None,
 ) -> list[str]:
     """Build the scene player command: planning_debug_tools' original
     perception_reproducer, driven by dp_multi_eval's scene clock (scene_driver.py).
@@ -339,6 +340,8 @@ def build_reproducer_command(
         cmd.extend(["--shield-log", str(shield_log)])
     if window_clock and not departure_hold:
         cmd.append("--no-departure-hold")
+    if vehicle_model:
+        cmd.extend(["--vehicle-model", str(vehicle_model)])
     return cmd
 
 
@@ -817,6 +820,7 @@ def run_reproducer_job(cfg: JobConfig) -> JobResult:
             # departure: the 6 s freeze there only froze the scene (walkers
             # standing mid-crosswalk at 0 m/s, H78 2026-11-10).
             departure_hold=not leg_cuts_on(cfg),
+            vehicle_model=cfg.vehicle_model,
         )
         record_cmd = build_record_command(output_bag, cfg.topics.record_list())
 
@@ -1034,17 +1038,27 @@ def run_reproducer_job(cfg: JobConfig) -> JobResult:
         if not multi_goal_active or cut_final_leg:
             try:
                 from dp_multi_eval.multi_goal import (
-                    bag_end_pose, bag_path_xy, next_stop_ahead,
+                    bag_end_pose, bag_path_xy, next_stop_ahead, recorded_destination,
+                    recorded_stop_successors,
                 )
 
                 end_pose = bag_end_pose(bag_path)
                 if end_pose is not None and end_pose[3] > 1.0:
-                    cand = next_stop_ahead(
-                        end_pose[:3], map_path=cfg.map_path,
-                        stop_points_csv=cfg.stop_points_csv,
-                        stop_order=list(cfg.multi_goal_stop_order or []),
-                        recorded_path_xy=bag_path_xy(bag_path),
-                    )
+                    # Where the bus was going: its own route's goal when the
+                    # recording carries it; else the stop that follows the
+                    # last one it left, by the routes the vehicle recorded
+                    # on this line; a written stop order and the nearest stop
+                    # ahead only after those.
+                    cand = recorded_destination(bag_path, end_pose[:2])
+                    if cand is None:
+                        cand = next_stop_ahead(
+                            end_pose[:3], map_path=cfg.map_path,
+                            stop_points_csv=cfg.stop_points_csv,
+                            stop_order=list(cfg.multi_goal_stop_order or []),
+                            recorded_path_xy=bag_path_xy(bag_path),
+                            successors=recorded_stop_successors(
+                                bag_path.parent, cfg.map_path, cfg.stop_points_csv),
+                        )
                     if cand is not None:
                         cut_end_goal = (cand.x, cand.y, cand.yaw)
                         cut_end_pose = end_pose[:3]

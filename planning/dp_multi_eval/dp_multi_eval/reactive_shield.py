@@ -69,6 +69,9 @@ def _yaw_of(q) -> float:
 
 @dataclass
 class ShieldParams:
+    # The ego's body below (ego_* box and real_* body) is a stand-in for
+    # callers that name no vehicle (unit tests): the scene builder sets all
+    # six from the vehicle's own vehicle_info (scene_driver.shield_body_params).
     # Must strictly COVER the collision metric's vehicle footprint
     # (10.9 x 2.87 m with overhangs), or a pose the shield holds as clear
     # can still score sub-0.1 m there — measured as 2-frame brushes against

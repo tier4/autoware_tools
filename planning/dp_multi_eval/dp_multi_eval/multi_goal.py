@@ -87,26 +87,9 @@ def _goals_from_stop_segments(
 ROUTE_TOPIC = "/planning/mission_planning/route"
 
 
-def _goals_from_recorded_route(
-    bag_path: Path,
-    ego: list[EgoSample],
-    *,
-    reached_radius_m: float,
-) -> list[RouteGoal]:
-    """Goals taken from the LaneletRoute the recorded vehicle actually drove.
-
-    Every other source guesses. A dwell says where the vehicle stopped, which is not
-    the same as where it was going: it also stops at lights and in queues, and those
-    poses sit wherever the vehicle happened to halt — often straddling lanelets, where
-    the mission planner rejects the goal outright. The recorded route has no such
-    ambiguity. Its goal was produced and accepted by a real mission planner, carries
-    the heading that planner agreed with, and is republished as each leg completes, so
-    a multi-stop recording yields its legs directly.
-
-    Goals the ego never reached are dropped: the last route of a recording is usually
-    published just before the cut and aims past the end of the data, where the
-    reproducer has no scene to replay.
-    """
+def _recorded_route_goals(bag_path: Path) -> list[RouteGoal]:
+    """The goal of every LaneletRoute the recording carries, in publish order
+    (near-duplicate republishes of one goal collapsed)."""
     try:
         import sqlite3
 
@@ -162,6 +145,30 @@ def _goals_from_recorded_route(
             deduped.append(goal)
     found = deduped
 
+    return found
+
+
+def _goals_from_recorded_route(
+    bag_path: Path,
+    ego: list[EgoSample],
+    *,
+    reached_radius_m: float,
+) -> list[RouteGoal]:
+    """Goals taken from the LaneletRoute the recorded vehicle actually drove.
+
+    Every other source guesses. A dwell says where the vehicle stopped, which is not
+    the same as where it was going: it also stops at lights and in queues, and those
+    poses sit wherever the vehicle happened to halt — often straddling lanelets, where
+    the mission planner rejects the goal outright. The recorded route has no such
+    ambiguity. Its goal was produced and accepted by a real mission planner, carries
+    the heading that planner agreed with, and is republished as each leg completes, so
+    a multi-stop recording yields its legs directly.
+
+    Goals the ego never reached are dropped: the last route of a recording is usually
+    published just before the cut and aims past the end of the data, where the
+    reproducer has no scene to replay.
+    """
+    found = _recorded_route_goals(bag_path)
     if not found or not ego:
         return found
 
@@ -501,6 +508,58 @@ def bag_path_xy(bag_path: Path, step_m: float = 5.0) -> list[tuple[float, float]
     return out
 
 
+def recorded_destination(
+    bag_path: Path, end_xy: tuple[float, float], *, min_m: float = 10.0, max_m: float = 1500.0,
+) -> RouteGoal | None:
+    """Where the recorded vehicle was going when the recording was cut: the
+    goal of the last route it published, when that lies beyond the cut. The
+    vehicle's own answer — no stop list, no guess; None when the recording
+    carries no route (one set before it began) or its last goal is the end."""
+    goals = _recorded_route_goals(bag_path)
+    if not goals:
+        return None
+    last = goals[-1]
+    dist = math.hypot(last.x - float(end_xy[0]), last.y - float(end_xy[1]))
+    if dist < min_m or dist > max_m:
+        return None
+    return RouteGoal(x=last.x, y=last.y, yaw=last.yaw, stamp_sec=last.stamp_sec,
+                     source="cut_end_recorded_route")
+
+
+def recorded_stop_successors(
+    bag_dir: Path, map_path: Path, stop_points_csv: str = "stop_points.csv",
+) -> dict[str, str]:
+    """The line's stop sequence as the vehicle itself drove it: for each map
+    stop, the stop its next route went to — read from the routes recorded in
+    the recordings of ``bag_dir`` (the most frequent one wins).
+
+    Nobody writes the line down. A hand-written order had 松風町 after
+    すみれ平; the vehicle's own routes go 松風公園入口 → 松風町 →
+    花水小学校前 → すみれ平, and three recordings cut mid-drive were routed
+    to a stop one or two further on (2026-11-11)."""
+    from collections import Counter
+
+    try:
+        stops = _load_map_stop_points(resolve_stop_points_csv(map_path, stop_points_csv))
+    except Exception:  # noqa: BLE001
+        return {}
+
+    def stop_at(g: RouteGoal) -> str | None:
+        best = min(stops, key=lambda st: math.hypot(float(st.x) - g.x, float(st.y) - g.y), default=None)
+        if best is None or math.hypot(float(best.x) - g.x, float(best.y) - g.y) > BUS_STOP_MATCH_M:
+            return None
+        return str(best.name)
+
+    pairs: dict[str, Counter] = {}
+    bag_dir = Path(bag_dir).expanduser()
+    for bag in sorted(d for d in bag_dir.iterdir() if d.is_dir()) if bag_dir.is_dir() else []:
+        names = [stop_at(g) for g in _recorded_route_goals(bag)]
+        for here, there in zip(names, names[1:]):
+            if here and there and here != there:
+                pairs.setdefault(here, Counter())[there] += 1
+    return {here: nxt.most_common(1)[0][0] for here, nxt in pairs.items()}
+
+
 def next_stop_ahead(
     end_xy_yaw: tuple[float, float, float],
     *,
@@ -511,6 +570,7 @@ def next_stop_ahead(
     min_m: float = 10.0,
     max_m: float = 1500.0,
     passed_radius_m: float = 30.0,
+    successors: dict[str, str] | None = None,
 ) -> RouteGoal | None:
     """The map stop the recorded bus was heading for when the recording was cut.
 
@@ -525,7 +585,10 @@ def next_stop_ahead(
     had a goal there; its destination was the next stop on its route, past
     the turn.
 
-    With ``stop_order`` (the fleet's ordered stop list) and the recorded
+    With ``successors`` (recorded_stop_successors: the stop sequence in the
+    vehicle's own recorded routes) the destination is the stop after the last
+    one the recording left behind. Else, with ``stop_order`` (a written
+    ordered stop list) and the recorded
     path, the destination is read off the route: the last ordered stop the
     recording passed within ``passed_radius_m`` marks its progress, and the
     first stop after it that the routing graph can reach is the goal (only stops whose lanelet is missing from the map are
@@ -564,6 +627,25 @@ def next_stop_ahead(
             x=float(row["x"]), y=float(row["y"]), yaw=float(row["yaw"]),
             stamp_sec=0.0, source=f"cut_end_next_stop:{row['name'].strip()}",
         )
+
+    # The vehicle's own sequence first (``successors``, from the routes it
+    # recorded): the stop after the last one this recording left behind.
+    if successors and recorded_path_xy:
+        hx_, hy_ = math.cos(eyaw), math.sin(eyaw)
+        last_name, last_i = None, -1
+        for name, row in rows.items():
+            sx, sy = float(row["x"]), float(row["y"])
+            if (sx - ex) * hx_ + (sy - ey) * hy_ >= 0.0:
+                continue   # still ahead of the cut: not left behind, however near
+            i, d = min(((k, math.hypot(px - sx, py - sy)) for k, (px, py) in enumerate(recorded_path_xy)),
+                       key=lambda kd: kd[1])
+            if d <= passed_radius_m and i > last_i:
+                last_name, last_i = name, i
+        nxt = rows.get(successors.get(last_name or "", ""))
+        if nxt is not None and routable(nxt):
+            dist = math.hypot(float(nxt["x"]) - ex, float(nxt["y"]) - ey)
+            if min_m <= dist <= max_m:
+                return goal_of(nxt)
 
     order = [n for n in (stop_order or []) if n in rows]
     if order and recorded_path_xy:

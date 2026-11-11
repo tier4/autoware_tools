@@ -65,15 +65,24 @@ VEL_DT_SEC = 0.6        # an object's velocity from its pose this long before
 class EgoBody:
     front_m: float = 8.4      # base_link to the front bumper
     half_width_m: float = 1.44
+    center_m: float | None = None   # base_link to the body's centre (from the footprint)
+
+    @property
+    def center(self) -> float:
+        """base_link to the body's centre; with no footprint to say, the
+        middle of what lies ahead of base_link."""
+        return self.front_m / 2.0 if self.center_m is None else self.center_m
 
 
 def body_from_footprint(footprint) -> EgoBody:
-    """The front reach and half width of a base_link footprint polygon."""
+    """The front reach, half width and centre of a base_link footprint polygon."""
     if not footprint:
         return EgoBody()
+    xs = [p[0] for p in footprint]
     return EgoBody(
-        front_m=max(p[0] for p in footprint),
+        front_m=max(xs),
         half_width_m=max(abs(p[1]) for p in footprint),
+        center_m=(max(xs) + min(xs)) / 2.0,
     )
 
 
