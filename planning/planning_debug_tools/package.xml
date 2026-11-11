@@ -40,7 +40,6 @@
   <depend>rclcpp_components</depend>
   <depend>rosbag2_cpp</depend>
   <depend>rosbag2_storage</depend>
-  <depend>rosbag2_storage_mcap</depend>
   <depend>rosbag2_transport</depend>
   <depend>sensor_msgs</depend>
   <depend>std_srvs</depend>
@@ -50,6 +49,8 @@
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>autoware_lint_common</test_depend>
 
+  <!-- MCAP is loaded by rosbag2 as a storage plugin; no direct linking is needed. -->
+  <exec_depend>rosbag2_storage_mcap</exec_depend>
   <exec_depend>rosidl_default_runtime</exec_depend>
   <member_of_group>rosidl_interface_packages</member_of_group>
 
