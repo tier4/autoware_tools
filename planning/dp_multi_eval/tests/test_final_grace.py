@@ -30,6 +30,11 @@ def main() -> int:
     assert we.is_last_leg("start", 60.0, 60.0) and we.is_last_leg("final", 50.0, 120.0)
     assert not we.is_last_leg("start", 40.0, 120.0) and not we.is_last_leg("departure", 80.0, 120.0)
     print("PASS: the leg the recording ends in is the last one, whatever its kind")
+    # H82 (2026-11-11): a fed sample of the scene before a jump is not the scene's time after it
+    assert we.before_jump(48.7, target=66.1, came_from=48.6) and not we.before_jump(66.2, target=66.1, came_from=48.6)
+    assert not we.before_jump(72.0, target=66.1, came_from=48.6)       # the position clock runs on past the target
+    assert we.before_jump(40.0, target=10.0, came_from=40.5) and not we.before_jump(10.0, target=10.0, came_from=40.5)
+    print("PASS: a sample of the scene before a jump is told from one after it, forward and back")
     return 0
 
 

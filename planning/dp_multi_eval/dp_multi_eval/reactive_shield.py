@@ -40,6 +40,7 @@ from types import SimpleNamespace
 
 BORN_MOVING_MPS = 1.0   # a track faster than this over its first second was born driving
 BIRTH_SEC = 1.0         # a track first shown within this of its recorded start is being born
+CARRY_SAME_WAY_RAD = math.radians(45.0)   # a vehicle heading within this of the ego's heading goes its way
 PLAN_TIME_STEP_SEC = 0.25   # the ego's timed plan is kept at this spacing
 SPACETIME_EGO_MPS = 0.5     # a moving ego is judged where it will be when the NPC gets there ...
 SPACETIME_MARGIN_SEC = 1.0  # ... or this much later (it crosses ahead of the ego only with this to spare)
@@ -326,6 +327,9 @@ class ReactiveShield:
         self._held_for: dict[bytes, float] = {}
         self._free: set[bytes] = set()
         self._stuck: set[bytes] = set()
+        # Vehicles kept on their own clocks over a scene jump (carry_over):
+        # they stay that far behind the scene for good, never catching up.
+        self._carried_over: set[bytes] = set()
         self.detours: list[dict] = []
         self._route: list[tuple[float, float]] = []
         self._plan_off_route: list = []
@@ -447,6 +451,82 @@ class ReactiveShield:
         self._held_for.clear()
         self._free.clear()
         self._stuck.clear()
+        self._carried_over.clear()
+
+    def carry_over(self, ego_pose, jump_sec: float) -> set[bytes]:
+        """The scene jumps ``jump_sec`` forward under an ego that is NOT moved
+        (it drove on past a stand the recording made). Returns the vehicles
+        that stay as they are.
+
+        Everything follows the scene's new instant, as after reset() — except
+        the vehicles going the ego's way ahead of it (heading within 45 deg of
+        its own, within twice the active radius, where an object on its own
+        clock becomes scenery). Those keep
+        their own clocks: they drive on along their recorded tracks from where
+        they are, at their recorded speed, and leave as they would have. A
+        jump replaced every object in one frame: three cars 18-55 m ahead of
+        an ego pulling out of a bus stop, going its way, were gone in the next
+        frame while it kept its own place and speed (H82, 2026-11-11).
+
+        Only that traffic is kept. A vehicle coming toward the ego, one that
+        has passed it, one crossing or standing, would stay in a scene whose
+        other objects are a later moment's — the second car of a queue already standing where the first
+        still has to drive. When the ego itself is placed on the recording
+        the scene is that recorded instant and nothing is kept: reset().
+        """
+        keep: set[bytes] = set()
+        if jump_sec > 0.0:
+            yaw_e = _yaw_of(ego_pose.orientation)
+            ex = ego_pose.position.x + math.cos(yaw_e) * self.p.ego_center_offset_m
+            ey = ego_pose.position.y + math.sin(yaw_e) * self.p.ego_center_offset_m
+            # Where each object is on its own clock (not the last sample the
+            # shield imposed: one beyond the active radius follows the frame
+            # and that index is where it left the radius).
+            for key, t_eff in self.t_eff_prev.items():
+                tr = self.tracks.get(key)
+                if tr is None or key in self.held_now or key in self.blocked_idx:
+                    continue
+                idx = min(max(bisect.bisect_right(tr.times, t_eff) - 1, 0), len(tr.samples) - 1)
+                sample = tr.samples[idx]
+                if self._is_vru(sample) or not self._label(sample):
+                    continue   # vehicles only (UNKNOWN is tracker clutter)
+                pose = sample.kinematics.pose_with_covariance.pose
+                # Near: as far as a governed object is shown on its own clock at all.
+                if self._clearance_to_ego(pose.position.x, pose.position.y, ego_pose) > 2.0 * self.p.active_radius_m:
+                    continue
+                if self.speed_from(tr, idx) < BORN_MOVING_MPS:
+                    continue
+                # Going the ego's way, ahead of it: the traffic it drives in.
+                # One going the other way that has passed it also "drives
+                # away" — kept, it ran 25 s late for the rest of its track and
+                # stood in the road 100 m behind the ego for 8 s; cars turning
+                # off and cars in side streets stayed for a second or two
+                # (first carry runs, 2026-11-11).
+                # Its way is where its poses go over the next second: the box
+                # of a slow car is often reported back to front.
+                nxt = tr.samples[bisect.bisect_right(tr.times, tr.times[idx] + 1.0) - 1].kinematics.pose_with_covariance.pose
+                dx, dy = nxt.position.x - pose.position.x, nxt.position.y - pose.position.y
+                yaw = math.atan2(dy, dx) if math.hypot(dx, dy) >= 0.5 else _yaw_of(pose.orientation)
+                if abs((yaw - yaw_e + math.pi) % (2.0 * math.pi) - math.pi) > CARRY_SAME_WAY_RAD:
+                    continue
+                ahead = (pose.position.x - ex) * math.cos(yaw_e) + (pose.position.y - ey) * math.sin(yaw_e)
+                if ahead > 0.0:
+                    keep.add(key)
+        for state in (self.delays, self.t_eff_prev, self.shown_idx, self._first_v, self.blocked_idx,
+                      self.soft_v, self.shown_f, self._held_for):
+            for key in [k for k in state if k not in keep]:
+                del state[key]
+        self._shown_boxes = {k: v for k, v in self._shown_boxes.items() if k in keep}
+        self.governed &= keep
+        self.held_now.clear()
+        self._was_held.clear()
+        self._free.clear()
+        self._stuck.clear()
+        self._carried_over = set(keep)
+        for key in keep:
+            self.delays[key] = self.delays.get(key, 0.0) + jump_sec
+            self.governed.add(key)
+        return keep
 
     def build_tracks(self, rosbag_objects_data) -> None:
         for stamp, msg in rosbag_objects_data:
@@ -1672,6 +1752,7 @@ class ReactiveShield:
                 ended_moving = self.end_speed(track) > 0.5
                 if track.times[-1] < self.bag_end - 5.0 or ended_moving:
                     self.governed.discard(key)
+                    self._carried_over.discard(key)
                     self.delays.pop(key, None)
                     self.soft_v.pop(key, None)
                     self.shown_f.pop(key, None)
@@ -1698,6 +1779,8 @@ class ReactiveShield:
                 self._clearance_to_ego(cp.x, cp.y, ego_pose) < self.p.no_catchup_radius_m
             ):
                 catchup = 0.0
+            if key in self._carried_over:
+                catchup = 0.0   # kept over a scene jump: its recorded pace, not a faster one
             raw_target = frame_time_sec - max(0.0, delay - catchup * dt_sec)
             # A governed NPC lives its own forward timeline: at least real
             # time, at most (1 + catchup) x real time. The earlier clamp had

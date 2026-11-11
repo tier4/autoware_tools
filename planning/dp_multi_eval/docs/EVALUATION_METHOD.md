@@ -34,7 +34,7 @@ recorded state.
 | close | when the scene reaches the departure; no arrival, no goal stop |
 | open, ego in step (lag ≤ 3 s, ≤ 4 m off the track) | nothing moves: a scoring boundary only (`seamless`) |
 | open, ego behind or off the track | placed where the recording stood 3.5 s before the departure, handed over along it (`placed`) |
-| ego drives on ≥ 3 m past the stand without waiting | the window closes there; the scene jumps to the recorded departure, objects off 0.25 s around it, the ego untouched (`scene_jumped`) |
+| ego drives on ≥ 3 m past the stand without waiting | the window closes there; the scene jumps to the recorded departure and the ego is not touched (`scene_jumped`). The vehicles going its way ahead of it (within 120 m) stay, on their own clocks — they drive on along their recorded tracks and leave; everything else is the new instant's, off 0.25 s first |
 | objects | on from the start (no empty-scene departure) |
 
 1. **Hand-over.** The ego is driven along the recording for 3.5 s (the model's

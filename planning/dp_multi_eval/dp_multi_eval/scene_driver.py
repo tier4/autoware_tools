@@ -47,6 +47,7 @@ EGO_TOPIC = "/localization/kinematic_state"
 FEED_TOPIC = "/dp_multi_eval/scene/ego_odom"
 OBJECTS_TOPIC = "/perception/object_recognition/tracking/objects"
 RAW_OBJECTS_TOPIC = "/dp_multi_eval/scene/tracked_objects"
+SCENE_JUMP_TOPIC = "/perception_reproducer/scene_jump"   # a jump of recorded time under an ego that is not moved
 PLAN_TOPIC = "/planning/trajectory"
 NEAREST_TOPIC = "/perception_reproducer/nearest_object_m"
 NO_OBJECT_M = 1e9   # NEAREST_TOPIC when nothing is shown
@@ -61,6 +62,8 @@ FEED_PERIOD_SEC = 0.01
 INDICATOR_PERIOD_SEC = 0.02
 STATIONARY_MPS = 0.5      # past the recording's end only objects slower than this stay
 END_STANDING_SEC = 1.0    # ... and only if their last this-many seconds of poses show it
+JUMP_BLANK_SEC = 0.25     # after a scene jump under an unmoved ego, what is not kept is off this long:
+                          # the planner's 3 s object histories start anew instead of showing every object leap
 # Following, recorded time runs at most this times real time. 1.0: a faster
 # rate fast-forwarded traffic — oncoming cars reporting 11 m/s moved at 16.7
 # (H81, 2026-10-29). With the 1x floor (flow_when_behind) the scene runs at
@@ -231,6 +234,8 @@ class ObjectGate:
         self.audit = audit
         self._end_logged = False
         self._last_ns: int | None = None
+        self._kept: set[bytes] = set()          # vehicles kept over the last scene jump (carry_jump)
+        self._blank_until_ns: int | None = None  # ... and until when everything else is off
         # Judged on each track's last poses, not its reported speed: the
         # tracker reports 0 for UNKNOWN objects whatever they do. A track
         # shorter than END_STANDING_SEC has no evidence that it stands: H95
@@ -266,6 +271,11 @@ class ObjectGate:
     ) -> Any:
         if self._born_at_end:
             msg.objects = [o for o in msg.objects if bytes(o.object_id.uuid) not in self._born_at_end]
+        blank = self._blank_until_ns is not None and now_ns < self._blank_until_ns
+        if blank:
+            msg.objects = [o for o in msg.objects if bytes(o.object_id.uuid) in self._kept]
+        elif self._blank_until_ns is not None:
+            self._blank_until_ns = None
         if at_end:
             # The recording has run out: what stood still is still there, what
             # was moving has no recorded future — a car frozen mid-road with
@@ -288,7 +298,7 @@ class ObjectGate:
         # first reported them, on their way to where it did (prebirth.py): no
         # pop-ins in front of a lagging ego. They go through the shield like
         # the recorded ones — one path, one motion logic.
-        if self.prebirth is not None and objects_on and not at_end and ego_pose is not None:
+        if self.prebirth is not None and objects_on and not at_end and not blank and ego_pose is not None:
             present = {bytes(o.object_id.uuid) for o in msg.objects}
             msg.objects = list(msg.objects) + self.prebirth.objects_at(ts_ns * 1e-9, ego_pose, present)
         # NPCs the shield delayed live on to their own track's end, after the
@@ -318,12 +328,30 @@ class ObjectGate:
 
     def reset(self) -> None:
         """The scene was moved (a leg boundary, a departure reveal)."""
+        self._kept, self._blank_until_ns = set(), None
         if self.shield is not None:
             self.shield.reset()
         if self.prebirth is not None:
             self.prebirth.reset()
         if self.audit is not None:
             self.audit.reset()
+
+    def carry_jump(self, ego_pose: Any, jump_sec: float, now_ns: int) -> set[bytes]:
+        """The scene jumps ``jump_sec`` forward and the ego is not moved (it
+        drove on past a recorded stand). The vehicles near it that are driving
+        away stay, on their own clocks (ReactiveShield.carry_over); the rest is
+        the new instant's, off for JUMP_BLANK_SEC first. Returns what stays."""
+        carry = getattr(self.shield, "carry_over", None)
+        if carry is None or ego_pose is None or jump_sec <= 0.0:
+            self.reset()
+            return set()
+        self._kept = set(carry(ego_pose, jump_sec))
+        self._blank_until_ns = int(now_ns + JUMP_BLANK_SEC * 1e9)
+        if self.prebirth is not None:
+            self.prebirth.reset()
+        if self.audit is not None:
+            self.audit.reset()
+        return self._kept
 
 
 class IndicatorReplay:
@@ -612,6 +640,7 @@ def make_scene_driver(reproducer: Any, opts: argparse.Namespace, indicators: Ind
                 self.create_subscription(Bool, "/perception_reproducer/objects", self._on_objects, latched)
                 self.create_subscription(Bool, "/perception_reproducer/follow_ego", self._on_follow, latched)
                 self.create_subscription(Float64, "/perception_reproducer/scene_time", self._on_scene_time, 1)
+                self.create_subscription(Float64, SCENE_JUMP_TOPIC, self._on_scene_jump, 1)
                 print("Window clock: recorded time at 1x, jumped and held by the harness", flush=True)
             else:
                 # Harness time is not scene time: the departure scene is held
@@ -658,6 +687,18 @@ def make_scene_driver(reproducer: Any, opts: argparse.Namespace, indicators: Ind
             # object clocks that only flow forward would keep every governed
             # car where the previous scene left it.
             self.gate.reset()
+
+        def _on_scene_jump(self, msg: Any) -> None:
+            """The scene comes to an ego that is not moved: what drives away
+            from it stays (ObjectGate.carry_jump)."""
+            before = self.timeline.ts
+            self.timeline.jump(float(msg.data))
+            jump_sec = float(msg.data) - before * 1e-9 if before is not None else 0.0
+            kept = self.gate.carry_jump(
+                self._ego.pose.pose if self._ego is not None else None, jump_sec,
+                self.get_clock().now().nanoseconds,
+            )
+            print(f"SCENE_JUMP {jump_sec:+.1f}s t={float(msg.data):.3f} kept={len(kept)}", flush=True)
 
         def _on_hold(self, msg: Any) -> None:
             self.timeline.hold = bool(msg.data)

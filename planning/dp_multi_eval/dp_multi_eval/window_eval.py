@@ -104,8 +104,8 @@ CUT_SYNC_SEC = 3.0        # at a cut, an ego at most this far behind (and on the
 CUT_PASS_M = 3.0          # an ego driving on this far past a cut's stand has not waited there:
                           # the scene jumps to that recorded departure (one stopping a little
                           # further on than the recording did is still waiting)
-CUT_BLANK_SEC = 0.25      # objects off this long around that jump: the planner's 3 s object
-                          # histories start anew instead of showing every object leap
+                          # The vehicles near the ego that drive away from it stay on their own
+                          # clocks; the rest is off 0.25 s around the jump (scene_driver.carry_jump)
 
 
 @dataclass
@@ -330,6 +330,18 @@ def passed_cut(
     return lon >= CUT_PASS_M and lon <= 60.0 and abs(lat) <= lateral_max_m and math.cos(yaw - cyaw) > 0.0
 
 
+JUMP_SETTLE_SEC = 1.0     # after a jump, a fed sample of the scene before it is ignored this long at most
+
+
+def before_jump(t: float, target: float, came_from: float) -> bool:
+    """Is the fed recorded time ``t`` still the scene before a jump to
+    ``target``? Nearer where the scene came from than where it was sent. The
+    harness read such a sample 0.1 s after a jump and wrote it down as the
+    scene's time: the (wall, scene) map ran 17 s back for half a second (H82,
+    2026-11-11; one job in eight with a jump had one)."""
+    return abs(t - came_from) <= abs(t - target)
+
+
 def is_last_leg(kind: str, t_end: float, recording_end: float) -> bool:
     """The leg the recording ends in. A recording with one leg has no
     "final" one (its only leg is the "start"): H95 (2026-11-11) drove through
@@ -443,6 +455,7 @@ def run_legs(
             self.last_odom: float | None = None
             self.rec: Any = None
             self.rec_t: float | None = None
+            self._jump: tuple[float, float, float] | None = None   # (target, came from, wall) of a jump not yet seen
             self.rec_v = float("nan")
             self.route_state: int | None = None
             self.through: tuple[float, str] | None = None   # (wall time, "id x y")
@@ -456,6 +469,7 @@ def run_legs(
             )
             self.create_subscription(RouteState, "/api/routing/state", self._cb_route, latched)
             self._time_pub = self.create_publisher(Float64, "/perception_reproducer/scene_time", 1)
+            self._jump_pub = self.create_publisher(Float64, "/perception_reproducer/scene_jump", 1)
             self._hold_pub = self.create_publisher(Bool, "/perception_reproducer/hold", latched)
             self._objects_pub = self.create_publisher(Bool, "/perception_reproducer/objects", latched)
             self._follow_pub = self.create_publisher(Bool, "/perception_reproducer/follow_ego", latched)
@@ -472,8 +486,14 @@ def run_legs(
             self.last_odom = time.time()
 
         def _cb_rec(self, msg: Any) -> None:
+            t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+            if self._jump is not None:
+                target, came_from, wall = self._jump
+                if before_jump(t, target, came_from) and time.time() - wall < JUMP_SETTLE_SEC:
+                    return   # the scene before the jump, still in flight
+                self._jump = None
             self.rec = msg
-            self.rec_t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+            self.rec_t = t
             tw = msg.twist.twist.linear
             self.rec_v = math.hypot(float(tw.x), float(tw.y))
 
@@ -500,8 +520,23 @@ def run_legs(
         def hold(self, on: bool) -> None:
             self._hold_pub.publish(Bool(data=bool(on)))
 
+        def _sent(self, t: float) -> None:
+            if self.rec_t is not None and abs(float(t) - self.rec_t) >= 0.5:
+                self._jump = (float(t), self.rec_t, time.time())
+
+        @property
+        def jump_pending(self) -> bool:
+            """The fed recorded time has not shown the last jump yet."""
+            return self._jump is not None and time.time() - self._jump[2] < JUMP_SETTLE_SEC
+
         def jump(self, t: float) -> None:
             self._time_pub.publish(Float64(data=float(t)))
+            self._sent(t)
+
+        def scene_jump(self, t: float) -> None:
+            """Recorded time to ``t`` under an ego that is not moved."""
+            self._jump_pub.publish(Float64(data=float(t)))
+            self._sent(t)
 
         def objects(self, on: bool) -> None:
             self._objects_pub.publish(Bool(data=bool(on)))
@@ -647,16 +682,15 @@ def run_legs(
             lag_carry = 0.0
             if leg.opens == "cut":
                 if handed is not None and handed.get("passed"):
-                    # It drove on past the stand: the scene comes to it. Objects
-                    # off around the jump, so no object leaps in the planner's
-                    # history; the ego is not touched.
+                    # It drove on past the stand: the scene comes to it. The
+                    # ego is not touched, and the vehicles driving away from
+                    # it stay (three cars ahead of it vanished in one frame,
+                    # H82 2026-11-11); what the new instant brings is off for
+                    # a moment first, so nothing leaps in the planner's history.
                     scene_jumps += 1
                     t_from = node.rec_t if node.rec_t is not None else t_open
-                    node.objects(False)
-                    node.spin(CUT_BLANK_SEC)
-                    node.jump(t_open)
+                    node.scene_jump(t_open)
                     node.spin(0.05)
-                    node.objects(True)
                     node.follow_mode(True)
                     rec.setdefault("jumps", []).append(
                         {"wall": round(time.time(), 3), "from": round(t_from, 2), "to": round(t_open, 2)}
@@ -789,7 +823,7 @@ def run_legs(
                     continue
                 ts = node.rec_t
                 seg = rec["segments"][-1]
-                if now - last_clock >= CLOCK_SAMPLE_SEC:
+                if now - last_clock >= CLOCK_SAMPLE_SEC and not node.jump_pending:
                     last_clock = now
                     rec["clock"].append([round(now, 3), round(ts, 3)])
                 # a hole in the recording: the ego drives on by itself. The
@@ -849,7 +883,7 @@ def run_legs(
                         seg.update(
                             {
                                 "at": [round(node.x, 2), round(node.y, 2)], "ego_v": round(node.v, 2),
-                                "passed_cut": True, "skipped_sec": round(leg.t_end - ts, 1),
+                                "passed_cut": True,
                             }
                         )
                         rec["cut_passed"] = {

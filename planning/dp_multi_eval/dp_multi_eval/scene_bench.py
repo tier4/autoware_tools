@@ -405,11 +405,16 @@ def load_run(job_dir: Path) -> SimpleNamespace:
             plans.append((wall, pts))
     payload = json.loads((job_dir / "windows.json").read_text(encoding="utf-8"))
     dark = []   # walls with objects off: a leg's opening until its departure reveal
+    carry = []  # walls of scene jumps under an ego that was not moved (a cut it drove past)
     for leg in payload.get("legs", []):
         jumps = leg.get("jumps") or []
-        if leg.get("wall_start") is not None and jumps:
+        if leg.get("wall_start") is None or not jumps:
+            continue
+        if any(sg.get("scene_jumped") for sg in leg.get("segments") or []):
+            carry.append(float(jumps[0]["wall"]))
+        else:
             dark.append((float(leg["wall_start"]), float(jumps[0]["wall"])))
-    return SimpleNamespace(ego=ego, plans=plans, scene_time=scene_time, dark=dark, name=job_dir.name)
+    return SimpleNamespace(ego=ego, plans=plans, scene_time=scene_time, dark=dark, carry=carry, name=job_dir.name)
 
 
 def replay_run(rec: SimpleNamespace, run: SimpleNamespace, map_path: str | None,
@@ -436,7 +441,14 @@ def replay_run(rec: SimpleNamespace, run: SimpleNamespace, map_path: str | None,
         last_wall = wall
         t = run.scene_time(wall)
         if last_scene is not None and (t < last_scene - 0.05 or t - last_scene > 2.0):
-            gate.reset()      # the harness moved the scene (scene_driver._on_scene_time)
+            # the harness moved the scene (scene_driver._on_scene_time / _on_scene_jump)
+            if any(abs(wall - c) <= 1.0 for c in getattr(run, "carry", [])):
+                kept = gate.carry_jump(odom.pose.pose, t - last_scene, int(wall * 1e9))
+                out.setdefault("carried", []).append(
+                    {"t_rel": round(wall - wall0, 1), "jump_sec": round(t - last_scene, 1),
+                     "kept": sorted(k.hex()[:8] for k in kept)})
+            else:
+                gate.reset()
         last_scene = t
         i = min(bisect.bisect_left(stamps, int(t * 1e9)), len(stamps) - 1)
         msg = rec.fresh(rec.raw_objects[i][1])

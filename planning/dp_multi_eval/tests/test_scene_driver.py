@@ -189,6 +189,21 @@ def main() -> int:
     assert len(gate_apply(gate, [obj(3, 50.0, 0.0), far], at_end=True)) == 1
     print("PASS: gate — objects off, stationary only past the end, the shield at the scene instant, nothing hidden")
 
+    # H82, 2026-11-11: a scene jump under an ego that is not moved. What the
+    # shield keeps (vehicles driving away) stays visible; the rest is off for
+    # JUMP_BLANK_SEC, then the new instant's. With the ego moved: reset.
+    from dp_multi_eval.scene_driver import JUMP_BLANK_SEC
+    asked = []
+    carrying = NS(apply=lambda *a: None, reset=lambda: asked.append("reset"),
+                  carry_over=lambda pose, jump: asked.append(("carry", jump)) or {bytes([2] * 16)})
+    gate2 = ObjectGate(shield=carrying)
+    assert gate2.carry_jump(EGO_POSE, 29.0, now_ns=100 * S) == {bytes([2] * 16)} and asked == [("carry", 29.0)]
+    assert gate_apply(gate2, [inside, far], now_ns=100 * S + S // 10) == [far]
+    assert gate_apply(gate2, [inside, far], now_ns=100 * S + int((JUMP_BLANK_SEC + 0.05) * S)) == [inside, far]
+    assert gate2.carry_jump(None, 29.0, now_ns=200 * S) == set() and asked[-1] == "reset"
+    assert gate2.carry_jump(EGO_POSE, -5.0, now_ns=300 * S) == set() and asked[-1] == "reset"
+    print("PASS: gate — a scene jump keeps what the shield keeps and blanks the rest briefly; no ego or a jump back resets")
+
     # H39, 2026-11-09: an UNKNOWN car driving at 9 m/s reports 0 (tracker); at
     # the recording's end it was kept, frozen in the oncoming lane.
     from dp_multi_eval.reactive_shield import ReactiveShield, ShieldParams

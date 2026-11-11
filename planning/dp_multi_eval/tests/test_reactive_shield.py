@@ -39,6 +39,8 @@ BASE = 2e18 * 1e-9
 U = bytes(range(16))
 U2 = bytes(range(16, 32))
 U3 = bytes(range(32, 48))
+UP = bytes(range(48, 64))
+UX = bytes(range(64, 80))
 
 
 def drive_bag(n=600, speed=6.7, y=0.0, uuid=U, yaw=0.0):
@@ -378,6 +380,66 @@ def test_born_driving_at_the_nose_comes_out_of_its_shadow():
         sh3.apply(msg, ego, BASE + k * 0.1, 0.1, ego_speed_mps=0.0)
         shown += len(msg.objects)
     assert shown == 30, f"a car standing beside the ego after a scene jump was shown on {shown}/30 ticks"
+
+
+def test_scene_jump_keeps_vehicles_driving_away():
+    """H82, 2026-11-11: the ego drove on past a recorded stand and the scene
+    jumped 29 s to the recorded departure — three cars ahead of it, going its
+    way, were gone in the next frame while the ego kept its place and speed.
+    A vehicle going the ego's way ahead of it keeps its own clock over
+    the jump: it drives on along its recorded track, at its recorded speed,
+    until it is out of reach. One coming toward the ego, and one standing, are the
+    new instant's. When the scene is moved with the ego (reset) nothing stays."""
+    P = ShieldParams(frame_clock=True, soft_stop=True, vehicle_real_body=True, vru_real_body=True, npc_following=True)
+    ego = ego_at(0.0, 0.0)
+
+    def car(uuid, x, y, yaw, v):
+        o = mkobj(uuid, x, y, yaw, v)
+        o.classification = [NS(label=1)]
+        return o
+    def frame(t):   # the recording at t seconds
+        out = [car(U3, 30.0, -4.0, 0.0, 0.0)]                                    # parked beside the road
+        if t <= 15.0:
+            out.append(car(U, 20.0 + 8.0 * t, 0.0, 0.0, 8.0))                    # ahead, driving away; lost at 15 s
+        out.append(car(U2, 80.0 - 8.0 * t, 3.5, math.pi, 8.0))                   # oncoming
+        out.append(car(UP, 25.0 - 8.0 * t, 3.5, math.pi, 8.0))                   # oncoming, past the ego by the jump
+        out.append(car(UX, 30.0, -20.0 - 3.0 * t, -math.pi / 2, 3.0))            # driving off down a side street
+        return out
+    bag = [(int(k * 0.1 * 1e9 + 2e18), NS(objects=frame(k * 0.1))) for k in range(600)]
+
+    def play(jump):
+        sh = ReactiveShield(P)
+        sh.build_tracks(bag)
+        shown = {U: [], U2: [], U3: [], UP: [], UX: []}
+        def tick(t_scene, t_wall):
+            msg = NS(objects=frame(t_scene))
+            msg.objects += sh.carried({bytes(o.object_id.uuid) for o in msg.objects}, BASE + t_scene)
+            sh.apply(msg, ego, BASE + t_scene, 0.1, ego_speed_mps=0.0)
+            for o in msg.objects:
+                shown[bytes(o.object_id.uuid)].append((t_wall, o.kinematics.pose_with_covariance.pose.position.x))
+        for k in range(50):
+            tick(k * 0.1, k * 0.1)
+        kept = jump(sh)
+        for k in range(50, 200):
+            tick(30.0 + k * 0.1, k * 0.1)
+        return kept, shown
+
+    kept, shown = play(lambda sh: sh.carry_over(ego, 30.0))
+    assert kept == {U}, kept   # not the oncoming car that has passed, nor the one turning off: both "drive away" too
+    lead = shown[U]
+    steps = [b[1] - a[1] for a, b in zip(lead, lead[1:])]
+    assert all(b[0] - a[0] < 0.15 for a, b in zip(lead, lead[1:])), "the car driving away vanished at the jump"
+    assert min(steps) >= -1e-6 and max(steps) <= 8.0 * 0.1 * 1.3, (min(steps), max(steps))
+    one_sec = next(x for t, x in lead if t >= 6.0) - next(x for t, x in lead if t >= 5.0)
+    assert 7.0 <= one_sec <= 9.0, f"it drove {one_sec:.1f} m in the second after the jump (recorded: 8)"
+    # ... until it is scenery (twice the active radius away) or its track ends
+    assert lead[-1][1] > 2.0 * P.active_radius_m, lead[-1]
+    after = [x for t, x in shown[U2] if t >= 5.5]
+    assert after and max(after) < -150.0, "the oncoming car is the new instant's"
+    assert len([1 for t, _ in shown[U3] if t >= 5.5]) > 100, "the parked car is still there"
+
+    kept, shown = play(lambda sh: sh.reset())
+    assert not [1 for t, _ in shown[U] if t >= 5.5], "moved with the ego, the scene is the recorded instant: nothing stays"
 
 
 def test_held_npc_never_reverses():
