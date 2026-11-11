@@ -10,6 +10,7 @@ crosswalk, not inside one (2026-11-09 review).
 | stop line + light | traffic_light regulatory element: ``ref_line``, referenced by a lanelet (its id is the recorded ``traffic_light_group_id``) |
 | junction | lanelets with a ``turn_direction`` attribute |
 | crosswalk | lanelets of subtype ``crosswalk`` |
+| carriageway | lanelets of subtype ``road``, ``road_shoulder``, ``bicycle_lane``; ``intersection_area`` polygons |
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ ARROWS_FOR_TURN = {
     "straight": {UP_ARROW, UP_LEFT_ARROW, UP_RIGHT_ARROW},
 }
 GRID_M = 20.0
+CARRIAGEWAY = ("road", "road_shoulder", "bicycle_lane")
 
 
 @dataclass
@@ -46,16 +48,21 @@ class ShieldMap:
     stop_lines: list[StopLine] = field(default_factory=list)
     junctions: list[list[tuple[float, float]]] = field(default_factory=list)
     crosswalks: list[list[tuple[float, float]]] = field(default_factory=list)
+    roads: list[list[tuple[float, float]]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self._index()
 
     def _index(self) -> None:
         self._grid: dict[tuple[int, int], list[tuple[str, int]]] = {}
+        self._road_grid: dict[tuple[int, int], list[int]] = {}
         for kind, polys in (("j", self.junctions), ("c", self.crosswalks)):
             for i, poly in enumerate(polys):
                 for cell in _cells_of([p[0] for p in poly], [p[1] for p in poly]):
                     self._grid.setdefault(cell, []).append((kind, i))
+        for i, poly in enumerate(self.roads):
+            for cell in _cells_of([p[0] for p in poly], [p[1] for p in poly]):
+                self._road_grid.setdefault(cell, []).append(i)
         self._line_grid: dict[tuple[int, int], list[int]] = {}
         for i, sl in enumerate(self.stop_lines):
             for cell in _cells_of([sl.x0, sl.x1], [sl.y0, sl.y1]):
@@ -67,6 +74,10 @@ class ShieldMap:
             if kind in kinds and _inside((self.junctions if kind == "j" else self.crosswalks)[i], x, y):
                 return True
         return False
+
+    def on_road(self, x: float, y: float) -> bool:
+        """On the carriageway (a road lane, its shoulder, a junction's area)?"""
+        return any(_inside(self.roads[i], x, y) for i in self._road_grid.get(_cell(x, y), ()))
 
     def stop_lines_near(self, x: float, y: float) -> list[StopLine]:
         return [self.stop_lines[i] for i in self._line_grid.get(_cell(x, y), ())]
@@ -122,7 +133,7 @@ def load_shield_map(map_path) -> ShieldMap | None:
         return str(e.attributes[k]) if k in e.attributes else ""
 
     out = ShieldMap.__new__(ShieldMap)
-    out.stop_lines, out.junctions, out.crosswalks = [], [], []
+    out.stop_lines, out.junctions, out.crosswalks, out.roads = [], [], [], []
     seen = set()
     for ll in lmap.laneletLayer:
         poly = [(float(p.x), float(p.y)) for p in ll.polygon2d()]
@@ -132,6 +143,8 @@ def load_shield_map(map_path) -> ShieldMap | None:
             continue
         if attr(ll, "turn_direction") and len(poly) >= 3:
             out.junctions.append(poly)
+        if attr(ll, "subtype") in CARRIAGEWAY and len(poly) >= 3:
+            out.roads.append(poly)
         for reg in ll.regulatoryElements:
             if attr(reg, "subtype") != "traffic_light" or "ref_line" not in reg.parameters:
                 continue
@@ -144,6 +157,11 @@ def load_shield_map(map_path) -> ShieldMap | None:
                 yaw = _lane_yaw([(float(p.x), float(p.y)) for p in ll.centerline], mx, my)
                 for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
                     out.stop_lines.append(StopLine(x0, y0, x1, y1, int(reg.id), yaw))
+    for area in lmap.polygonLayer:
+        if attr(area, "type") == "intersection_area":
+            poly = [(float(p.x), float(p.y)) for p in area]
+            if len(poly) >= 3:
+                out.roads.append(poly)
     out._index()
     return out
 

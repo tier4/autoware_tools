@@ -56,6 +56,7 @@ PASS_CLEAR_VRU_M = 0.3      # ... a pedestrian or cyclist no nearer than this ..
 PASS_PARALLEL_COS = math.cos(math.radians(25.0))   # ... when it meets the ego at an angle, not alongside
 ROUTE_OFF_M = 6.0           # an ego further than this from its route is off it (no route ahead)
 DETOUR_RAMP_SLACK_M = 0.05  # on a detour's ramps it keeps its margin plus this (its look-ahead)
+ROAD_SLACK_M = 0.3          # a vehicle's box may hang this far over the carriageway's edge
 
 
 def _yaw_of(q) -> float:
@@ -330,6 +331,7 @@ class ReactiveShield:
         self._held_for: dict[bytes, float] = {}
         self._free: set[bytes] = set()
         self._stuck: set[bytes] = set()
+        self._detoured: dict[bytes, tuple[int, int]] = {}   # key -> the samples of its track that were shifted
         # Vehicles kept on their own clocks over a scene jump (carry_over):
         # they stay that far behind the scene for good, never catching up.
         self._carried_over: set[bytes] = set()
@@ -704,6 +706,30 @@ class ReactiveShield:
             self._held_for.pop(key, None)
             if how[0] == "stuck":
                 self._stuck.add(key)
+            # "blocked": the only way round the ego runs through something
+            # else that is there. It goes on waiting for the ego (asked again
+            # after deadlock_sec) — a real one could not pass either, and the
+            # ego standing in its way is the ego's to answer for.
+
+    def _detour_obstacles(self, key: bytes) -> list[tuple]:
+        """The boxes a way round the ego may not run through: every classified
+        object shown now, where it is now. Not what the object already stands
+        in — the tracker's second box of itself, which would lock it in place."""
+        own = self._shown_boxes.get(key)
+        out = []
+        for k, box in self._shown_boxes.items():
+            if k == key or self.parent_of.get(k) == key or self.parent_of.get(key) == k:
+                continue
+            if own is not None and self._box_gap(*own[:5], *box[:5]) <= 0.0:
+                continue
+            out.append(box)
+        return out
+
+    def _box_on_road(self, x: float, y: float, yaw: float, hl: float, hw: float) -> bool:
+        """Its centre and its corners (ROAD_SLACK_M in: tracker boxes are
+        drawn generously) are on the carriageway."""
+        hl, hw = max(hl - ROAD_SLACK_M, 0.1), max(hw - ROAD_SLACK_M, 0.1)
+        return self.map.on_road(x, y) and all(self.map.on_road(px, py) for px, py in self._rect_corners(x, y, yaw, hl, hw))
 
     def _way_clears_ego(self, tr: _ObjectTrack, i0: int, ego_pose) -> bool:
         """Its recorded way ahead passes the ego where it stands by its passing
@@ -722,7 +748,15 @@ class ReactiveShield:
     def _detour(self, key: bytes, tr: _ObjectTrack, i0: int, ego_pose) -> tuple[str, float]:
         """("margin", 0) if its way ahead clears the ego's body by its margin
         (it may pass at that), ("shift", d) after rewriting it d metres to the
-        side, or ("stuck", 0)."""
+        side, ("blocked", 0) when every way round that clears the ego runs
+        through another object or (a vehicle's) off the carriageway, or
+        ("stuck", 0).
+
+        A way round is one a road user has: a car led round the standing ego
+        drove through a truck parked beside it and through two cars queued
+        behind the ego; kept off those, it was led 3.5 m to the other side,
+        off the road (2026-08-25, 2026-11-11) — and the ego's 16 s stand,
+        which no real car could have passed, read as a pass."""
         first = tr.samples[i0]
         vru = self._is_vru(first)
         margin = self._margin(first)
@@ -783,6 +817,12 @@ class ReactiveShield:
         # within the ramps its margin (plus its look-ahead), where shifted
         # fully the detour clearance. A swerving cyclist judged unturned
         # clipped the bus's corner at 0.12 m.
+        others = self._detour_obstacles(key)
+        # A vehicle stays on the carriageway where its recording was on it
+        # (people walk and ride where they like).
+        roads = self.map if (not vru and self.map is not None and getattr(self.map, "roads", None)) else None
+        was_on = {}
+        blocked = False
         best = None
         d = 0.25
         while d <= top + 1e-6 and best is None:
@@ -805,12 +845,29 @@ class ReactiveShield:
                     if c < (need if ws[k] >= 0.999 else margin + DETOUR_RAMP_SLACK_M):
                         ok = False
                         break
+                if ok and (others or roads is not None):
+                    for k, i in enumerate(idx):
+                        x, y, h, moved = cand[k]
+                        if not moved:
+                            continue
+                        dims = tr.samples[i].shape.dimensions
+                        hl, hw = max(dims.x, 0.5) / 2.0, max(dims.y, 0.5) / 2.0
+                        if roads is not None:
+                            if i not in was_on:
+                                was_on[i] = self._box_on_road(*self._sample_box(tr.samples[i]))
+                            if was_on[i] and not self._box_on_road(x, y, h, hl, hw):
+                                ok, blocked = False, True
+                                break
+                        if any(math.hypot(o[0] - x, o[1] - y) <= hl + o[3] + o[4] + 1.0
+                               and self._box_gap(x, y, h, hl, hw, *o[:5]) < self.p.npc_margin_m for o in others):
+                            ok, blocked = False, True
+                            break
                 if ok:
                     best, chosen = sign * d, cand
                     break
             d += 0.25
         if best is None:
-            return "stuck", 0.0
+            return ("blocked" if blocked else "stuck"), 0.0
         for k, i in enumerate(idx):
             x, y, h, moved = chosen[k]
             if not moved:
@@ -826,6 +883,9 @@ class ReactiveShield:
             kin.pose_with_covariance = pwc
             smp.kinematics = kin
             tr.samples[i] = smp
+        moved_idx = [i for k, i in enumerate(idx) if chosen[k][3]]
+        if moved_idx:
+            self._detoured[key] = (moved_idx[0], moved_idx[-1])
         self._index_track(tr)
         self._crossings.pop(key, None)
         self._zones.pop(key, None)
@@ -1279,17 +1339,33 @@ class ReactiveShield:
         return (pose.position.x, pose.position.y, _yaw_of(pose.orientation),
                 max(dims.x, 0.5) / 2.0, max(dims.y, 0.5) / 2.0)
 
-    def _leaders(self, key: bytes, sample) -> list[tuple[float, float, float, float, float]]:
+    def _leaders(self, key: bytes, sample, cur: int | None = None) -> list[tuple[float, float, float, float, float]]:
         """Moved-off-their-recording NPCs ahead of this one, going its way,
         that it does not already overlap (a recorded duplicate it never
-        cleared would lock it in place)."""
+        cleared would lock it in place).
+
+        On the part of its way that was led round the ego (a detour) it is
+        where its recording never was: there everything ahead is in its way,
+        whichever way that goes and whether it moved or not — standing, as far
+        as it can tell (a car on a detour drove through one that had queued up
+        behind the ego meanwhile, 2026-08-25)."""
         if not (self.p.soft_stop and self.p.npc_following) or not self._shown_boxes:
             return []
         fx, fy, fyaw, fhl, fhw = self._sample_box(sample)
         cos_lim = math.cos(math.radians(self.p.npc_follow_heading_deg))
+        span = self._detoured.get(key)
+        off_its_way = span is not None and cur is not None and span[0] - 1 <= cur <= span[1]
         out = []
         for other, (x, y, yaw, hl, hw, moved, v) in self._shown_boxes.items():
-            if other == key or not moved or math.cos(yaw - fyaw) < cos_lim:
+            if other == key:
+                continue
+            same_way = math.cos(yaw - fyaw) >= cos_lim
+            if off_its_way:
+                if self.parent_of.get(other) == key or self.parent_of.get(key) == other:
+                    continue
+                if not (moved and same_way):
+                    v = 0.0
+            elif not moved or not same_way:
                 continue
             dx, dy = x - fx, y - fy
             if dx * math.cos(fyaw) + dy * math.sin(fyaw) <= 0.0 or math.hypot(dx, dy) > 60.0:
@@ -1800,7 +1876,7 @@ class ReactiveShield:
                     prev + dt_sec * (1.0 + self.p.catchup_rate),
                 )
             soft_speed = None
-            leaders = self._leaders(key, track.samples[cur]) if near else []
+            leaders = self._leaders(key, track.samples[cur], cur) if near else []
             # A delayed NPC meets its lights late wherever it is, near or not.
             late = (self.map is not None and bool(self.signals)
                     and (delay > self.p.npc_deviated_delay_sec or key in self.soft_v))

@@ -9,6 +9,7 @@ drive past the goal without arriving fails it, and so does a late grace that ran
 out (end_dist_m); a leg merely late at the window end passes. A reset closes a
 window without a verdict; a window closed 20 s behind fails (did_not_complete)
 unless a justified wait — pedestrians crossing the ego's way — explains the lag.
+A passed leg with a vehicle shown inside another object near the ego is inconclusive.
 Run: python3 tests/test_metric_windows_verdict.py"""
 import json
 import sys
@@ -347,6 +348,11 @@ def main() -> int:
     stand = profile([(10.0, 20.0)])
     leg = run_metric(stand, leg_payload(stand[-1].x), shield_log=held)["legs"][0]
     assert not leg["passed"] and leg["mutual_waits"] and leg["mutual_waits"][0]["mutual_sec"] >= 10.0, leg
+    assert leg["mutual_waits"][0]["no_way_round"] == [], leg["mutual_waits"]
+    # ... the shield found no way round the ego for it (through a parked truck, off the road): named
+    boxed = held + [{"t": WALL0 + 15.0, "event": "detour", "id": "c" * 8, "how": "blocked", "shift_m": 0.0}]
+    leg = run_metric(stand, leg_payload(stand[-1].x), shield_log=boxed)["legs"][0]
+    assert not leg["passed"] and leg["mutual_waits"][0]["no_way_round"] == ["c" * 8], leg["mutual_waits"]
     deadlocked = [dict(h, reason="deadlock") for h in held]
     leg = run_metric(stand, leg_payload(stand[-1].x), shield_log=deadlocked)["legs"][0]
     assert leg["mutual_waits"] == [], leg["mutual_waits"]
@@ -367,6 +373,21 @@ def main() -> int:
     print("PASS: standing 20 s with no reason while a car held for the ego stands ahead is a mutual wait and fails; "
           "not when the shield could not resolve it, at a red light, with the car behind the ego, at the leg's goal, "
           "or where the recording waited too")
+
+    # A scene that was not traffic (2026-08-25): the audit found a car inside a parked truck near the ego.
+    through = [{"t": WALL0 + 30.0, "audit": "through", "id": "e" * 32, "label": 1, "x": 150.0, "y": 3.0, "d": 3.4,
+                "other": "1b" * 16, "other_label": 2, "depth_m": 1.8, "why": "scene/scene"}]
+    w = run_metric(profile([]), leg_payload(profile([])[-1].x), shield_log=through)
+    leg = w["legs"][0]
+    assert leg["passed"] and leg["inconclusive"] and w["legs_inconclusive"] == 1, leg   # t_rel: from the hand-over (3.5 s)
+    assert leg["scene_defects"] == [{"kind": "through", "t_rel": 26.5, "object_ids": ["e" * 8, "1b" * 4], "depth_m": 1.8,
+                                     "ego_dist_m": 3.4, "why": "scene/scene"}], leg["scene_defects"]
+    outside = [dict(through[0], t=WALL0 + 90.0)]
+    leg = run_metric(profile([]), leg_payload(profile([])[-1].x), shield_log=outside)["legs"][0]
+    assert leg["passed"] and not leg["inconclusive"] and leg["scene_defects"] == [], leg
+    leg = run_metric(stand, leg_payload(stand[-1].x), shield_log=held + through)["legs"][0]
+    assert not leg["passed"] and leg["mutual_waits"], leg       # a failed leg stays failed
+    print("PASS: a passed leg in which a vehicle was shown inside another object near the ego is inconclusive")
     return 0
 
 

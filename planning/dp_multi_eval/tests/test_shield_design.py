@@ -49,7 +49,7 @@ def straight(x0, y0, yaw, v):
     return lambda t: (x0 + v * t * math.cos(yaw), y0 + v * t * math.sin(yaw))
 
 
-def play(movers, ego_fn, n, *, plan_fn=None, params=None, gate=False, present=None, route=None):
+def play(movers, ego_fn, n, *, plan_fn=None, params=None, gate=False, present=None, route=None, shield_map=None):
     """Run n ticks. movers: {id: (pose_fn(t), yaw, v, label, length, width)}.
     ego_fn(t) -> (x, y, yaw, speed); plan_fn(t) -> [(s, x, y, yaw)].
     present(id, t): whether the recording has it then (default always).
@@ -68,6 +68,8 @@ def play(movers, ego_fn, n, *, plan_fn=None, params=None, gate=False, present=No
         return out
 
     sh.build_tracks([(BASE_NS + int(k * DT * 1e9), NS(objects=frame(k))) for k in range(n)])
+    if shield_map is not None:
+        sh.set_map(shield_map)
     if route is not None:   # the recorded vehicle: ego_fn over the recording
         ts = [T0 + k * DT for k in range(n)]
         poses = [route(k * DT) for k in range(n)]
@@ -336,6 +338,79 @@ def test_deadlock_reported_when_no_detour():
     print("PASS: a deadlock no detour can solve is reported as such")
 
 
+def _oncoming_car(extra=None, n=300, **kw):
+    """The bus standing at the origin (body x -3.3..7.6, y -1.4..1.4) and a
+    car coming the other way along y=0.3, whose way runs through the bus."""
+    movers = {3: (lambda t: (40.0 - 5.0 * t, 0.3), math.pi, 5.0, 1, 4.5, 1.8)} | (extra or {})
+    return play(movers, lambda t: (0.0, 0.0, 0.0, 0.0), n, plan_fn=lambda t: [(0.0, 0.0, 0.0, 0.0)], **kw)
+
+
+def _overlap(a, b):
+    from dp_multi_eval.geometry import box_overlap_m
+    return box_overlap_m((a[1], a[2], a[4], a[5], a[6]), (b[1], b[2], b[4], b[5], b[6]))
+
+
+def test_no_detour_through_another_object():
+    """2026-08-25: a truck parked on either side of the bus. Every way round
+    the bus runs through one of them: the car waits for the bus (held "ego" —
+    the mutual wait is the bus's to answer for), it is not led through."""
+    free, sh0 = _oncoming_car()
+    assert [d["how"] for d in sh0.detours] == ["shift"], sh0.detours
+    assert [s for s in free[3] if s][-1][1] < -5.0, "scenario changed: a free road lets the car round the bus"
+    trucks = {4: (lambda t: (3.0, 3.7), 0.0, 0.0, 2, 8.0, 2.5), 5: (lambda t: (3.0, -3.7), 0.0, 0.0, 2, 8.0, 2.5)}
+    seen, sh = _oncoming_car(trucks)
+    assert sh.detours and {d["how"] for d in sh.detours} == {"blocked"}, sh.detours
+    assert sh.held_reason.get(bytes([3] * 16)) == "ego", sh.held_reason
+    car = [s for s in seen[3] if s]
+    assert car[-1][1] > 7.6 + 2.25, f"the car got past the bus's nose: x {car[-1][1]:.1f}"
+    for n_ in (4, 5):
+        deep = max(_overlap(a + (2.25, 0.9), b + (4.0, 1.25)) for a, b in zip(seen[3], seen[n_]) if a and b)
+        assert deep == 0.0, f"the car was {deep:.1f} m inside truck {n_}"
+    print(f"PASS: no way round the bus through a parked truck — the car waits for the bus ({len(sh.detours)} asks, all blocked)")
+
+
+def test_vehicle_detour_stays_on_the_road():
+    """The way round may not leave the carriageway (a vehicle's; a cyclist
+    rides where there is room)."""
+    from dp_multi_eval.shield_map import ShieldMap
+    narrow = ShieldMap(roads=[[(-60.0, -2.2), (60.0, -2.2), (60.0, 2.6), (-60.0, 2.6)]])
+    wide = ShieldMap(roads=[[(-60.0, -2.2), (60.0, -2.2), (60.0, 6.0), (-60.0, 6.0)]])
+    seen, sh = _oncoming_car(shield_map=narrow)
+    assert sh.detours and {d["how"] for d in sh.detours} == {"blocked"}, sh.detours
+    assert [s for s in seen[3] if s][-1][1] > 7.6 + 2.25
+    seen, sh = _oncoming_car(shield_map=wide)
+    assert [d["how"] for d in sh.detours] == ["shift"] and sh.detours[0]["shift_m"] < 0.0, sh.detours   # heading -x: its right is +y
+    assert max(s[2] for s in seen[3] if s) > 2.5 and [s for s in seen[3] if s][-1][1] < -5.0
+    bike = {3: (lambda t: (30.0 - 4.0 * t, 0.3), math.pi, 4.0, 6, 1.8, 0.7)}
+    seen, sh = play(bike, lambda t: (0.0, 0.0, 0.0, 0.0), 200, plan_fn=lambda t: [(0.0, 0.0, 0.0, 0.0)], shield_map=narrow)
+    assert [d["how"] for d in sh.detours] == ["shift"], sh.detours
+    print("PASS: a car is led round the bus only on the carriageway (the lane beside it), a cyclist wherever it fits")
+
+
+def test_detoured_car_stops_for_what_comes_into_its_way():
+    """On its way round the bus the car is where its recording never was: a
+    car that pulls up beside the bus after the detour was given is in its
+    way. It stops for it; it does not drive through."""
+    seen, sh = _oncoming_car()
+    t_go = next(s[0] for a, s in zip(seen[3], seen[3][1:]) if a and s and abs(s[2] - 0.3) > 0.05)   # leaves its line
+    y_round = max((s[2] for s in seen[3] if s), key=lambda y: abs(y - 0.3))                        # where it passes the bus
+    late = {4: (lambda t: (-4.0, y_round), 0.0, 0.0, 1, 4.5, 1.8)}
+    thru = play({3: (lambda t: (40.0 - 5.0 * t, 0.3), math.pi, 5.0, 1, 4.5, 1.8)} | late, lambda t: (0.0, 0.0, 0.0, 0.0), 300,
+                plan_fn=lambda t: [(0.0, 0.0, 0.0, 0.0)], present=lambda n_, t: n_ != 4 or t >= t_go + 1.0,
+                params=ShieldParams(frame_clock=True, soft_stop=True, vehicle_real_body=True, vru_real_body=True,
+                                    npc_following=False, ego_plan_sec=5.0, deadlock_sec=3.0))[0]
+    assert max(_overlap(a + (2.25, 0.9), b + (2.25, 0.9)) for a, b in zip(thru[3], thru[4]) if a and b) > 1.0, \
+        "scenario changed: without following, the detour runs through the car that pulled up"
+    seen, sh = _oncoming_car(late, present=lambda n_, t: n_ != 4 or t >= t_go + 1.0)
+    assert [d["how"] for d in sh.detours][:1] == ["shift"], sh.detours
+    deep = max(_overlap(a + (2.25, 0.9), b + (2.25, 0.9)) for a, b in zip(seen[3], seen[4]) if a and b)
+    assert deep == 0.0, f"the car on its detour drove {deep:.1f} m into the one that pulled up"
+    last = [s for s in seen[3] if s][-1]
+    assert last[1] > -4.0 + 4.5, f"it passed the car in its way: x {last[1]:.1f}"
+    print(f"PASS: a car on its way round the bus stops for one that pulls up in it (stands at x {last[1]:.1f}, gap "
+          f"{last[1] - 2.25 - (-4.0 + 2.25):.1f} m)")
+
+
 def main() -> int:
     test_spacetime_moving_ego()
     test_gives_way_before_the_ego_way()
@@ -349,6 +424,9 @@ def main() -> int:
     test_deadlock_detour()
     test_not_a_deadlock_when_the_bus_can_go()
     test_deadlock_reported_when_no_detour()
+    test_no_detour_through_another_object()
+    test_vehicle_detour_stays_on_the_road()
+    test_detoured_car_stops_for_what_comes_into_its_way()
     return 0
 
 

@@ -9,7 +9,9 @@
   and from then on; not if its way to its birth runs through the ego;
 * the past is part of the object's track: the shield moves it like any NPC;
 * a past that would have touched the recorded vehicle is not one it had: it is
-  cut to after the recorded vehicle passed.
+  cut to after the recorded vehicle passed;
+* nor one through another object that was there then (a parked truck, the same
+  car under its older tracker id, a car that drove through its place).
 
     python3 tests/test_prebirth.py
 """
@@ -206,6 +208,54 @@ def main() -> int:
         k = round((t - T0) / 0.1)
         assert sh2._rect_clearance(q, ego(0.2 * k)) >= 0.3, (t - T0, sh2._rect_clearance(q, ego(0.2 * k)))
     print(f"PASS: a past through the recorded vehicle is cut to after it passed ({len(p_cut.times) / 10:.1f} s of 8 s kept)")
+
+    # Two things are not in one place (two-model run, 2026-11-11). The bus is far away (y=0, these at y=40+).
+    from dp_multi_eval.geometry import box_overlap_m
+    from dp_multi_eval.prebirth import _box
+
+    def past_of(pb, n):
+        return next((p for p in pb._pasts if p.key == bytes([n] * 16)), None)
+
+    def deepest(p, tr):
+        """How deep a past is in a recorded track, at the track's samples."""
+        worst = 0.0
+        for t, q in zip(tr.times, tr.samples):
+            if p.times[0] <= t < p.t_birth:
+                i = min(range(len(p.times)), key=lambda j: abs(p.times[j] - t))
+                worst = max(worst, box_overlap_m(_box(p.samples[i]), _box(q)))
+        return worst
+
+    rec = [
+        lambda k: sample(1, 500.0, 0.0),
+        # a truck parked at the kerb; a car first seen just past it at 30 s, at 5 m/s: traced straight back, through the truck
+        lambda k: sample(20, 100.0, 40.0, label=2, length=8.0, width=2.5),
+        between(300, 400, lambda k: sample(21, 112.0 + 0.5 * (k - 300), 40.0, 5.0)),
+        # a standing car the tracker lost for 4 s and found again under a new id
+        between(100, 300, lambda k: sample(30, 200.0, 40.0)),
+        between(340, 600, lambda k: sample(31, 200.5, 40.0)),
+        # a pedestrian first seen walking, just past one who stands there: people pass through each other's boxes
+        lambda k: sample(40, 300.0, 40.0, label=7, length=0.6, width=0.6),
+        between(400, 600, lambda k: sample(41, 302.0 + 0.14 * (k - 400), 40.0, 1.4, label=7, length=0.6, width=0.6)),
+        # a car first seen at 52 s past the place where another is first seen standing at 53 s
+        between(520, 600, lambda k: sample(51, 407.0 + 0.5 * (k - 520), 40.0, 5.0)),
+        between(530, 830, lambda k: sample(50, 400.0, 40.0)),
+    ]
+    sh, pb = build(rec)
+    car = past_of(pb, 21)
+    assert car is not None and car.kind == "moving" and 0 < len(car.times) < 20, None if car is None else len(car.times)
+    assert deepest(car, sh.tracks[bytes([20] * 16)]) <= 0.3 and car.samples[0].kinematics.pose_with_covariance.pose.position.x > 105.5
+    again = past_of(pb, 31)
+    assert again is not None and again.times[0] > T0 + 29.9, None if again is None else again.times[0] - T0
+    assert deepest(again, sh.tracks[bytes([30] * 16)]) == 0.0
+    walker2 = past_of(pb, 41)
+    assert walker2 is not None and len(walker2.times) == 80, None if walker2 is None else len(walker2.times)   # 8 s, untouched
+    mover, stander = past_of(pb, 51), past_of(pb, 50)
+    assert mover is not None and len(mover.times) == 60, "the one born first keeps its past"
+    assert stander is not None and stander.times[0] > T0 + 51.4, None if stander is None else stander.times[0] - T0
+    assert deepest(stander, sh.tracks[bytes([51] * 16)]) <= 0.3
+    assert pb.cut_by_others == 3, pb.cut_by_others
+    print(f"PASS: no past through another object — it comes out from behind the truck ({len(car.times) / 10:.1f} s of 6 s kept), "
+          "stands only once its older id is gone, and after the car that drove through its place; a group is left alone")
     return 0
 
 

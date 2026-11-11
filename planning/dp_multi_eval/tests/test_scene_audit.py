@@ -4,7 +4,8 @@
 * an NPC appearing within 15 m of the ego (a recorded blip is counted apart);
 * an NPC that vanishes while it waits beside the ego; a jump;
 * nothing "appears" or "jumps" when the scene is moved or switched on, nobody "stands
-  too long" while the scene clock is held.
+  too long" while the scene clock is held;
+* a vehicle shown inside another object the recording never has it in.
 
     python3 tests/test_scene_audit.py
 """
@@ -21,10 +22,16 @@ EGO = NS(position=NS(x=0.0, y=0.0), orientation=NS(x=0.0, y=0.0, z=0.0, w=1.0))
 CROSSWALK = ShieldMap(crosswalks=[[(18.0, -6.0), (22.0, -6.0), (22.0, 6.0), (18.0, 6.0)]])
 
 
-def obj(n, x, y, v=0.0, label=7):
+def obj(n, x, y, v=0.0, label=7, length=0.6, width=0.6):
     return NS(object_id=NS(uuid=bytes([n] * 16)), classification=[NS(label=label)],
-              kinematics=NS(pose_with_covariance=NS(pose=NS(position=NS(x=x, y=y))),
+              shape=NS(dimensions=NS(x=length, y=width)),
+              kinematics=NS(pose_with_covariance=NS(pose=NS(position=NS(x=x, y=y),
+                                                            orientation=NS(x=0.0, y=0.0, z=0.0, w=1.0))),
                             twist_with_covariance=NS(twist=NS(linear=NS(x=v, y=0.0)))))
+
+
+def car(n, x, y, v=0.0, label=1, length=4.5, width=1.8):
+    return obj(n, x, y, v, label, length, width)
 
 
 def track(n, k0, k1, fn):
@@ -163,6 +170,41 @@ def main() -> int:
     scene = lambda k: [obj(12, *gappy(min(k, 99) if k < 130 else k), v=1.0)]  # noqa: E731
     assert kinds(run(audit, 0, 200, scene)) == [("jump", "0c")]
     print("PASS: the recording's own gaps are not vanishes, its own steps not jumps; a player's step is")
+
+    # Through (2026-08-25): a truck parked at (10, 6); a car the recording has driving past it in the next
+    # lane (y=3) — shown led through it (y=6). 22/23: the tracker's two boxes of one car. 24/25: two
+    # pedestrians in one place. 26: a car brushing along the truck.
+    def tr(n, fn, **kw):
+        ks = range(0, 100)
+        return NS(times=[T0 + 0.1 * k for k in ks], samples=[car(n, *fn(k), **kw) for k in ks], ext=0)
+
+    tracks = {
+        bytes([20] * 16): tr(20, lambda k: (10.0, 6.0), label=2, length=8.0, width=2.5),
+        bytes([21] * 16): tr(21, lambda k: (-10.0 + 0.5 * k, 3.0)),
+        bytes([22] * 16): tr(22, lambda k: (-5.0, -5.0)),
+        bytes([23] * 16): tr(23, lambda k: (-4.5, -5.0)),
+        bytes([26] * 16): tr(26, lambda k: (-10.0 + 0.5 * k, 3.0)),
+    }
+    truck = lambda: car(20, 10.0, 6.0, label=2, length=8.0, width=2.5)  # noqa: E731
+    doubles = lambda: [car(22, -5.0, -5.0), car(23, -4.5, -5.0), obj(24, 3.0, -4.0), obj(25, 3.1, -4.0)]  # noqa: E731
+    audit = SceneAudit(tracks, None, ego_path=still_bus)
+    found = run(audit, 0, 60, lambda k: [truck(), car(21, -10.0 + 0.5 * k, 3.0, 5.0)] + doubles())
+    assert kinds(found) == [], kinds(found)                                    # as recorded: beside it
+    audit = SceneAudit(tracks, None, ego_path=still_bus)
+    found = run(audit, 0, 60, lambda k: [truck(), car(21, -10.0 + 0.5 * k, 6.0, 5.0)] + doubles())
+    assert kinds(found) == [("through", "14")], kinds(found)
+    f = found[0]
+    assert f["other"][:2] == "15" and f["other_label"] == 1 and f["depth_m"] >= 1.5 and f["why"] == "scene/scene", f
+    audit = SceneAudit(tracks, None, ego_path=still_bus)
+    found = run(audit, 0, 60, lambda k: [truck(), car(21, -10.0 + 0.5 * k, 6.0, 5.0)], past={bytes([21] * 16)})
+    assert [x["why"] for x in found] == ["scene/past"], found
+    assert summarize(found)["defects"] == 1 and summarize(found)["events"][0]["other_id"] == "15" * 4
+    # 26 brushes along the truck 0.15 m inside its box (boxes are drawn generously): no finding
+    audit = SceneAudit(tracks, None, ego_path=still_bus)
+    found = run(audit, 0, 60, lambda k: [truck(), car(26, -10.0 + 0.5 * k, 4.0, 5.0)])
+    assert kinds(found) == [], kinds(found)
+    print("PASS: a vehicle inside another object for 0.5 s is found once per pair — not the tracker's own doubles, "
+          "not two pedestrians")
     return 0
 
 

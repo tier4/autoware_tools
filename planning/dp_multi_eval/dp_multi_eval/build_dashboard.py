@@ -277,9 +277,13 @@ def _metric_chips(metrics: dict[str, Any] | None) -> str:
             if lg.get("scene_jump_contact"):
                 sj = lg["scene_jump_contact"]
                 bits.append(f"contact with {str(sj.get('object_id'))[:8]} at t={sj.get('t_rel')}s right after the scene jump — not judged from there (inconclusive)")
+            for sd in lg.get("scene_defects") or []:
+                bits.append(f"scene defect at t={sd.get('t_rel')}s: " + " inside ".join(str(o) for o in sd.get("object_ids") or [])
+                            + f" ({sd.get('depth_m')} m deep, {sd.get('ego_dist_m')} m from the ego) — inconclusive")
             for mw in lg.get("mutual_waits") or []:
                 bits.append(f"mutual wait {mw.get('mutual_sec')}s of {mw.get('sec')}s at t={mw.get('t_rel')}s with "
-                            + ", ".join(str(o)[:8] for o in (mw.get('object_ids') or [])) + " (waiting for the ego)")
+                            + ", ".join(str(o)[:8] for o in (mw.get('object_ids') or [])) + " (waiting for the ego"
+                            + ("; no way round it for " + ", ".join(mw["no_way_round"]) if mw.get("no_way_round") else "") + ")")
             if lg.get("goal_missed"):
                 inc = lg.get("incomplete") or {}
                 bits.append(f"goal missed: {lg['goal_missed']}" + (

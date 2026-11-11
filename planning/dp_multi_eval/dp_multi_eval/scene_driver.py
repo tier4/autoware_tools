@@ -230,6 +230,7 @@ class ObjectGate:
                  audit: Any = None) -> None:
         self.shield = shield
         self.log = log
+        self._detours_logged = 0
         self.prebirth = prebirth
         self.audit = audit
         self._end_logged = False
@@ -315,6 +316,13 @@ class ObjectGate:
             self.shield.apply(msg, ego_pose, ts_ns * 1e-9, dt, ego_speed)
         if self.log is not None:
             self.log.write(now_ns * 1e-9, msg.objects, getattr(self.shield, "held_reason", {}) or {}, at_end)
+            # What became of each NPC asked to go round the standing ego
+            # (shift / margin / blocked / stuck): read with a mutual wait.
+            asked = getattr(self.shield, "detours", None) or []
+            for d in asked[self._detours_logged:]:
+                self.log.event({"t": round(now_ns * 1e-9, 3), "event": "detour", "id": d["id"], "how": d["how"],
+                                "shift_m": d.get("shift_m")})
+            self._detours_logged = len(asked)
         if self.audit is not None and ego_pose is not None:
             for event in self.audit.check(
                 now_ns * 1e-9, ts_ns * 1e-9, msg.objects if objects_on else None, ego_pose,
@@ -526,7 +534,8 @@ def build_scene(objects_data, odom_data, signals_data, map_path=None, *, log: Sh
         )
         print(f"Pre-birth: {len(prebirth)} tracks given their approach {prebirth.kinds()} — "
               "shown once the ego is as near as the bus first saw them"
-              + (f"; {prebirth.cut_by_recording} cut where they met the recorded vehicle" if prebirth.cut_by_recording else ""),
+              + (f"; {prebirth.cut_by_recording} cut where they met the recorded vehicle" if prebirth.cut_by_recording else "")
+              + (f"; {prebirth.cut_by_others} cut where they ran through another object" if prebirth.cut_by_others else ""),
               flush=True)
     return SimpleNamespace(shield=shield, gate=gate, prebirth=prebirth, map=shield_map)
 

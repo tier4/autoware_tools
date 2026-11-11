@@ -165,6 +165,26 @@ def polygon_distance(a: Polygon, b: Polygon) -> float:
         return best
 
 
+def box_overlap_m(a: Sequence[float], b: Sequence[float]) -> float:
+    """How deep two boxes (x, y, yaw, half length, half width) are in each
+    other: the least distance one has to move to come apart; 0 when apart."""
+    ax, ay, ayaw, ahl, ahw = a[:5]
+    bx, by, byaw, bhl, bhw = b[:5]
+    dx, dy = bx - ax, by - ay
+    if dx * dx + dy * dy > (math.hypot(ahl, ahw) + math.hypot(bhl, bhw)) ** 2:
+        return 0.0
+    ca, sa, cb, sb = math.cos(ayaw), math.sin(ayaw), math.cos(byaw), math.sin(byaw)
+    depth = float("inf")
+    for nx, ny in ((ca, sa), (-sa, ca), (cb, sb), (-sb, cb)):
+        ra = ahl * abs(ca * nx + sa * ny) + ahw * abs(-sa * nx + ca * ny)
+        rb = bhl * abs(cb * nx + sb * ny) + bhw * abs(-sb * nx + cb * ny)
+        d = ra + rb - abs(dx * nx + dy * ny)
+        if d <= 0.0:
+            return 0.0
+        depth = min(depth, d)
+    return depth
+
+
 def load_vehicle_footprint(vehicle_info_yaml: Path | None, margin: float = 0.0) -> Polygon:
     if vehicle_info_yaml is None or not vehicle_info_yaml.expanduser().is_file():
         return ego_local_footprint(margin=margin)

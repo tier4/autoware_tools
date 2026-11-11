@@ -10,6 +10,7 @@ shown must still look like traffic. This is the check, on the output itself:
 | comes into view no nearer than the recording first saw it (a new tracker id where one just was is the same object) | `pop_in` (a recorded track under 1 s: `blip`) |
 | leaves where its recorded track ends, not while it waits beside the ego | `vanish` |
 | moves continuously | `jump` |
+| is never inside another one, unless the recording has the two so | `through` |
 
 Findings go to shield_log.jsonl ({"audit": kind, ...}); the metrics list them
 per run (`scene_audit`). They do not change what is published: a finding is a
@@ -35,10 +36,19 @@ CLOSER_M = 5.0       # appearing this much nearer than the bus first saw it is t
 HANDOVER_SEC = 2.0   # a new id within this long ...
 HANDOVER_M = 3.0     # ... and this close to where one of its class left is the same object
 GAP_SEC = 0.5        # recorded samples further apart than this: the recording lost it between
+THROUGH_M = 0.3      # two boxes this deep in each other ...
+THROUGH_SEC = 0.5    # ... for this long: one went through the other
+VEHICLES = (1, 2, 3, 4)      # CAR, TRUCK, BUS, TRAILER: one of the two is one of these
 
 
 def _yaw(q: Any) -> float:
     return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+
+def _box(o: Any) -> tuple[float, float, float, float, float]:
+    pose = o.kinematics.pose_with_covariance.pose
+    dims = o.shape.dimensions
+    return pose.position.x, pose.position.y, _yaw(pose.orientation), max(dims.x, 0.5) / 2.0, max(dims.y, 0.5) / 2.0
 
 
 def _ego_frame(x: float, y: float, ego_pose: Any, body: Any) -> tuple[float, float, float]:
@@ -87,12 +97,15 @@ class SceneAudit:
         self._frame_t: float | None = None
         self._grace_until = -math.inf
         self._on = False
+        self._in: dict[tuple[bytes, bytes], list] = {}       # pair -> [since, last seen, deepest, told]
+        self._rec_pair: dict[tuple[bytes, bytes], bool] = {}
         self.counts: dict[str, int] = {}
         self.findings: list[dict] = []
 
     def reset(self) -> None:
         """The scene was moved: what is there next is not an appearance."""
         self._seen.clear()
+        self._in.clear()
         self._frame_t = None
         self._grace_until = (self._now or 0.0) + GRACE_SEC
 
@@ -185,6 +198,75 @@ class SceneAudit:
                 total += t - prev_t
             prev_t, prev_in = t, now_in
         return total
+
+    def _recorded_together(self, a: bytes, b: bytes) -> bool:
+        """The recording itself has the two in each other at some instant: the
+        tracker's two boxes of one object, or boxes it drew too large."""
+        import bisect
+
+        from dp_multi_eval.geometry import box_overlap_m
+
+        pair = (a, b)
+        if pair not in self._rec_pair:
+            ta, tb = self.tracks.get(a), self.tracks.get(b)
+            hit = False
+            if ta is not None and tb is not None and ta.times and tb.times:
+                ia, ib = getattr(ta, "ext", 0), getattr(tb, "ext", 0)
+                for i in range(ia, len(ta.times), 2):
+                    t = ta.times[i]
+                    j = bisect.bisect_left(tb.times, t, lo=ib)
+                    for k in (j - 1, j):
+                        if ib <= k < len(tb.times) and abs(tb.times[k] - t) <= 0.15 \
+                                and box_overlap_m(_box(ta.samples[i]), _box(tb.samples[k])) > THROUGH_M:
+                            hit = True
+                            break
+                    if hit:
+                        break
+            self._rec_pair[pair] = hit
+        return self._rec_pair[pair]
+
+    def _through(self, now: float, objects, ego_pose: Any, held: dict, past) -> list[dict]:
+        """Two classified objects, one of them a vehicle, in each other near
+        the ego for THROUGH_SEC, that the recording never has so: one was led
+        through the other (a detour, a past, a delay). Once per pair."""
+        from dp_multi_eval.geometry import box_overlap_m
+
+        near = []
+        for o in objects:
+            cls = getattr(o, "classification", None) or []
+            label = int(cls[0].label) if cls else 0
+            if label == 0:
+                continue
+            box = _box(o)
+            d = _ego_frame(box[0], box[1], ego_pose, self.body)[0]
+            if d <= NEAR_M:
+                near.append((bytes(o.object_id.uuid), label, box, d, o))
+        out = []
+        for i in range(len(near)):
+            ka, la, ba, da, oa = near[i]
+            for j in range(i + 1, len(near)):
+                kb, lb, bb, db, _ = near[j]
+                if la not in VEHICLES and lb not in VEHICLES:
+                    continue
+                depth = box_overlap_m(ba, bb)
+                if depth <= THROUGH_M:
+                    continue
+                pair = (ka, kb) if ka < kb else (kb, ka)
+                st = self._in.get(pair)
+                if st is None or now - st[1] > GONE_SEC:
+                    st = self._in[pair] = [now, now, depth, False]
+                st[1], st[2] = now, max(st[2], depth)
+                if st[3] or now - st[0] < THROUGH_SEC or self._recorded_together(*pair):
+                    continue
+                st[3] = True
+
+                def how(k):
+                    return held.get(k) or ("past" if k in past else "scene")
+
+                p = oa.kinematics.pose_with_covariance.pose.position
+                out.append(self._finding(now, "through", ka, la, p, min(da, db), other=kb.hex(), other_label=lb,
+                                         depth_m=round(st[2], 1), why=f"{how(ka)}/{how(kb)}"))
+        return out
 
     # -- the check
     def check(self, now: float, frame_t: float, objects, ego_pose: Any, *, held=None, past=()) -> list[dict]:
@@ -288,6 +370,8 @@ class SceneAudit:
                 continue                                   # its recorded track ends here: the recording's own
             out.append({"t": round(now, 3), "audit": "vanish", "id": key.hex(), "label": st.label,
                         "x": round(st.x, 2), "y": round(st.y, 2), "d": round(st.d, 1), "why": why})
+        if not grace:
+            out.extend(self._through(now, objects, ego_pose, held, past))
         for f in out:
             self.counts[f["audit"]] = self.counts.get(f["audit"], 0) + 1
         self.findings.extend(out)
@@ -300,7 +384,7 @@ class SceneAudit:
 
 
 # Kinds that are the scene player's to answer for (a blip is the recording's).
-DEFECTS = ("stand_in_zone", "pop_in", "vanish", "jump")
+DEFECTS = ("stand_in_zone", "pop_in", "vanish", "jump", "through")
 
 
 def summarize(records: list[dict], t0: float = 0.0) -> dict:
@@ -308,7 +392,7 @@ def summarize(records: list[dict], t0: float = 0.0) -> dict:
     kind, the longest standing kept) and the findings themselves."""
     best: dict[tuple[str, str], dict] = {}
     for r in records:
-        k = (r["audit"], r["id"])
+        k = (r["audit"], r["id"], r.get("other"))
         if k not in best or r.get("sec", 0.0) > best[k].get("sec", 0.0):
             first = best[k]["t"] if k in best else r["t"]
             best[k] = dict(r, t=first)
@@ -322,7 +406,8 @@ def summarize(records: list[dict], t0: float = 0.0) -> dict:
         "events": [
             {"t_rel": round(r["t"] - t0, 1), "kind": r["audit"], "object_id": r["id"][:8], "label": r.get("label"),
              "at": [r.get("x"), r.get("y")], "ego_dist_m": r.get("d")}
-            | {k: r[k] for k in ("sec", "rec_sec", "why", "src", "lon", "m") if k in r}
+            | {k: r[k] for k in ("sec", "rec_sec", "why", "src", "lon", "m", "depth_m") if k in r}
+            | ({"other_id": r["other"][:8]} if "other" in r else {})
             for r in events if r["audit"] in DEFECTS
         ][:60],
     }

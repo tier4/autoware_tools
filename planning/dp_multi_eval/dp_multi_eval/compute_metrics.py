@@ -160,9 +160,11 @@ METRIC_DESCRIPTIONS = {
         "NPC standing in a junction or on a crosswalk longer than its recording stood there "
         "(stand_in_zone, with the rule that held it), appearing out of nothing within 15 m "
         "of the ego (pop_in; a recorded track under 1 s is a blip, counted apart), leaving "
-        "while it waited beside the ego (vanish) or stepping more than a frame allows (jump). "
-        "Reported, never gating: a finding is a fault of the replay near the ego, to read a "
-        "stop or a hesitation there with."
+        "while it waited beside the ego (vanish), stepping more than a frame allows (jump), or "
+        "a vehicle 0.3 m deep inside another object for 0.5 s that the recording never has so "
+        "(through). Reported: a finding is a fault of the replay near the ego, to read a "
+        "stop or a hesitation there with. Only through reaches a verdict: the leg it falls in "
+        "is inconclusive (windows, scene_defects)."
     ),
     "resync": (
         "Times the harness set the ego back onto the recording because it had fallen "
@@ -227,7 +229,9 @@ METRIC_DESCRIPTIONS = {
         "one stands ahead of the ego within 15 m — not at the leg's goal, nor where the recording "
         "waited too — is a mutual wait (mutual_waits) and fails the leg. A light whose "
         "stop line the ego's front passed by 2 m is behind it, no reason. A scene-limited leg "
-        "is inconclusive. Gating."
+        "is inconclusive. So is a passed leg in which the scene shown was not traffic: a vehicle "
+        "inside another object within 30 m of the ego that the recording never has so (scene_defects, "
+        "from the scene audit's through). Gating."
     ),
     "reference_speed": (
         "Ego speed compared against the source recording at the same place. Each replay "
@@ -1010,7 +1014,14 @@ def metric_windows(
                     continue
                 sec, oids = mutual(w_["t0"], w_["t0"] + w_["sec"], e0.x, e0.y, e0.yaw_rad)
                 if sec >= MUTUAL_WAIT_SEC:
-                    mutual_waits.append({"t_rel": w_["t_rel"], "sec": w_["sec"], "mutual_sec": sec, "object_ids": oids})
+                    # Those with no way round the ego: every one ran through
+                    # another object or off the road (shield: "blocked").
+                    if "detours" not in lights:
+                        lights["detours"] = _detour_log(Path(bag_path).parent / SHIELD_LOG)
+                    boxed = sorted({d["id"][:8] for d in lights["detours"]
+                                    if d.get("how") == "blocked" and w_["t0"] <= float(d["t"]) <= w_["t0"] + w_["sec"]})
+                    mutual_waits.append({"t_rel": w_["t_rel"], "sec": w_["sec"], "mutual_sec": sec, "object_ids": oids,
+                                         "no_way_round": boxed})
         justified_stuck: list[list[float]] = []
         if stuck and ego_slice:
             base = ego_slice[0].stamp_sec
@@ -1160,6 +1171,26 @@ def metric_windows(
         # recorded track in, cannot be judged by the recording: inconclusive.
         closed = [d["kind"] for d in diverged]
         reset_inconclusive = any(k in ("through", "lateral") for k in closed)
+        # What the ego was shown was not traffic: a vehicle inside another
+        # object near it (scene_audit "through"). The shield and prebirth keep
+        # that from happening; where it still does, a pass there is not one
+        # (2026-08-25, 2026-11-11: a car led round the standing ego through a
+        # parked truck let a 16 s stand in its way pass).
+        scene_defects: list[dict] = []
+        if wins and ego_slice:
+            if "audit" not in lights:
+                lights["audit"] = _audit_log(Path(bag_path).parent / SHIELD_LOG)
+            base = ego_slice[0].stamp_sec
+            seen_pairs = set()
+            for r in lights["audit"]:
+                if r.get("audit") != "through" or not any(a <= float(r["t"]) <= b for a, b, _ in wins):
+                    continue
+                pair = (r["id"][:8], str(r.get("other"))[:8])
+                if pair in seen_pairs:
+                    continue
+                seen_pairs.add(pair)
+                scene_defects.append({"kind": "through", "t_rel": round(float(r["t"]) - base, 1), "object_ids": list(pair),
+                                      "depth_m": r.get("depth_m"), "ego_dist_m": r.get("d"), "why": r.get("why")})
         passed = (
             not stalled
             and not stuck
@@ -1167,7 +1198,7 @@ def metric_windows(
             and not goal_missed
             and leg.get("ended_by") in ("window_end", "arrived", "cut")
         )
-        inconclusive = inconclusive or (passed and (reset_inconclusive or recording_ran_out is not None))
+        inconclusive = inconclusive or (passed and (reset_inconclusive or recording_ran_out is not None or bool(scene_defects)))
         # Goal-stop error of the leg: where the ego came to rest nearest its
         # arrival pose, in the goal frame. A leg that stalled or never got there
         # has no stop to score (excluded_stuck), as goal_stop_precision does.
@@ -1265,6 +1296,7 @@ def metric_windows(
                 "incomplete": incomplete,
                 "recording_ran_out": recording_ran_out,
                 "scene_limited": scene_limited,
+                "scene_defects": scene_defects,
                 "inconclusive": inconclusive,
                 "did_not_depart": [
                     {"t_rel": (round(float(d["t"]) - base_rec, 1) if base_rec is not None else None), "at": d.get("at"), "delay_sec": d.get("delay_sec")}
@@ -1979,7 +2011,32 @@ def metric_scene_audit(bag_path: Path, series: BagSeries) -> dict[str, Any]:
            "counts": {}, "defects": 0, "events": []}
     if not path.is_file():
         return out | {"status": "no_log"}
+    records = _audit_log(path)
+    t0 = series.ego[0].stamp_sec if series.ego else 0.0
+    return out | summarize(records, t0)
+
+
+def _detour_log(path: Path) -> list[dict]:
+    """What became of each NPC the shield asked to go round the standing ego
+    (shield_log.jsonl, event "detour"), on the bag's clock."""
+    out = []
+    if not path.is_file():
+        return out
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            rec = json.loads(line)
+        except Exception:  # noqa: BLE001
+            continue
+        if rec.get("event") == "detour":
+            out.append(rec)
+    return out
+
+
+def _audit_log(path: Path) -> list[dict]:
+    """The scene audit's findings in shield_log.jsonl, on the bag's clock."""
     records = []
+    if not path.is_file():
+        return records
     for line in path.read_text(encoding="utf-8").splitlines():
         try:
             rec = json.loads(line)
@@ -1987,8 +2044,7 @@ def metric_scene_audit(bag_path: Path, series: BagSeries) -> dict[str, Any]:
             continue
         if "audit" in rec:
             records.append(rec)
-    t0 = series.ego[0].stamp_sec if series.ego else 0.0
-    return out | summarize(records, t0)
+    return records
 
 
 def _shield_log(path: Path) -> tuple[list[dict], list[tuple[float, float]]]:

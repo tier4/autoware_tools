@@ -48,6 +48,10 @@ HANDOVER_SEC = 2.0             # a track ending this shortly before ...
 HANDOVER_M = 3.0               # ... this close to a birth: the same object under a new id
 EGO_CLEAR_M = 1.0              # it becomes visible only if its way to its birth pose keeps this off the ego
 REC_CLEAR_M = 0.3              # a past this close to the recorded vehicle, when it was there, is not one it had
+THROUGH_M = 0.3                # ... nor one this deep in another object that was there then
+THROUGH_GAP_SEC = 0.3          # "there then": a recorded sample of it within this of the instant
+VRU_LABELS = (5, 6, 7)         # MOTORCYCLE, BICYCLE, PEDESTRIAN: they share space among themselves
+GRID_M = 20.0                  # cell of the index of where each object ever is
 VISIBLE_MIN_M = 10.0           # the ego sees at least this far whatever the bus's first range
 STEP_SEC = 0.1                 # sample spacing of a traced-back approach
 STAND_STEP_SEC = 0.5
@@ -65,6 +69,34 @@ def _label(obj: Any) -> int | None:
 def _xy(sample: Any) -> tuple[float, float]:
     p = sample.kinematics.pose_with_covariance.pose.position
     return p.x, p.y
+
+
+def _box(sample: Any) -> tuple[float, float, float, float, float]:
+    pose = sample.kinematics.pose_with_covariance.pose
+    d = sample.shape.dimensions
+    return pose.position.x, pose.position.y, _yaw(pose.orientation), max(d.x, 0.5) / 2.0, max(d.y, 0.5) / 2.0
+
+
+class _There:
+    """Where an object is, when: a recorded track, or a past already given."""
+
+    __slots__ = ("root", "times", "samples", "vru", "step", "cells")
+
+    def __init__(self, root: bytes, times: list, samples: list, label: int | None, step: float) -> None:
+        self.root, self.times, self.samples = root, times, samples
+        self.vru = label in VRU_LABELS
+        self.step = step          # how long one sample stands for
+        self.cells = {(int(x // GRID_M), int(y // GRID_M)) for x, y in map(_xy, samples)}
+
+    def box_at(self, t: float) -> tuple | None:
+        if not self.times or t < self.times[0] - 1e-6 or t > self.times[-1] + self.step:
+            return None
+        i = max(bisect.bisect_right(self.times, t) - 1, 0)
+        if i + 1 < len(self.times) and self.times[i + 1] - t < t - self.times[i]:
+            i += 1
+        if abs(self.times[i] - t) > max(self.step, THROUGH_GAP_SEC):
+            return None           # the recording lost it here
+        return _box(self.samples[i])
 
 
 @dataclass
@@ -91,6 +123,7 @@ class PreBirth:
         self._clearance = clearance
         self._active: set[bytes] = set()
         self.cut_by_recording = 0   # pasts shortened or dropped: they ran through the recorded vehicle
+        self.cut_by_others = 0      # ... or through another object that was there
         first = min((tr.times[0] for tr in tracks.values() if tr.times), default=0.0)
         ends = sorted((tr.times[-1], k) for k, tr in tracks.items() if tr.times)
         end_t = [e[0] for e in ends]
@@ -139,6 +172,7 @@ class PreBirth:
             past.seen_m = max(math.hypot(x0 - ego_x[i], y0 - ego_y[i]), VISIBLE_MIN_M)
             pasts.append(past)
         pasts.sort(key=lambda p: p.t_birth)
+        pasts = self._clear_of_others(pasts, tracks)
         self._pasts = pasts
         self._t = [p.t_birth for p in pasts]
 
@@ -184,6 +218,79 @@ class PreBirth:
         past.times = past.times[last_hit + 1:]
         past.samples = past.samples[last_hit + 1:]
         return past
+
+    def _clear_of_others(self, pasts: list[_Past], tracks: dict) -> list[_Past]:
+        """Each past from after the last instant it would have been THROUGH_M
+        deep in another object that was there then; dropped if nothing is left.
+
+        "There then": another object's recorded track at that recorded time, or
+        the past already given to one born earlier. Two things are not in one
+        place: a line traced back from a car's first second ran through a truck
+        parked at the kerb, and a car first seen standing "stood" where the
+        same car was still shown under its older tracker id, or where others
+        drove through meanwhile (two-model run, 2026-11-11: 51 such
+        pass-throughs within 40 m of the ego in 12 jobs). Usually the object
+        was first seen where it was because the other one hid it: it comes
+        out from behind it. Not judged: UNKNOWN others (tracker clutter),
+        pedestrians and cyclists among themselves (a group), and the ids of
+        its own chain."""
+        from dp_multi_eval.geometry import box_overlap_m
+
+        grid: dict[tuple[int, int], list[_There]] = {}
+
+        def add(th: _There) -> None:
+            for c in th.cells:
+                grid.setdefault(c, []).append(th)
+
+        for key, tr in tracks.items():
+            if tr.times and _label(tr.samples[0]) not in (None, *NO_PAST_LABELS):
+                add(_There(self.root_of.get(key, key), tr.times, tr.samples, _label(tr.samples[0]), 0.0))
+        out = []
+        for p in pasts:
+            vru = _label(p.first) in VRU_LABELS
+            root = self.root_of.get(p.key, p.key)
+            step = STAND_STEP_SEC if p.kind == "stood" else STEP_SEC
+            mine = _There(root, p.times, p.samples, _label(p.first), step)
+            seen: set[int] = set()
+            near = []
+            for c in mine.cells:
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        for th in grid.get((c[0] + dx, c[1] + dy), ()):
+                            if id(th) not in seen:
+                                seen.add(id(th))
+                                if th.root != root and not (vru and th.vru):
+                                    near.append(th)
+            t_a, t_b = p.times[0], p.t_birth
+            last_hit = None
+            for th in near:
+                lo = max(t_a, th.times[0]) if last_hit is None else max(last_hit, th.times[0])
+                hi = min(t_b, th.times[-1] + th.step)
+                if hi <= lo:
+                    continue
+                # Judged at the other's samples and at the past's own (a past
+                # that stands is one box; a car passing through it is seen at
+                # the car's rate).
+                i0, i1 = bisect.bisect_left(th.times, lo), bisect.bisect_right(th.times, hi)
+                j0, j1 = bisect.bisect_left(p.times, lo), bisect.bisect_right(p.times, hi)
+                for t in sorted(set(th.times[i0:i1]) | set(p.times[j0:j1]), reverse=True):
+                    if not lo <= t < t_b:
+                        continue
+                    a, b = mine.box_at(t), th.box_at(t)
+                    if a is not None and b is not None and box_overlap_m(a, b) > THROUGH_M:
+                        last_hit = t if last_hit is None else max(last_hit, t)
+                        break
+            if last_hit is not None:
+                self.cut_by_others += 1
+                k = bisect.bisect_right(p.times, last_hit + 1e-6)
+                if k >= len(p.times):
+                    continue
+                p.times, p.samples = p.times[k:], p.samples[k:]
+                mine = _There(root, p.times, p.samples, _label(p.first), step)
+            if _label(p.first) not in (None, *NO_PAST_LABELS):
+                add(mine)
+            out.append(p)
+        return out
 
     @staticmethod
     def _past(key: bytes, tr: Any, chain: list) -> _Past | None:

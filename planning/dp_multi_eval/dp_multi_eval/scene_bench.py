@@ -26,7 +26,7 @@ away ahead of it.
 | lag_end_sec | how far behind the recording the ego ended |
 | trapped_sec | NPC-seconds held for the ego inside a junction or on a crosswalk |
 | off_rec_sec | NPC-seconds shown more than 2 m from their recording, within 40 m of the ego |
-| audit.* | the scene audit's findings (stand_in_zone, pop_in, vanish, jump; blip apart) |
+| audit.* | the scene audit's findings (stand_in_zone, pop_in, vanish, jump, through; blip apart) |
 
     ros2 run dp_multi_eval scene_bench.py --bags H78 H95 --map ~/autoware_map/hiratsuka-map
     ros2 run dp_multi_eval scene_bench.py --all --map ... --out bench.json --baseline old.json
@@ -65,7 +65,7 @@ STOP_DECEL = 2.5
 HOLE_SEC = 2.0            # window_eval.GAP_SEC: a hole longer than this moves the scene
 # Measures that must not grow (with the slack allowed before a growth counts).
 GATED = {"contact_npc_frames": 2, "deadlock_sec": 2.0, "trapped_sec": 5.0,
-         "audit.stand_in_zone": 0, "audit.pop_in": 2, "audit.vanish": 0, "audit.jump": 0}
+         "audit.stand_in_zone": 0, "audit.pop_in": 2, "audit.vanish": 0, "audit.jump": 0, "audit.through": 0}
 
 
 # --------------------------------------------------------------------------- recording
@@ -354,7 +354,7 @@ def run_program(rec: SimpleNamespace, map_path: str | None, program: str, overri
         out["contact_npc_frames"] += int(npc_touched)
     out["lag_end_sec"] = round(t_end - tau, 1)
     out["detours"] = [dict(d, t_rel=round(d["t"] - t_first, 1)) for d in getattr(shield, "detours", [])][:40]
-    out["detour_count"] = {k: sum(1 for d in getattr(shield, "detours", []) if d["how"] == k) for k in ("margin", "shift", "stuck")}
+    out["detour_count"] = {k: sum(1 for d in getattr(shield, "detours", []) if d["how"] == k) for k in ("margin", "shift", "blocked", "stuck")}
     audit = gate.audit.counts if gate.audit is not None else {}
     out["contacts"] = sorted(contact_seen.values(), key=lambda c: c["t_rel"])[:40]
     out["deadlocks"] = sorted(({**d, "sec": round(d["sec"], 1)} for d in dead.values() if d["sec"] >= 1.0),
@@ -540,7 +540,7 @@ def compare(new: dict, old: dict) -> list[str]:
 
 def table(results: dict) -> str:
     keys = ["contact_npc_frames", "contact_frames", "deadlock_sec", "trapped_sec", "off_rec_sec", "lag_end_sec",
-            "audit.stand_in_zone", "audit.pop_in", "audit.vanish", "audit.jump", "audit.blip"]
+            "audit.stand_in_zone", "audit.pop_in", "audit.vanish", "audit.jump", "audit.through", "audit.blip"]
     head = f"{'bag':22s} {'program':14s} " + " ".join(f"{k.replace('audit.', ''):>13s}" for k in keys)
     rows = [head, "-" * len(head)]
     for bag in sorted(results):
