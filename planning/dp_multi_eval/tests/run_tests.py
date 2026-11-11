@@ -42,6 +42,12 @@ def main() -> int:
     p.add_argument("-v", "--verbose", action="store_true")
     p.add_argument("-k", default="", help="run only tests whose file name contains this")
     args = p.parse_args()
+    try:
+        import rclpy  # noqa: F401
+    except ImportError:
+        print("[error] no ROS 2 environment: source the workspace's install/setup.bash (or /opt/ros/<distro>/setup.bash) "
+              "first — most tests import rclpy")
+        return 2
 
     results = []
     for suite in SUITES:

@@ -47,6 +47,36 @@ def main() -> int:
     example = yaml.safe_load((ROOT / "config" / "example_pipeline.yaml").read_text(encoding="utf-8"))
     assert run_all.unknown_keys(example) == [], run_all.unknown_keys(example)
     print("PASS: config keys this version does not read are named; the example config has none")
+    # a config that cannot run says why in one line, and nothing is started
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        (tmp / "map").mkdir()
+        (tmp / "map" / "lanelet2_map.osm").write_text("<osm/>")
+        base = {"results_root": str(tmp / "res"), "rosbag_dir": str(tmp / "bags"), "map_path": str(tmp / "map"),
+                "models": [{"name": "m", "model_config": str(tmp / "no_such_model")}]}
+        cases = (
+            ({"results_root": None}, "results_root is not set"),
+            ({"models": []}, "models is not set"),
+            ({"map_path": str(tmp / "nowhere")}, "map_path has no lanelet2_map.osm"),
+            ({}, "rosbag_dir missing"),
+        )
+        for change, said in cases:
+            cfg_file = tmp / "cfg.yaml"
+            cfg_file.write_text(yaml.safe_dump(base | change), encoding="utf-8")
+            r = subprocess.run([sys.executable, "-c", "import sys; from dp_multi_eval import run_all; "
+                                f"sys.exit(run_all.run_all(__import__('pathlib').Path(r'{cfg_file}'), dry_run=True))"],
+                               capture_output=True, text=True, env=dict(os.environ, PYTHONPATH=str(ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")))
+            assert r.returncode == 2 and said in r.stderr and "Traceback" not in r.stderr, (said, r.returncode, r.stderr[-300:])
+            assert "cfg.yaml" in r.stderr and "Nothing was started" in r.stderr, r.stderr
+        (tmp / "bags").mkdir()
+        cfg_file.write_text(yaml.safe_dump(base), encoding="utf-8")
+        r = subprocess.run([sys.executable, "-c", "import sys; from dp_multi_eval import run_all; "
+                            f"sys.exit(run_all.run_all(__import__('pathlib').Path(r'{cfg_file}'), dry_run=True))"],
+                           capture_output=True, text=True, env=dict(os.environ, PYTHONPATH=str(ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")))
+        assert r.returncode == 2 and "Traceback" not in r.stderr, r.stderr[-300:]     # no recording / no model: one line too
+    print("PASS: a config with a missing result folder, model list, map or recordings folder says so in one line")
     # the entry point stops before anything is started, and says which Python it is
     code = ("import sys; sys.argv=['run_all.py','-c','/nonexistent.yaml']\n"
             "from dp_multi_eval import run_all\n"

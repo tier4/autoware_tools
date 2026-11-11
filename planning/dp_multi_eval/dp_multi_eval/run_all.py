@@ -87,23 +87,9 @@ def merge_manifests(existing: dict[str, Any], fresh: dict[str, Any]) -> dict[str
     return fresh
 
 
-def run_all(
-    config_path: Path,
-    *,
-    max_workers: int | None = None,
-    dry_run: bool = False,
-    max_retries: int = 1,
-    only: str | None = None,
-) -> int:
-    t_start = time.monotonic()
-    cfg = load_pipeline_config(config_path)
-    for key in unknown_keys(cfg):
-        print(f"[warn] {config_path.name}: '{key}' is not a setting of this version — ignored")
-    results_root = Path(cfg["results_root"]).expanduser().resolve()
-    results_root.mkdir(parents=True, exist_ok=True)
-    manifest_path = results_root / "manifest.json"
-
-    fresh = generate_manifest(
+def _fresh_manifest(cfg: dict, results_root: Path) -> dict:
+    """The job matrix the config asks for."""
+    return generate_manifest(
         models=cfg["models"],
         results_root=results_root,
         mode=str(cfg.get("mode", "reproducer")),
@@ -121,6 +107,47 @@ def run_all(
         ),
         scenario_repeat_count=int(cfg.get("scenario_repeat_count", 1)),
     )
+
+
+def run_all(
+    config_path: Path,
+    *,
+    max_workers: int | None = None,
+    dry_run: bool = False,
+    max_retries: int = 1,
+    only: str | None = None,
+) -> int:
+    t_start = time.monotonic()
+    cfg = load_pipeline_config(config_path)
+    for key in unknown_keys(cfg):
+        print(f"[warn] {config_path.name}: '{key}' is not a setting of this version — ignored")
+    # What the config must name before anything can start. Said in one line:
+    # an example config run unedited ended in a traceback (PermissionError: '/path').
+    def unusable(what: str) -> int:
+        print(f"[error] {config_path.name}: {what} — set it in the config (docs/RUNNING.md). Nothing was started.",
+              file=sys.stderr)
+        return 2
+
+    for key in ("results_root", "models"):
+        if not cfg.get(key):
+            return unusable(f"{key} is not set")
+    if str(cfg.get("mode", "reproducer")).strip().lower() == "reproducer":
+        # The simulator is launched on this folder and reads the map by its usual name;
+        # without the check a dry run "validated" a job whose map did not exist.
+        map_dir = Path(str(cfg.get("map_path", "/opt/autoware/maps"))).expanduser()
+        if not (map_dir / "lanelet2_map.osm").is_file():
+            return unusable(f"map_path has no lanelet2_map.osm: {map_dir}")
+    results_root = Path(cfg["results_root"]).expanduser().resolve()
+    try:
+        results_root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return unusable(f"results_root cannot be created ({exc})")
+    manifest_path = results_root / "manifest.json"
+
+    try:
+        fresh = _fresh_manifest(cfg, results_root)
+    except (FileNotFoundError, NotADirectoryError, KeyError, ValueError) as exc:
+        return unusable(str(exc.args[0]) if exc.args else repr(exc))
     if manifest_path.is_file():
         existing = load_manifest(manifest_path)
         manifest = merge_manifests(existing, fresh)

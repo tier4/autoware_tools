@@ -36,6 +36,7 @@ def main() -> int:
             (root / "bags" / b / "metadata.yaml").write_text("rosbag2_bagfile_information: {}\n")
         model = root / "m.param.yaml"
         model.write_text("/**:\n  ros__parameters: {}\n")
+        (root / "lanelet2_map.osm").write_text("<osm/>\n")   # run_all refuses a map folder without one
         cfg = {
             "rosbag_dir": str(root / "bags"),
             "results_root": str(root / "res"),
