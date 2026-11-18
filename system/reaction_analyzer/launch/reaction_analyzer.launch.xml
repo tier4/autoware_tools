@@ -4,11 +4,6 @@
   <!-- reaction analyzer publishes own perception objects for planning_control mode -->
   <arg name="launch_simulator_perception_modules" default="false"/>
 
-  <!-- Arguments for occupancy_grid_map -->
-  <arg name="laserscan_based_occupancy_grid_map_param_path" default="$(find-pkg-share autoware_launch)/config/perception/occupancy_grid_map/laserscan_based_occupancy_grid_map.param.yaml"/>
-  <arg name="occupancy_grid_map_updater" default="binary_bayes_filter" description="options: binary_bayes_filter"/>
-  <arg name="occupancy_grid_map_updater_param_path" default="$(find-pkg-share autoware_launch)/config/perception/occupancy_grid_map/$(var occupancy_grid_map_updater)_updater.param.yaml"/>
-
   <!-- running_mode: planning_control or perception_planning -->
   <arg name="running_mode" default="planning_control"/>
 
@@ -32,20 +27,6 @@
       <arg name="sensor_model" value="$(var sensor_model)"/>
       <arg name="launch_simulator_perception_modules" value="$(var launch_simulator_perception_modules)"/>
     </include>
-
-    <!-- Occupancy Grid -->
-    <push-ros-namespace namespace="occupancy_grid_map"/>
-    <include file="$(find-pkg-share autoware_perception_launch)/launch/occupancy_grid_map/probabilistic_occupancy_grid_map.launch.xml">
-      <arg name="input_obstacle_pointcloud" value="true"/>
-      <arg name="input_obstacle_and_raw_pointcloud" value="false"/>
-      <arg name="input/obstacle_pointcloud" value="/perception/obstacle_segmentation/pointcloud"/>
-      <arg name="output" value="/perception/occupancy_grid_map/map"/>
-      <arg name="occupancy_grid_map_method" value="laserscan_based_occupancy_grid_map"/>
-      <arg name="occupancy_grid_map_param_path" value="$(var laserscan_based_occupancy_grid_map_param_path)"/>
-      <arg name="occupancy_grid_map_updater" value="$(var occupancy_grid_map_updater)"/>
-      <arg name="occupancy_grid_map_updater_param_path" value="$(var occupancy_grid_map_updater_param_path)"/>
-    </include>
-  </group>
 
   <node_container pkg="rclcpp_components" exec="component_container_mt" name="reaction_analyzer_container" namespace="" args="" output="screen">
     <composable_node pkg="reaction_analyzer" plugin="reaction_analyzer::ReactionAnalyzerNode" name="reaction_analyzer" namespace="">
