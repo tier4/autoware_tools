@@ -19,7 +19,10 @@ install(PROGRAMS
   scripts/run_orchestrator.py
   scripts/build_dashboard.py
   scripts/run_all.py
+  scripts/rescore.py
   scripts/app.py
+  scripts/scene_driver.py
+  scripts/scene_bench.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

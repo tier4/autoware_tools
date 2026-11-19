@@ -1,3 +1,17 @@
+# Copyright 2026 TIER IV, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Phase 1 — single evaluation job (psim + reproducer + bag record).
 
 Importable as ``from dp_multi_eval.run_single_job import run_single_job``.
@@ -9,26 +23,63 @@ import argparse
 import hashlib
 import json
 import math
+import re
 import os
 import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from dp_multi_eval.ament_overlay import env_with_overlay, make_model_overlay
+from dp_multi_eval.ament_overlay import (
+    add_vehicle_dynamics_overlay,
+    env_with_overlay,
+    make_model_overlay,
+)
+from dp_multi_eval.build_provenance import build_provenance
 from dp_multi_eval.job_status import utc_now_iso, write_job_status
-from dp_multi_eval.process_utils import close_log_handle, popen, popen_log_file, stop_process_group
+from dp_multi_eval.process_utils import (
+    cleanup_evaluation_processes,
+    report_gpu_zombies,
+    wait_for_gpu_headroom,
+    close_log_handle,
+    popen,
+    popen_log_file,
+    stop_process_group,
+)
 from dp_multi_eval.scenario_sim import (
     build_record_command_sim_time,
     build_scenario_runner_command,
     scenario_test_runner_available,
 )
 from dp_multi_eval.topics import TopicSet, load_topics
+from dp_multi_eval.job_config import JobConfig, ros_call_env
+from dp_multi_eval.job_waiters import (
+    kill_conflicting_perception_nodes,
+    planning_stack_nodes_ready,
+    wait_for_perception_ready,
+    wait_for_first_trajectory,
+    wait_for_route_arrived,
+    wait_for_services,
+)
+from dp_multi_eval.route_control import (
+    advance_route,
+    engage_autonomous,
+    reposition_stuck_ego,
+    setup_route,
+)
+from dp_multi_eval.route_control import close_routing
+from dp_multi_eval.resync import resync_ego
+from dp_multi_eval.ros_env import launch_failure_reason, workspace_env
+from dp_multi_eval.window_eval import find_cuts, plan_legs, run_legs
+
+# Re-syncs a job may make before it is abandoned: a model that diverges every
+# few seconds is not being measured any more, only chased.
+RESYNC_MAX = 30
 
 
 def update_job_progress(
@@ -63,85 +114,15 @@ def update_job_progress(
             "bag_path": bag_path,
             "scenario_path": scenario_path,
             "model_config": model_config,
+            # Which planner build and which checkpoint produced this. The
+            # Autoware tree is not under version control here, so a local edit to
+            # WEIGHT_MAJOR_VERSION leaves no trace anywhere else, and a result
+            # can quietly depend on a patched build.
+            "build": build_provenance(model_config),
         },
     )
 
 
-@dataclass
-class JobConfig:
-    model_config: Path
-    output_dir: Path
-    domain_id: int
-    bag_path: Path | None = None
-    scenario_path: Path | None = None
-    mode: str = "reproducer"  # reproducer | scenario_simulator
-    map_path: Path = Path("/opt/autoware/maps")
-    vehicle_model: str = "lv828l"
-    sensor_model: str = "aip_x2_gen2"
-    vehicle_id: str | None = None
-    topics: TopicSet = field(default_factory=TopicSet)
-    end_condition: str = "route_arrived"  # route_arrived | bag_duration
-    bag_duration_margin_sec: float = 30.0
-    route_timeout_sec: float = 900.0
-    psim_startup_sec: float = 120.0
-    route_setup_timeout_sec: float = 90.0
-    post_arrival_sec: float = 3.0
-    auto_engage_timeout_sec: float = 60.0
-    perception_warmup_sec: float = 5.0
-    perception_ready_timeout_sec: float = 45.0
-    perception_ready_min_objects: int = 1
-    perception_ready_stable_sec: float = 2.0
-    # Fail the job instead of engaging Auto with empty objects (common when the
-    # full input bag is still loading into perception_reproducer).
-    require_perception_ready: bool = True
-    # Extra wall-time budget for large bags: timeout =
-    # max(perception_ready_timeout_sec, bag_load_base_sec + bag_duration * bag_load_duration_factor).
-    bag_load_base_sec: float = 120.0
-    bag_load_duration_factor: float = 1.0
-    bag_load_timeout_cap_sec: float = 3600.0
-    # perception_reproducer -r: 0 = always nearest bag pose (needed when ego
-    # diverges from the recording; 1.5 leaves objects empty off-path).
-    reproducer_search_radius_m: float = 0.0
-    reproducer_cool_down_sec: float = 80.0
-    # Multi-goal bag replay (bus stop → arrive → next goal). Off = single start→end route.
-    multi_goal: bool = False
-    multi_goal_source: str = "auto"  # auto | goal_topic | stop_segments | stop_points
-    multi_goal_stop_speed_mps: float = 0.2
-    multi_goal_stop_min_sec: float = 8.0
-    multi_goal_min_spacing_m: float = 15.0
-    multi_goal_stop_order: list[str] | None = None
-    stop_points_csv: str = "stop_points.csv"
-    # When stuck (near-zero speed), publish left/right blinker to DP input to try
-    # triggering a new trajectory (experimental recovery for lane-change stalls).
-    stuck_blinker_nudge: bool = True
-    stuck_blinker_speed_mps: float = 0.15
-    stuck_blinker_trigger_sec: float = 12.0
-    stuck_blinker_hold_sec: float = 3.0
-    stuck_blinker_cooldown_sec: float = 25.0
-    # Abort a leg if ego stays near-stopped this long when forward-shift is disabled.
-    stuck_abort_sec: float = 90.0
-    # While stopped (red light / lead vehicle), shift ego forward and continue.
-    # trigger_sec: how long to wait stopped before each shift. forward_m: 0 disables.
-    stuck_reposition_trigger_sec: float = 30.0
-    stuck_reposition_forward_m: float = 5.0
-    # 0 = unlimited (bounded by the current leg wait timeout).
-    stuck_reposition_max_count: int = 0
-    # Mission planner can remain SET when the bus stops just short of ARRIVED.
-    multi_goal_arrival_tolerance_m: float = 5.0
-    # Cap each multi-goal ARRIVED wait (full bag_duration is only the overall budget).
-    multi_goal_leg_timeout_sec: float = 300.0
-    # Low-CPU web live view: sample ego pose → live_drive.json for dashboard.
-    live_web_monitor: bool = True
-    live_web_sample_sec: float = 2.0
-    live_drive_root: Path | None = None  # usually results_root (next to dashboard.html)
-    # Scenario Simulator v2
-    architecture_type: str = "awf/universe/20250130"
-    scenario_timeout_sec: float = 300.0
-    scenario_record_warmup_sec: float = 15.0
-    dry_run: bool = False
-    skip_route_setup: bool = False
-    rviz: bool = False
-    planning_setting: str = "diffusion_planner"
 
 
 @dataclass
@@ -152,6 +133,19 @@ class JobResult:
     error: str | None = None
     output_bag: str | None = None
     duration_sec: float = 0.0
+    # Harness interventions during the drive (blinker nudges, forward shifts, …).
+    # Empty dict = clean run. See ``clean_run``.
+    interventions: dict[str, float] = field(default_factory=dict)
+
+    @property
+    def clean_run(self) -> bool:
+        """True when the ego drove without any harness assistance."""
+        # stall_x / stall_y are the last stall position, not a count.
+        return not any(
+            float(v) > 0
+            for k, v in (self.interventions or {}).items()
+            if not str(k).startswith("stall_")
+        )
 
 
 def get_bag_duration_sec(bag_path: Path) -> float | None:
@@ -206,125 +200,14 @@ def get_bag_duration_sec(bag_path: Path) -> float | None:
     return None
 
 
-def _ros_call_env(env: dict[str, str]) -> dict[str, str]:
-    return {**env, "ROS2_DISABLE_DAEMON": "1"}
 
 
-def _list_ros_nodes(env: dict[str, str], timeout_sec: float = 8.0) -> set[str]:
-    out = subprocess.check_output(
-        ["ros2", "node", "list"],
-        env=_ros_call_env(env),
-        text=True,
-        stderr=subprocess.DEVNULL,
-        timeout=timeout_sec,
-    )
-    return set(line.strip() for line in out.splitlines() if line.strip())
 
 
-def planning_stack_nodes_ready(nodes: set[str]) -> bool:
-    """Match component_state_monitor planning/map/api modules being up."""
-    has_planning = any(
-        "mission_planner" in node or "route_selector" in node for node in nodes
-    )
-    has_map = any("/map/" in node or node.endswith("/map") for node in nodes)
-    has_api = any("adapi" in node for node in nodes)
-    return has_planning and has_map and has_api
 
 
-def _list_ros_services(env: dict[str, str], timeout_sec: float = 8.0) -> set[str]:
-    out = subprocess.check_output(
-        ["ros2", "service", "list"],
-        env=_ros_call_env(env),
-        text=True,
-        stderr=subprocess.DEVNULL,
-        timeout=timeout_sec,
-    )
-    return set(line.strip() for line in out.splitlines() if line.strip())
 
 
-def wait_for_services(
-    env: dict[str, str],
-    timeout_sec: float,
-    psim: subprocess.Popen[Any] | None = None,
-) -> tuple[bool, str]:
-    """Wait until psim routing/localization services are up.
-
-    Node-list checks are best-effort: polluted DDS / slow discovery often makes
-    ``ros2 node list`` hang even while services are already usable.
-    """
-    adapi_required = {"/api/routing/clear_route", "/api/routing/set_route_points"}
-    mission_required = {
-        "/planning/mission_planning/route_selector/main/clear_route",
-        "/planning/mission_planning/route_selector/main/set_waypoint_route",
-    }
-    localize_required = {"/localization/initialize"}
-    deadline = time.time() + timeout_sec
-    last_log = 0.0
-    services_ok_streak = 0
-    while time.time() < deadline:
-        if psim is not None and psim.poll() is not None:
-            return False, f"planning simulator exited early (code={psim.returncode})"
-
-        services: set[str] | None = None
-        nodes: set[str] | None = None
-        try:
-            services = _list_ros_services(env, timeout_sec=8.0)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
-            services = None
-        try:
-            nodes = _list_ros_nodes(env, timeout_sec=5.0)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
-            nodes = None
-
-        routing_ready = False
-        localize_ready = False
-        stack_ready = False
-        if services is not None:
-            routing_ready = adapi_required.issubset(services) or mission_required.issubset(
-                services
-            )
-            localize_ready = localize_required.issubset(services)
-        if nodes is not None:
-            stack_ready = planning_stack_nodes_ready(nodes)
-
-        services_ok = localize_ready and routing_ready
-        if services_ok:
-            services_ok_streak += 1
-        else:
-            services_ok_streak = 0
-
-        # Prefer full stack, but accept stable service readiness when node list
-        # is unavailable (common after leftover domain pollution).
-        if services_ok and (stack_ready or services_ok_streak >= 2):
-            time.sleep(3.0)
-            detail = "planning_stack_ready" if stack_ready else "services_ready"
-            return True, detail
-
-        now = time.time()
-        if now - last_log >= 15.0:
-            elapsed = now - (deadline - timeout_sec)
-            if nodes is None and services is None:
-                detail = " nodes(unavailable) services(unavailable)"
-            elif nodes is None:
-                detail = (
-                    f" nodes(unavailable)"
-                    f" services(localize={localize_ready}, routing={routing_ready},"
-                    f" streak={services_ok_streak})"
-                )
-            else:
-                detail = (
-                    f" nodes(planning={any('mission_planner' in n or 'route_selector' in n for n in nodes)},"
-                    f" map={any('/map/' in n for n in nodes)},"
-                    f" api={any('adapi' in n for n in nodes)})"
-                    f" services(localize={localize_ready}, routing={routing_ready})"
-                )
-            print(
-                f"[info] Waiting for planning simulator stack "
-                f"({elapsed:.0f}/{timeout_sec:.0f}s){detail}…"
-            )
-            last_log = now
-        time.sleep(2.0)
-    return False, "planning_stack_not_ready"
 
 
 def tail_text_file(path: Path, max_chars: int = 6000) -> str:
@@ -347,7 +230,7 @@ def _routing_services_in_graph(env: dict[str, str]) -> bool:
     try:
         out = subprocess.check_output(
             ["ros2", "service", "list"],
-            env=_ros_call_env(env),
+            env=ros_call_env(env),
             text=True,
             stderr=subprocess.DEVNULL,
             timeout=10.0,
@@ -366,313 +249,10 @@ def wait_for_routing_callable(env: dict[str, str], timeout_sec: float = 45.0) ->
     return False
 
 
-def _route_state_label(state: int | None) -> str:
-    try:
-        from autoware_adapi_v1_msgs.msg import RouteState
-
-        names = {
-            RouteState.UNSET: "UNSET",
-            RouteState.SET: "SET",
-            RouteState.ARRIVED: "ARRIVED",
-        }
-        if state is None:
-            return "unknown"
-        return names.get(state, str(state))
-    except ImportError:
-        return "unknown" if state is None else str(state)
 
 
-def wait_for_route_arrived(
-    env: dict[str, str],
-    timeout_sec: float,
-    *,
-    goal_xy_yaw: tuple[float, float, float] | None = None,
-    near_goal_arrival_m: float = 5.0,
-    stuck_blinker_nudge: bool = False,
-    stuck_blinker_speed_mps: float = 0.15,
-    stuck_blinker_trigger_sec: float = 12.0,
-    stuck_blinker_hold_sec: float = 3.0,
-    stuck_blinker_cooldown_sec: float = 25.0,
-    stuck_abort_sec: float = 90.0,
-) -> tuple[str, str]:
-    """Poll /api/routing/state. Optionally nudge DP with blinkers when stuck.
-
-    Returns status ``done`` | ``timeout`` | ``stuck``.
-    """
-    try:
-        import rclpy
-        from autoware_adapi_v1_msgs.msg import RouteState
-        from nav_msgs.msg import Odometry
-        from rclpy.node import Node
-        from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-    except ImportError:
-        return "timeout", "rclpy_or_adapi_msgs_unavailable"
-
-    try:
-        from autoware_vehicle_msgs.msg import TurnIndicatorsReport
-    except ImportError:
-        TurnIndicatorsReport = None  # type: ignore[misc, assignment]
-
-    if not rclpy.ok():
-        rclpy.init()
-
-    # Keep env for this process (ROS_DOMAIN_ID already set by caller via os.environ
-    # when used from setup_route; here we rely on caller's env being current).
-    old_env = os.environ.copy()
-    os.environ.update(env)
-
-    class Waiter(Node):
-        def __init__(self) -> None:
-            super().__init__("dp_multi_eval_route_waiter")
-            self.state: int | None = None
-            self.speed_mps: float = float("nan")
-            self.x: float = float("nan")
-            self.y: float = float("nan")
-            qos_route = QoSProfile(
-                depth=1,
-                reliability=ReliabilityPolicy.RELIABLE,
-                durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            )
-            self.create_subscription(RouteState, "/api/routing/state", self._cb_route, qos_route)
-            self.create_subscription(
-                Odometry,
-                "/localization/kinematic_state",
-                self._cb_odom,
-                10,
-            )
-            self._blinker_pub = None
-            if stuck_blinker_nudge and TurnIndicatorsReport is not None:
-                self._blinker_pub = self.create_publisher(
-                    TurnIndicatorsReport,
-                    "/vehicle/status/turn_indicators_status",
-                    10,
-                )
-
-        def _cb_route(self, msg: RouteState) -> None:
-            self.state = msg.state
-
-        def _cb_odom(self, msg: Odometry) -> None:
-            vx = float(msg.twist.twist.linear.x)
-            vy = float(msg.twist.twist.linear.y)
-            self.speed_mps = (vx * vx + vy * vy) ** 0.5
-            self.x = float(msg.pose.pose.position.x)
-            self.y = float(msg.pose.pose.position.y)
-
-        def publish_blinker(self, report: int) -> None:
-            if self._blinker_pub is None or TurnIndicatorsReport is None:
-                return
-            msg = TurnIndicatorsReport()
-            msg.stamp = self.get_clock().now().to_msg()
-            msg.report = report
-            self._blinker_pub.publish(msg)
-
-    node = Waiter()
-    deadline = time.time() + timeout_sec
-    last_log = 0.0
-    stuck_since: float | None = None
-    last_nudge_end = 0.0
-    nudge_count = 0
-    abort_after = max(0.0, float(stuck_abort_sec or 0.0))
-    # Cycle: LEFT → DISABLE → RIGHT → DISABLE
-    nudge_phases: list[tuple[str, int]] = []
-    if TurnIndicatorsReport is not None:
-        nudge_phases = [
-            ("LEFT", int(TurnIndicatorsReport.ENABLE_LEFT)),
-            ("DISABLE", int(TurnIndicatorsReport.DISABLE)),
-            ("RIGHT", int(TurnIndicatorsReport.ENABLE_RIGHT)),
-            ("DISABLE", int(TurnIndicatorsReport.DISABLE)),
-        ]
-
-    detail_state: int | None = None
-    try:
-        while time.time() < deadline and rclpy.ok():
-            rclpy.spin_once(node, timeout_sec=0.25)
-            now = time.time()
-            if node.state == RouteState.ARRIVED:
-                detail = "route_arrived"
-                if nudge_count:
-                    detail += f" (blinker_nudges={nudge_count})"
-                return "done", detail
-
-            speed = node.speed_mps
-            if (
-                goal_xy_yaw is not None
-                and speed == speed
-                and node.x == node.x
-                and speed <= stuck_blinker_speed_mps
-            ):
-                goal_dist = math.hypot(
-                    node.x - float(goal_xy_yaw[0]),
-                    node.y - float(goal_xy_yaw[1]),
-                )
-                if goal_dist <= max(0.0, float(near_goal_arrival_m)):
-                    return (
-                        "done",
-                        f"near_goal_arrival dist={goal_dist:.2f}m "
-                        f"state={_route_state_label(node.state)}",
-                    )
-
-            if speed == speed:  # not NaN
-                if speed <= stuck_blinker_speed_mps:
-                    if stuck_since is None:
-                        stuck_since = now
-                else:
-                    stuck_since = None
-
-            if (
-                abort_after > 0.0
-                and stuck_since is not None
-                and (now - stuck_since) >= abort_after
-            ):
-                detail = (
-                    f"stuck_abort v={speed:.2f} m/s for {now - stuck_since:.0f}s "
-                    f"state={_route_state_label(node.state)}"
-                )
-                if nudge_count:
-                    detail += f" blinker_nudges={nudge_count}"
-                print(f"[warn] {detail} — ending leg early")
-                return "stuck", detail
-
-            if stuck_blinker_nudge and nudge_phases and speed == speed:
-                ready_to_nudge = (
-                    stuck_since is not None
-                    and (now - stuck_since) >= stuck_blinker_trigger_sec
-                    and (now - last_nudge_end) >= stuck_blinker_cooldown_sec
-                )
-                if ready_to_nudge:
-                    nudge_count += 1
-                    print(
-                        f"[info] Stuck (v={speed:.2f} m/s for "
-                        f"{now - stuck_since:.0f}s) — blinker nudge #{nudge_count} "
-                        "(LEFT then RIGHT) to try DP trajectory generation"
-                    )
-                    for label, report in nudge_phases:
-                        phase_deadline = time.time() + stuck_blinker_hold_sec
-                        print(f"[info]   blinker → {label} ({stuck_blinker_hold_sec:.1f}s)")
-                        while time.time() < phase_deadline and rclpy.ok():
-                            node.publish_blinker(report)
-                            rclpy.spin_once(node, timeout_sec=0.1)
-                            if node.state == RouteState.ARRIVED:
-                                return "done", f"route_arrived (during blinker={label})"
-                        node.publish_blinker(report)
-                    last_nudge_end = time.time()
-                    # Keep stuck_since so abort_after still accumulates across nudges.
-
-            if now - last_log >= 15.0:
-                speed_s = f"{speed:.2f}" if speed == speed else "?"
-                stuck_s = (
-                    f" stuck={now - stuck_since:.0f}s"
-                    if stuck_since is not None
-                    else ""
-                )
-                print(
-                    f"[info] waiting for route ARRIVED "
-                    f"({timeout_sec - (deadline - now):.0f}/{timeout_sec:.0f}s) "
-                    f"state={_route_state_label(node.state)} v={speed_s} m/s"
-                    + (f" nudges={nudge_count}" if nudge_count else "")
-                    + stuck_s
-                )
-                last_log = now
-            detail_state = node.state
-    finally:
-        node.destroy_node()
-        os.environ.clear()
-        os.environ.update(old_env)
-
-    detail = f"route_not_arrived state={_route_state_label(detail_state)}"
-    if nudge_count:
-        detail += f" blinker_nudges={nudge_count}"
-    return "timeout", detail
 
 
-def wait_for_perception_ready(
-    cfg: JobConfig,
-    *,
-    timeout_sec: float | None = None,
-) -> tuple[bool, str]:
-    """Wait until reproducer publishes a stable set of tracked objects."""
-    try:
-        import rclpy
-        from autoware_perception_msgs.msg import TrackedObjects
-        from rclpy.node import Node
-        from rclpy.qos import QoSProfile, ReliabilityPolicy
-    except ImportError:
-        return False, "perception_msgs_unavailable"
-
-    if not rclpy.ok():
-        rclpy.init()
-
-    wait_budget = float(
-        timeout_sec if timeout_sec is not None else cfg.perception_ready_timeout_sec
-    )
-
-    class Monitor(Node):
-        def __init__(self) -> None:
-            super().__init__("dp_multi_eval_perception_ready")
-            # Match perception_reproducer's RELIABLE publisher (BEST_EFFORT can miss).
-            qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
-            self.object_count = 0
-            self.message_count = 0
-            self.create_subscription(
-                TrackedObjects,
-                "/perception/object_recognition/tracking/objects",
-                self._on_objects,
-                qos,
-            )
-
-        def _on_objects(self, msg: TrackedObjects) -> None:
-            self.message_count += 1
-            self.object_count = len(msg.objects)
-
-    monitor = Monitor()
-    t0 = time.time()
-    deadline = t0 + wait_budget
-    warmup_until = t0 + cfg.perception_warmup_sec
-    stable_since: float | None = None
-    last_count = -1
-    last_log = 0.0
-    try:
-        while time.time() < deadline and rclpy.ok():
-            rclpy.spin_once(monitor, timeout_sec=0.25)
-            now = time.time()
-            if now < warmup_until:
-                continue
-
-            count = monitor.object_count
-            if count < cfg.perception_ready_min_objects:
-                stable_since = None
-                last_count = count
-            elif count == last_count:
-                if stable_since is None:
-                    stable_since = now
-                elif now - stable_since >= cfg.perception_ready_stable_sec:
-                    return (
-                        True,
-                        f"perception_ready objects={count} after_{now - t0:.0f}s",
-                    )
-            else:
-                stable_since = None
-                last_count = count
-
-            if now - last_log >= 15.0:
-                elapsed = now - t0
-                print(
-                    f"[info] Waiting for perception_reproducer… "
-                    f"{elapsed:.0f}/{wait_budget:.0f}s "
-                    f"objects={count} msgs={monitor.message_count} "
-                    f"(full bags can take many minutes to load)"
-                )
-                last_log = now
-                # Keep clearing empty publishers from psim.
-                kill_conflicting_perception_nodes()
-    finally:
-        monitor.destroy_node()
-
-    return (
-        False,
-        f"perception_ready_timeout after_{wait_budget:.0f}s "
-        f"objects={monitor.object_count} msgs={monitor.message_count}",
-    )
 
 
 def perception_load_timeout_sec(cfg: JobConfig, bag_duration: float | None) -> float:
@@ -704,47 +284,81 @@ def build_psim_command(cfg: JobConfig) -> list[str]:
     return cmd
 
 
+def build_objects_throttle_command(topics: TopicSet) -> list[str] | None:
+    """Republish the scene at a rate something actually consumes, or None.
+
+    The reproducer publishes the whole object set at the source bag's odom rate,
+    which is roughly 48 Hz and made that one topic 88% of a 699 MB output bag.
+    Metrics read objects at 5 Hz and the preview slower still, so the extra
+    messages cost disk and post-processing time and buy nothing.
+    """
+    hz = float(topics.objects_record_hz)
+    if hz <= 0.0:
+        return None
+    return [
+        "ros2", "run", "topic_tools", "throttle", "messages",
+        topics.predicted_objects, str(hz), topics.objects_throttled_topic,
+    ]
+
+
+def _parse_ego_from_detail(detail: str) -> tuple[float, float] | None:
+    m = re.search(r"ego=\((-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)\)", detail or "")
+    return (float(m.group(1)), float(m.group(2))) if m else None
+
+
+def _parse_ahead_blocked(detail: str) -> float | None:
+    """Metres to the object ahead, when the waiter reported one."""
+    m = re.search(r"ahead_blocked=(\d+(?:\.\d+)?)m", detail or "")
+    return float(m.group(1)) if m else None
+
+
 def build_reproducer_command(
     bag_path: Path,
-    search_radius: float = 0.0,
-    reproduce_cool_down_sec: float = 80.0,
+    npc_reaction: bool = False,
+    npc_reaction_decel: float = 3.0,
+    indicator_merge_topic: str | None = None,
+    window_clock: bool = False,
+    objects: bool = True,
+    map_path: Path | None = None,
+    shield_log: Path | None = None,
+    departure_hold: bool = True,
+    vehicle_model: str | None = None,
 ) -> list[str]:
-    """Build perception_reproducer command.
+    """Build the scene player command: planning_debug_tools' original
+    perception_reproducer, driven by dp_multi_eval's scene clock (scene_driver.py).
 
-    ``search_radius`` 0 = always nearest bag pose (needed when ego path diverges
-    from the recording; otherwise objects go empty outside the radius).
+    ``indicator_merge_topic`` makes the replay the single writer of the
+    planner's turn-indicator input (the launch overlay points the planner at
+    that topic); None keeps the replay on the vehicle topic beside psim.
     """
     cmd = [
         "ros2",
         "run",
-        "planning_debug_tools",
-        "perception_reproducer.py",
+        "dp_multi_eval",
+        "scene_driver.py",
         "-b",
         str(bag_path),
         "-t",
-        "-r",
-        str(float(search_radius)),
     ]
-    if float(search_radius) > 0.0:
-        cmd.extend(["-c", str(float(reproduce_cool_down_sec))])
+    if npc_reaction:
+        cmd.extend(["--npc-reaction", "--npc-reaction-decel", str(float(npc_reaction_decel))])
+    if indicator_merge_topic:
+        cmd.extend(["--indicator-merge-topic", str(indicator_merge_topic)])
+    if window_clock:
+        cmd.append("--window-clock")
+    if not objects:
+        cmd.append("--no-objects")
+    if map_path is not None:
+        cmd.extend(["--map-path", str(map_path)])
+    if shield_log is not None:
+        cmd.extend(["--shield-log", str(shield_log)])
+    if window_clock and not departure_hold:
+        cmd.append("--no-departure-hold")
+    if vehicle_model:
+        cmd.extend(["--vehicle-model", str(vehicle_model)])
     return cmd
 
 
-def kill_conflicting_perception_nodes() -> None:
-    """Stop psim perception publishers that fight with perception_reproducer."""
-    patterns = (
-        "multi_object_tracker",
-        "map_based_prediction",
-        "dummy_perception_publisher",
-        "autoware_multi_object_tracker",
-    )
-    for pattern in patterns:
-        subprocess.run(
-            ["pkill", "-f", pattern],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
 
 
 def build_record_command(output_bag: Path, topics: list[str]) -> list[str]:
@@ -760,175 +374,168 @@ def build_record_command(output_bag: Path, topics: list[str]) -> list[str]:
     ]
 
 
-def _load_route_setup_module(env: dict[str, str]):
-    import importlib.util
-
-    prefix = subprocess.check_output(
-        ["ros2", "pkg", "prefix", "diffusion_planner_batch_eval"],
-        env=env,
-        text=True,
-        stderr=subprocess.DEVNULL,
-    ).strip()
-    script = Path(prefix) / "lib" / "diffusion_planner_batch_eval" / "route_setup.py"
-    if not script.is_file():
-        raise FileNotFoundError(f"route_setup.py not found: {script}")
-    spec = importlib.util.spec_from_file_location("dp_batch_route_setup", script)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot import route_setup from {script}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
-def setup_route(
-    cfg: JobConfig,
-    env: dict[str, str],
-    *,
-    goal_xy_yaw: tuple[float, float, float] | None = None,
-) -> tuple[bool, str]:
-    """Localization + route in-process (same Python interpreter, shared DDS env)."""
-    if cfg.skip_route_setup:
-        return True, "route_setup_skipped"
+# ros2 launch runs its own shutdown ladder on the nodes it spawned: SIGINT, then
+# SIGTERM after sigterm_timeout (5 s), then SIGKILL after sigkill_timeout (5 s more).
+# Killing the group at 10 s cut it off at exactly that boundary, so a node still
+# unwinding — a planner releasing its CUDA context, for one — was SIGKILLed mid-exit
+# instead of finishing. Leave margin for the full sequence.
+PSIM_STOP_GRACE_SEC = 20.0
 
-    print(f"[info] Route setup in-process ROS_DOMAIN_ID={env.get('ROS_DOMAIN_ID', '?')}")
-    old_env = os.environ.copy()
+PLANNER_DISABLED_MARKERS = (
+    "Model not loaded. Inference is disabled",
+    "Failed to setup TRT engine",
+)
+
+
+def planner_inference_disabled(psim_log: Path) -> str | None:
+    """The reason the planner will publish nothing, if it already said so.
+
+    A planner whose engine failed to build stays up and silent: no trajectory is
+    ever published, the ego never moves, and the run is recorded as "stuck" after
+    burning the full stall budget. The cause is in the log within seconds of
+    launch — reading it turns a five-minute wrong answer into an immediate right
+    one. This is not a pre-flight check; nothing is predicted, the planner has
+    already reported the failure.
+    """
     try:
-        os.environ.clear()
-        os.environ.update(env)
-        module = _load_route_setup_module(env)
-        goal_pose = None
-        if goal_xy_yaw is not None and hasattr(module, "pose_from_xy_yaw"):
-            goal_pose = module.pose_from_xy_yaw(*goal_xy_yaw)
-        route_order = list(cfg.multi_goal_stop_order or []) or None
-        ok, message = module.setup_route_for_bag(
-            bag_path=cfg.bag_path.expanduser().resolve(),  # type: ignore[union-attr]
-            timeout_sec=cfg.route_setup_timeout_sec,
-            service_wait_sec=max(cfg.route_setup_timeout_sec, 60.0),
-            backend_preference="adapi",
-            auto_engage=False,
-            map_path=cfg.map_path,
-            stop_point_goal_fallback=True,
-            start_pose_stop_fallback=True,
-            stop_points_csv=cfg.stop_points_csv,
-            route_stop_order=route_order,
-            goal_pose=goal_pose,
-        )
-        if ok:
-            print(f"Route setup succeeded: {message}")
-            return True, message
-        print(f"Route setup failed:\n{message}")
-        return False, f"route_setup_failed: {message}"
-    except Exception as exc:  # noqa: BLE001
-        return False, f"route_setup_exception: {exc}"
-    finally:
-        os.environ.clear()
-        os.environ.update(old_env)
+        text = psim_log.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    # Report the planner's own reason, not the symptom. "Model not loaded" is what it
+    # prints once it has given up; the ERROR immediately before says why — a version
+    # mismatch, a missing file, a TensorRT failure. Quoting the symptom sent one
+    # investigation to the GPU while the card sat almost empty.
+    lines = text.splitlines()
+    for idx, line in enumerate(lines):
+        if not any(marker in line for marker in PLANNER_DISABLED_MARKERS):
+            continue
+        for prev in reversed(lines[max(0, idx - 40) : idx]):
+            if "[ERROR" in prev and "diffusion_planner" in prev:
+                cause = prev.split("]:", 1)[-1].strip()
+                return cause[:300]
+        return line.strip()[-300:]
+    return None
 
 
-def advance_route(
-    cfg: JobConfig,
-    env: dict[str, str],
-    goal_xy_yaw: tuple[float, float, float],
-) -> tuple[bool, str]:
-    """Clear ARRIVED route and set the next multi-goal destination."""
-    print(
-        f"[info] Advancing route to next goal "
-        f"({goal_xy_yaw[0]:.1f}, {goal_xy_yaw[1]:.1f})"
-    )
-    old_env = os.environ.copy()
+def runs_single_goal(n_legs: int, want_multi: bool | None) -> bool:
+    """Whether a run with legs extracted takes the single-goal path.
+
+    Fewer than two legs is a single-goal scenario under "on" as under "auto":
+    that path routes a cut recording to the next stop and has the goal-backoff
+    fallback, and "on" used to skip both for one leg and fail on none — the GUI
+    writes "on" for its checkbox, so its runs differed from the CLI's "auto".
+    """
+    return want_multi is not False and n_legs < 2
+
+
+def leg_cuts_on(cfg) -> bool:
+    """Planned cuts (window_eval.find_cuts) for this job: leg windows and
+    ``leg_cuts`` not off. YAML reads a bare ``off`` as False, so false / no / 0
+    are off too."""
+    value = str(getattr(cfg, "leg_cuts", "auto")).strip().lower()
+    return bool(getattr(cfg, "window_eval", False)) and value not in ("off", "false", "no", "0", "none")
+
+
+def drop_road_waits(goals: list, map_path) -> list:
+    """Leg goals without the recording's waits on the road. A stand the
+    recording made away from any bus stop (traffic, a queue, a parked car it
+    could not pass) became a leg goal and the route ended there: H81's second
+    leg ended on a crosswalk where the recorded bus stood 55 s behind a parked
+    car, and the model was made to stop in the middle of the crosswalk
+    (2026-10-29). Only stands at a map stop (within BUS_STOP_NEAR_M) and the
+    recording's end stay; the scene clock catches up past a dropped wait at
+    most 1.5x real time. Without a stop list nothing is dropped."""
+    from dp_multi_eval.compute_metrics import BUS_STOP_NEAR_M, map_bus_stops
+
+    stops = map_bus_stops(map_path)
+    if stops is None or len(goals) < 2:
+        return goals
+    def at_stop(g) -> bool:
+        return any(math.hypot(float(s["x"]) - g.x, float(s["y"]) - g.y) <= BUS_STOP_NEAR_M for s in stops)
+    kept = [g for g in goals[:-1] if g.source != "stop_segment" or at_stop(g)] + [goals[-1]]
+    for g in goals[:-1]:
+        if g not in kept:
+            print(f"[info] leg goal dropped: a wait on the road at ({g.x:.1f}, {g.y:.1f}), no bus stop within {BUS_STOP_NEAR_M:.0f} m")
+    return kept
+
+
+def _multi_goal_requested(value: bool | str | None) -> bool | None:
+    """True = on, False = off, None = "auto". On and auto extract the same legs
+    and fall back to single-goal the same way (runs_single_goal)."""
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in ("auto", ""):
+            return None
+        if token in ("true", "yes", "on", "1"):
+            return True
+        if token in ("false", "no", "off", "0"):
+            return False
+        return None
+    return bool(value) if value is not None else None
+
+
+def _parse_effective_goal(route_msg: str) -> tuple[float, float, float] | None:
+    """Coordinates of the goal route_setup actually got accepted, if it reported them."""
+    if "effective_goal_xy=" not in route_msg:
+        return None
+    raw = route_msg.split("effective_goal_xy=", 1)[1].split(";", 1)[0].strip()
     try:
-        os.environ.clear()
-        os.environ.update(env)
-        module = _load_route_setup_module(env)
-        if not hasattr(module, "advance_route_to_goal") or not hasattr(module, "pose_from_xy_yaw"):
-            return False, "advance_route_unsupported (rebuild diffusion_planner_batch_eval)"
-        goal_pose = module.pose_from_xy_yaw(*goal_xy_yaw)
-        route_order = list(cfg.multi_goal_stop_order or []) or None
-        ok, message = module.advance_route_to_goal(
-            goal_pose,
-            timeout_sec=cfg.route_setup_timeout_sec,
-            service_wait_sec=max(cfg.route_setup_timeout_sec, 60.0),
-            backend_preference="adapi",
-            map_path=cfg.map_path,
-            stop_point_goal_fallback=True,
-            route_stop_order=route_order,
-        )
-        if ok:
-            print(f"[info] {message}")
-            return True, message
-        print(f"[error] advance failed: {message}")
-        return False, message
-    except Exception as exc:  # noqa: BLE001
-        return False, f"advance_route_exception: {exc}"
-    finally:
-        os.environ.clear()
-        os.environ.update(old_env)
+        x, y, yaw = (float(v) for v in raw.split(","))
+    except ValueError:
+        return None
+    return x, y, yaw
 
 
-def reposition_stuck_ego(
-    cfg: JobConfig,
-    env: dict[str, str],
-) -> tuple[bool, str]:
-    """Shift planning-simulator ego forward while preserving the active route."""
-    distance_m = float(cfg.stuck_reposition_forward_m)
-    if distance_m <= 0.0:
-        return False, "stuck_reposition_disabled"
+def leg_is_bus_stop(
+    leg: tuple[float, float, float] | None,
+    bus_stops_xy: list[tuple[float, float]],
+    radius_m: float = 10.0,
+) -> bool:
+    """A route leg that sits on a map bus stop must be stopped at, not driven through.
 
-    print(f"[warn] Attempting stuck recovery: move ego {distance_m:.1f}m forward")
-    old_env = os.environ.copy()
+    Intermediate legs are otherwise waypoints (a recorded-route goal at a
+    junction is not a place to halt). On the vehicle a bus stop IS the
+    operator's goal: arrive, doors, next goal. 2026-08-24: legs 教会前 and
+    松風公園入口 were passed at 3.6 and 5.3 m/s where the recording stood 11 s.
+    """
+    if leg is None:
+        return False
+    return any(math.hypot(leg[0] - x, leg[1] - y) <= radius_m for x, y in bus_stops_xy)
+
+
+def extract_bag_goal_xy(bag_path: Path) -> tuple[float, float] | None:
+    """Last ego position in the source bag — what the goal would be without fallbacks."""
     try:
-        os.environ.clear()
-        os.environ.update(env)
-        module = _load_route_setup_module(env)
-        if not hasattr(module, "shift_ego_longitudinal"):
-            return False, "stuck_reposition_unsupported (rebuild diffusion_planner_batch_eval)"
-        ok, message = module.shift_ego_longitudinal(
-            distance_m,
-            timeout_sec=min(float(cfg.route_setup_timeout_sec), 45.0),
-        )
-        if ok:
-            print(f"[info] {message}")
-        else:
-            print(f"[error] {message}")
-        return bool(ok), str(message)
-    except Exception as exc:  # noqa: BLE001
-        return False, f"stuck_reposition_exception: {exc}"
-    finally:
-        os.environ.clear()
-        os.environ.update(old_env)
+        from dp_multi_eval.bag_reader import load_reference_ego
+
+        ego = load_reference_ego(bag_path)
+        if ego:
+            return ego[-1].x, ego[-1].y
+    except Exception:  # noqa: BLE001
+        pass
+    return None
 
 
-def engage_autonomous(env: dict[str, str], timeout_sec: float = 60.0) -> tuple[bool, str]:
-    """Enable Autoware control + switch to Autonomous (after reproducer is up)."""
-    services = (
-        "/api/operation_mode/enable_autoware_control",
-        "/api/operation_mode/change_to_autonomous",
-    )
-    for service in services:
-        cmd = [
-            "ros2",
-            "service",
-            "call",
-            service,
-            "autoware_adapi_v1_msgs/srv/ChangeOperationMode",
-            "{}",
-        ]
-        print(f"[info] Engage: {service}")
-        try:
-            completed = subprocess.run(
-                cmd,
-                env=env,
-                text=True,
-                timeout=timeout_sec,
-                check=False,
-                capture_output=True,
-            )
-        except subprocess.TimeoutExpired:
-            return False, f"engage_timeout:{service}"
-        if completed.returncode != 0:
-            detail = (completed.stdout or "") + (completed.stderr or "")
-            return False, f"engage_failed:{service}:{detail[-200:]}"
-    return True, "autonomous_engaged"
+
+
+
+
+
+
+
+
+
+
+
+
+def _reference_track(bag_path: Path):
+    """(t, x, y, yaw, dwells) of the recording's ego (lag.reference_track)."""
+    from dp_multi_eval.bag_reader import load_reference_ego
+    from dp_multi_eval.lag import reference_track
+
+    return reference_track(load_reference_ego(bag_path))
 
 
 def run_single_job(cfg: JobConfig) -> JobResult:
@@ -954,7 +561,7 @@ def run_scenario_simulator_job(cfg: JobConfig) -> JobResult:
     status = "failed"
     error: str | None = None
     procs: list[subprocess.Popen[Any]] = []
-    env = dict(os.environ)
+    env = workspace_env(dict(os.environ))   # packages built since the GUI started count
     env["ROS_DOMAIN_ID"] = str(cfg.domain_id)
     env.setdefault("ROS2_DISABLE_DAEMON", "1")
     scenario_path = (cfg.scenario_path or Path("")).expanduser().resolve()
@@ -970,7 +577,13 @@ def run_scenario_simulator_job(cfg: JobConfig) -> JobResult:
                 "Install Scenario Simulator v2 (simulator.repos) and source the workspace."
             )
 
-        make_model_overlay(cfg.model_config, overlay_root, cfg.planning_setting)
+        make_model_overlay(
+            cfg.model_config, overlay_root,
+            disable_long_stop=bool(cfg.disable_long_stop_fixer),
+            planning_setting=str(cfg.planning_setting),
+        )
+        if bool(cfg.match_vehicle_dynamics):
+            add_vehicle_dynamics_overlay(overlay_root, cfg.vehicle_model)
         env = env_with_overlay(env, overlay_root, cfg.domain_id)
         vehicle_id = cfg.vehicle_id or env.get("VEHICLE_ID")
         if vehicle_id:
@@ -1049,7 +662,9 @@ def run_scenario_simulator_job(cfg: JobConfig) -> JobResult:
             model_config=str(cfg.model_config),
         )
         print(f"[info] Starting ros2 bag record (use_sim_time) → {output_bag}")
-        recorder = popen(record_cmd, env=env)
+        recorder, _rec_log_handle = popen_log_file(
+            record_cmd, cfg.output_dir / "record.log", env=env
+        )
         procs.append(recorder)
         time.sleep(1.0)
         if recorder.poll() is not None:
@@ -1088,9 +703,17 @@ def run_scenario_simulator_job(cfg: JobConfig) -> JobResult:
         print(f"[error] {error}")
 
     finally:
+        stragglers = []
         for proc in reversed(procs):
-            stop_process_group(proc, grace_sec=10.0)
+            if not stop_process_group(proc, grace_sec=PSIM_STOP_GRACE_SEC):
+                stragglers.append(proc.pid)
             close_log_handle(proc)
+        if stragglers:
+            print(f"[warn] process group(s) {stragglers} outlived their stop request")
+        # Same reason as the reproducer path: a surviving planner/container process
+        # keeps its CUDA context, and the next job cannot allocate its engine.
+        if not cleanup_evaluation_processes(domain_id=cfg.domain_id):
+            print("[warn] leftover evaluation processes remain after this job")
 
     end_iso = utc_now_iso()
     bag_path_out = str(output_bag) if output_bag.exists() else None
@@ -1132,7 +755,32 @@ def run_reproducer_job(cfg: JobConfig) -> JobResult:
     error: str | None = None
     procs: list[subprocess.Popen[Any]] = []
     live_monitor = None
-    env = dict(os.environ)
+    # Every harness intervention lands here. Reported with the result so an
+    # assisted arrival is never mistaken for an unassisted one. Declared before
+    # the try so the final status write can read it even on an early failure.
+    interventions: dict[str, float] = {
+        "blinker_nudges": 0,
+        "forward_shifts": 0,
+        "reposition_total_m": 0.0,
+        "route_resets": 0,
+        "resyncs": 0,
+    }
+    resync_events: list[dict[str, Any]] = []
+    # How far the accepted goal ended up from the bag's own goal. Recorded rather
+    # than counted as an intervention: it changes what the run measures, and the
+    # metrics follow it, so it needs to be visible without failing the run.
+    goal_substituted_m: float = 0.0
+    # The recording was cut while moving and the mission goal was extended to
+    # the bus's next map stop; arrival is measured drive-through at the cut
+    # pose. See multi_goal.next_stop_ahead.
+    cut_end_drive_through = False
+    # Multi-goal: the last extracted leg is the cut pose of a recording that
+    # ended moving (source bag_end:cut).
+    cut_final_leg = False
+    # Intermediate legs dropped because their goal could not be routed to. Recorded
+    # so a run that quietly lost half its stops is not read as a clean traversal.
+    legs_skipped: int = 0
+    env = workspace_env(dict(os.environ))   # packages built since the GUI started count
     env["ROS_DOMAIN_ID"] = str(cfg.domain_id)
     env.setdefault("ROS2_DISABLE_DAEMON", "1")
     bag_path = (cfg.bag_path or Path("")).expanduser().resolve()
@@ -1143,7 +791,19 @@ def run_reproducer_job(cfg: JobConfig) -> JobResult:
         if not bag_path.exists():
             raise FileNotFoundError(f"bag_path not found: {bag_path}")
 
-        make_model_overlay(cfg.model_config, overlay_root, cfg.planning_setting)
+        indicator_merge_topic = (
+            cfg.topics.dp_turn_indicators_input
+            if bool(getattr(cfg, "indicator_merge", True))
+            else None
+        )
+        make_model_overlay(
+            cfg.model_config, overlay_root,
+            disable_long_stop=bool(cfg.disable_long_stop_fixer),
+            planning_setting=str(cfg.planning_setting),
+            dp_turn_indicator_topic=indicator_merge_topic,
+        )
+        if bool(cfg.match_vehicle_dynamics):
+            add_vehicle_dynamics_overlay(overlay_root, cfg.vehicle_model)
         env = env_with_overlay(env, overlay_root, cfg.domain_id)
         vehicle_id = cfg.vehicle_id or env.get("VEHICLE_ID")
         if vehicle_id:
@@ -1163,8 +823,18 @@ def run_reproducer_job(cfg: JobConfig) -> JobResult:
         psim_cmd = build_psim_command(cfg)
         repro_cmd = build_reproducer_command(
             bag_path,
-            search_radius=float(cfg.reproducer_search_radius_m),
-            reproduce_cool_down_sec=float(cfg.reproducer_cool_down_sec),
+            npc_reaction=bool(cfg.npc_reaction),
+            npc_reaction_decel=float(cfg.npc_reaction_decel),
+            indicator_merge_topic=indicator_merge_topic,
+            window_clock=bool(cfg.window_eval),
+            objects=bool(getattr(cfg, "scene_objects", True)),
+            map_path=cfg.map_path,
+            shield_log=cfg.output_dir / "shield_log.jsonl",
+            # With planned cuts every recorded stand closes a window at its
+            # departure: the 6 s freeze there only froze the scene (walkers
+            # standing mid-crosswalk at 0 m/s, H78 2026-11-10).
+            departure_hold=not leg_cuts_on(cfg),
+            vehicle_model=cfg.vehicle_model,
         )
         record_cmd = build_record_command(output_bag, cfg.topics.record_list())
 
@@ -1210,12 +880,31 @@ def run_reproducer_job(cfg: JobConfig) -> JobResult:
             model_config=str(cfg.model_config),
         )
         # Leftover psim/rosbridge from a previous failed job can make
-        # ``ros2 node list`` hang and block readiness forever.
-        from dp_multi_eval.process_utils import cleanup_evaluation_processes
+        # ``ros2 node list`` hang and block readiness forever, and a leftover
+        # planner node still holds its CUDA context.
+        report_gpu_zombies()
+        gpu_ok, gpu_detail = wait_for_gpu_headroom(
+            float(cfg.gpu_min_free_mib), float(cfg.gpu_wait_timeout_sec)
+        )
+        if not gpu_ok:
+            raise RuntimeError(f"planner would not fit on the GPU: {gpu_detail}")
+        print(f"[info] GPU check: {gpu_detail}")
 
         print("[info] Cleaning leftover evaluation processes before psim launch...")
-        cleanup_evaluation_processes()
-        time.sleep(2.0)
+        if not cleanup_evaluation_processes(domain_id=cfg.domain_id):
+            print("[warn] Some evaluation processes survived cleanup — this job may "
+                  "fail to allocate GPU memory")
+
+        # The scene driver replays the recorded turn indicators, which the
+        # reproducer's own load does not read. A first read is one more pass
+        # over the bag: done here, its cost does not eat into the reproducer's
+        # load budget, and every later job on this bag reads the cache.
+        try:
+            from dp_multi_eval.scene_driver import recorded_indicators
+
+            print(f"[info] Recorded turn indicators: {len(recorded_indicators(bag_path))} reports")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[warn] Recorded turn indicators not cached ({exc}); the scene driver reads them itself")
 
         psim_log = cfg.output_dir / "psim_launch.log"
         print(f"[info] Launching planning simulator...")
@@ -1223,9 +912,20 @@ def run_reproducer_job(cfg: JobConfig) -> JobResult:
         print(f"[info] psim cmd: {' '.join(psim_cmd)}")
         psim, _psim_log_handle = popen_log_file(psim_cmd, psim_log, env=env)
         procs.append(psim)
+        # The reproducer's bag load (~20 s on a 79 GB bag) needs nothing from
+        # psim, so it runs beside psim's own startup instead of after the route
+        # was set; objects are only checked for once the ego is localized.
+        print("[info] Starting the scene driver (original perception_reproducer)...")
+        repro, _repro_log_handle = popen_log_file(
+            repro_cmd, cfg.output_dir / "reproducer.log", env=env
+        )
+        procs.append(repro)
 
         psim_ready, psim_detail = wait_for_services(env, cfg.psim_startup_sec, psim=psim)
         if not psim_ready:
+            reason = launch_failure_reason(psim_log) if psim.poll() is not None else None
+            if reason:
+                psim_detail = f"{psim_detail}: {reason}"
             psim_tail = tail_text_file(psim_log)
             if psim_tail.strip():
                 print(f"[error] psim_launch.log (tail):\n{psim_tail}")
@@ -1233,6 +933,13 @@ def run_reproducer_job(cfg: JobConfig) -> JobResult:
                 f"planning simulator not ready within {cfg.psim_startup_sec:.0f}s: {psim_detail}"
             )
         print(f"[info] Planning simulator stack ready ({psim_detail})")
+
+        # The planner comes up even when its engine failed to build, and then never
+        # publishes a trajectory. Without this the job looks stuck and the real cause
+        # sits unread in the log.
+        disabled = planner_inference_disabled(psim_log)
+        if disabled:
+            raise RuntimeError(f"planner inference disabled: {disabled}")
 
         update_job_progress(
             cfg.output_dir,
@@ -1247,9 +954,11 @@ def run_reproducer_job(cfg: JobConfig) -> JobResult:
                 "routing services not visible in ROS graph after startup waits"
             )
 
-        # Resolve route legs (single-goal by default)
+        # Resolve route legs. multi_goal may be "auto", in which case the bag decides.
         route_goals: list[tuple[float, float, float]] = []
-        if cfg.multi_goal:
+        want_multi = _multi_goal_requested(cfg.multi_goal)
+        multi_goal_active = False
+        if want_multi is not False:
             from dp_multi_eval.multi_goal import extract_route_goals, goals_to_jsonable
 
             extracted = extract_route_goals(
@@ -1262,11 +971,45 @@ def run_reproducer_job(cfg: JobConfig) -> JobResult:
                 stop_points_csv=cfg.stop_points_csv,
                 stop_order=list(cfg.multi_goal_stop_order or []),
             )
-            if not extracted:
-                raise RuntimeError(
-                    "multi_goal produced no remaining stops for this bag start pose"
+            if cfg.window_eval:
+                extracted = drop_road_waits(extracted, cfg.map_path)
+            if runs_single_goal(len(extracted), want_multi):
+                print(
+                    f"[info] multi_goal={cfg.multi_goal}: {len(extracted)} leg(s) found in the bag "
+                    "— running single-goal"
                 )
+                # Single-goal, but not goal_from_bag: the extraction has already
+                # merged the settled bag end with the recorded mission goals, and
+                # discarding it here handed the route the raw cut-off pose again.
+                # Observed as "keeping the mission goal" in one line and
+                # goal=(50295.74, 9849.29) — the intersection the merge had just
+                # rejected — in the next, with every set_route "empty".
+                if extracted:
+                    single = extracted[0]
+                    route_goals = [(single.x, single.y, single.yaw)]
+                    (cfg.output_dir / "route_goals.json").write_text(
+                        json.dumps(
+                            {
+                                "goals": goals_to_jsonable(extracted),
+                                "source": cfg.multi_goal_source,
+                                "stop_order": list(cfg.multi_goal_stop_order or []),
+                            },
+                            indent=2,
+                            ensure_ascii=False,
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    print(
+                        f"[info] single goal from the merged extraction: "
+                        f"({single.x:.1f}, {single.y:.1f}) source={single.source}"
+                    )
+                extracted = []
+        if want_multi is not False and extracted:
+            multi_goal_active = True
+            print(f"[info] multi_goal active: {len(extracted)} leg(s)")
             route_goals = [(g.x, g.y, g.yaw) for g in extracted]
+            cut_final_leg = bool(extracted) and extracted[-1].source == "bag_end:cut"
             (cfg.output_dir / "route_goals.json").write_text(
                 json.dumps(
                     {
@@ -1290,15 +1033,211 @@ def run_reproducer_job(cfg: JobConfig) -> JobResult:
                     f"({g.x:.1f}, {g.y:.1f}) source={g.source}"
                 )
 
+        # Intermediate legs are waypoints, not requirements. stop_segments cannot tell
+        # a bus stop from a wait at a traffic light, and an incidental dwell makes a
+        # poor goal: the vehicle stopped straddling lanelets, so the mission planner
+        # rejects it with "Goal's footprint exceeds lane!" — and no amount of pulling
+        # the goal back can fix that. Skipping such a leg costs nothing: the ego still
+        # drives through that point, it just does not stop and register there. Failing
+        # the whole bag over it costs everything.
         first_goal = route_goals[0] if route_goals else None
-        ok, route_msg = setup_route(cfg, env, goal_xy_yaw=first_goal)
+        # A recording cut while the bus was still moving ends at an arbitrary
+        # pose — on 2026-04-28 the stop line of a green-lit junction. The bus's
+        # real destination was its next map stop, past the junction. Routing
+        # to that stop gives the model the road context the vehicle had (the
+        # route continues, so it sets up for the turn instead of parking on
+        # the line); the run still ends at the cut pose, drive-through.
+        cut_end_goal = None
+        cut_end_pose = None
+        if not multi_goal_active or cut_final_leg:
+            try:
+                from dp_multi_eval.multi_goal import (
+                    bag_end_pose, bag_path_xy, next_stop_ahead, recorded_destination,
+                    recorded_stop_successors,
+                )
+
+                end_pose = bag_end_pose(bag_path)
+                if end_pose is not None and end_pose[3] > 1.0:
+                    # Where the bus was going: its own route's goal when the
+                    # recording carries it; else the stop that follows the
+                    # last one it left, by the routes the vehicle recorded
+                    # on this line; a written stop order and the nearest stop
+                    # ahead only after those.
+                    cand = recorded_destination(bag_path, end_pose[:2])
+                    if cand is None:
+                        cand = next_stop_ahead(
+                            end_pose[:3], map_path=cfg.map_path,
+                            stop_points_csv=cfg.stop_points_csv,
+                            stop_order=list(cfg.multi_goal_stop_order or []),
+                            recorded_path_xy=bag_path_xy(bag_path),
+                            successors=recorded_stop_successors(
+                                bag_path.parent, cfg.map_path, cfg.stop_points_csv),
+                        )
+                    if cand is not None:
+                        cut_end_goal = (cand.x, cand.y, cand.yaw)
+                        cut_end_pose = end_pose[:3]
+                        print(
+                            f"[info] recording was cut while moving "
+                            f"({end_pose[3]:.1f} m/s); mission goal extended to "
+                            f"{cand.source.split(':', 1)[-1]} "
+                            f"{math.hypot(cand.x - end_pose[0], cand.y - end_pose[1]):.0f} m "
+                            "ahead — arrival measured drive-through at the cut pose"
+                        )
+            except Exception as exc:  # noqa: BLE001
+                print(f"[warn] cut-end goal extension skipped: {exc}")
+        if cut_end_goal is not None and not multi_goal_active:
+            first_goal = cut_end_goal
+        # An intermediate leg goal may NOT be substituted with an earlier map
+        # stop: the walk-back invented a full stop at a bay the recording
+        # drove past at 3 m/s, and v4 does not restart from an artificial
+        # at-goal state it never sees on the vehicle. Unroutable intermediates
+        # merge forward instead; only the final goal may be relocated.
+        ok, route_msg = setup_route(
+            cfg, env, goal_xy_yaw=first_goal,
+            allow_goal_substitution=(not multi_goal_active or len(route_goals) <= 1),
+        )
+        if ok and cut_end_goal is not None and not multi_goal_active:
+            cut_end_drive_through = True
+        if not ok and first_goal is not None and not multi_goal_active:
+            # The merged goal is the better destination when the planner takes
+            # it — but at a stop bay it can fail the footprint check outright
+            # ("Goal's footprint exceeds lane!"), while the raw bag-end path
+            # with its own backoff machinery was being accepted here for four
+            # passes straight. Acceptance belongs to the live planner, not to
+            # any approximation of it: try the good goal first, fall back to
+            # the proven one.
+            print(
+                f"[warn] merged goal was refused ({route_msg[:120]}) — "
+                "retrying with the raw bag-end goal"
+            )
+            ok, route_msg = setup_route(cfg, env, goal_xy_yaw=None)
+            if ok:
+                route_goals.clear()
+        while not ok and multi_goal_active and len(route_goals) > 1:
+            skipped = route_goals.pop(0)
+            extracted = extracted[1:]
+            print(
+                f"[warn] Leg goal ({skipped[0]:.1f}, {skipped[1]:.1f}) is not routable "
+                f"— skipping it and routing to the next of {len(route_goals)} leg(s)"
+            )
+            legs_skipped += 1
+            first_goal = route_goals[0]
+            ok, route_msg = setup_route(
+                cfg, env, goal_xy_yaw=first_goal,
+                allow_goal_substitution=(len(route_goals) <= 1),
+            )
         if not ok:
             raise RuntimeError(f"route setup failed: {route_msg}")
         print(f"[info] {route_msg}")
 
+        # Score the run against the goal the planner accepted, not the one taken from
+        # the bag. Snapping, the stop fallback and the goal backoff all move it, and
+        # until now only multi-goal runs recorded the result — so a single-goal run
+        # whose goal was relocated was measured against a pose the ego was never
+        # routed to, and could not pass however well it drove.
+        effective_goal = _parse_effective_goal(route_msg)
+        # Used only for the near-goal arrival check below, never for re-routing.
+        arrival_goal = effective_goal
+        if cut_end_drive_through and cut_end_pose is not None:
+            # The mission goal is the next stop; the run ends at the cut pose.
+            arrival_goal = cut_end_pose
+            (cfg.output_dir / "route_goals.json").write_text(
+                json.dumps(
+                    {
+                        "goals": [
+                            {
+                                "x": cut_end_pose[0],
+                                "y": cut_end_pose[1],
+                                "yaw": cut_end_pose[2],
+                                "source": "bag_end:cut_while_moving",
+                            }
+                        ],
+                        "mission_goal": (
+                            {
+                                "x": effective_goal[0],
+                                "y": effective_goal[1],
+                                "yaw": effective_goal[2],
+                                "source": "route_setup:effective (next map stop)",
+                            }
+                            if effective_goal is not None
+                            else None
+                        ),
+                        "arrival": "drive_through_at_cut_pose",
+                        "route_setup": route_msg,
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        elif effective_goal is not None and not multi_goal_active:
+            bag_goal = extract_bag_goal_xy(bag_path)
+            moved = (
+                math.hypot(effective_goal[0] - bag_goal[0], effective_goal[1] - bag_goal[1])
+                if bag_goal is not None
+                else float("nan")
+            )
+            goal_substituted_m = moved
+            (cfg.output_dir / "route_goals.json").write_text(
+                json.dumps(
+                    {
+                        "goals": [
+                            {
+                                "x": effective_goal[0],
+                                "y": effective_goal[1],
+                                "yaw": effective_goal[2],
+                                "source": "route_setup:effective",
+                            }
+                        ],
+                        "bag_goal": (
+                            {"x": bag_goal[0], "y": bag_goal[1]} if bag_goal else None
+                        ),
+                        "goal_moved_m": None if moved != moved else round(moved, 3),
+                        "route_setup": route_msg,
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            if moved == moved and moved > 1.0:
+                print(
+                    f"[warn] routing goal differs from the bag goal by {moved:.1f} m — "
+                    f"metrics will score against the routed goal"
+                )
+
+        # Multi-goal: the first leg is driven to whatever pose route setup got
+        # accepted, which is not always the one it was handed — a rejected goal is
+        # backed off along its lane or replaced by a nearby map stop. Autoware then
+        # drives to the accepted pose while the harness watches the recorded one, so
+        # the ego sails past its real goal (measured: 12 m away at closest approach,
+        # tolerance 5 m), never registers ARRIVED, and the leg fails as
+        # "route_not_arrived" after driving perfectly. Adopt the accepted pose.
+        if multi_goal_active and effective_goal is not None and route_goals:
+            moved_leg = math.hypot(
+                effective_goal[0] - route_goals[0][0],
+                effective_goal[1] - route_goals[0][1],
+            )
+            if moved_leg > 0.5:
+                print(
+                    f"[info] Leg 1 goal was relocated {moved_leg:.1f} m by route setup "
+                    "— tracking arrival against the accepted pose"
+                )
+                goal_substituted_m = max(goal_substituted_m, moved_leg)
+            route_goals[0] = effective_goal
+            if extracted:
+                extracted[0] = replace(
+                    extracted[0],
+                    x=effective_goal[0],
+                    y=effective_goal[1],
+                    yaw=effective_goal[2],
+                )
+
         # If route setup had to skip unroutable stop goals (empty lanelet path),
         # drop those legs so ARRIVED waits match the effective goal.
-        if cfg.multi_goal and route_goals and "effective_goal=" in route_msg:
+        if multi_goal_active and route_goals and "effective_goal=" in route_msg:
             effective = route_msg.split("effective_goal=", 1)[1].split(";", 1)[0].strip()
             if effective:
                 matched_idx = None
@@ -1368,6 +1307,7 @@ def run_reproducer_job(cfg: JobConfig) -> JobResult:
                 job_id=cfg.output_dir.name,
                 bag_key=bag_path.name,
                 goals=goal_markers,
+                env=env,
             )
             live_monitor.set_phase(
                 "loading_perception",
@@ -1380,16 +1320,9 @@ def run_reproducer_job(cfg: JobConfig) -> JobResult:
                 "Live Progress / dashboard.html)"
             )
 
-        print(
-            f"[info] Starting perception_reproducer "
-            f"(search_radius={cfg.reproducer_search_radius_m:.1f}m)..."
-        )
-        repro = popen(repro_cmd, env=env)
-        procs.append(repro)
         # Psim's tracker publishes empty TrackedObjects; kill it so the
         # reproducer owns the topic. Full bags load slowly — poll until objects
         # appear instead of a short fixed sleep.
-        time.sleep(2.0)
         kill_conflicting_perception_nodes()
         load_timeout = perception_load_timeout_sec(cfg, bag_duration)
         print(
@@ -1397,7 +1330,9 @@ def run_reproducer_job(cfg: JobConfig) -> JobResult:
             f"to finish loading the full bag and publish objects "
             f"(input duration={bag_duration})..."
         )
-        ready_ok, ready_msg = wait_for_perception_ready(cfg, timeout_sec=load_timeout)
+        ready_ok, ready_msg = wait_for_perception_ready(
+            cfg, timeout_sec=load_timeout, reproducer=repro
+        )
         kill_conflicting_perception_nodes()
         if ready_ok:
             print(f"[info] {ready_msg}")
@@ -1418,13 +1353,35 @@ def run_reproducer_job(cfg: JobConfig) -> JobResult:
             bag_path=str(bag_path),
             model_config=str(cfg.model_config),
         )
+        throttle_cmd = build_objects_throttle_command(cfg.topics)
+        if throttle_cmd is not None:
+            print(
+                f"[info] Throttling objects to {cfg.topics.objects_record_hz:.0f} Hz "
+                f"→ {cfg.topics.objects_throttled_topic}"
+            )
+            throttle_proc, _thr_log = popen_log_file(
+                throttle_cmd, cfg.output_dir / "objects_throttle.log", env=env
+            )
+            procs.append(throttle_proc)
+            # The recorder must find the topic advertised before it subscribes.
+            time.sleep(2.0)
+
         print(f"[info] Starting ros2 bag record → {output_bag}")
-        recorder = popen(record_cmd, env=env)
+        recorder, _rec_log_handle = popen_log_file(
+            record_cmd, cfg.output_dir / "record.log", env=env
+        )
         procs.append(recorder)
         time.sleep(1.0)
         if recorder.poll() is not None:
             raise RuntimeError("ros2 bag record exited immediately")
 
+        if float(cfg.planner_warmup_timeout_sec) > 0.0:
+            warm_ok, warm_msg = wait_for_first_trajectory(
+                cfg, float(cfg.planner_warmup_timeout_sec)
+            )
+            print(f"[info] {warm_msg}")
+            if not warm_ok:
+                raise RuntimeError(warm_msg)
         ok, engage_msg = engage_autonomous(env, timeout_sec=cfg.auto_engage_timeout_sec)
         if not ok:
             print(f"[warn] {engage_msg} — continuing; run may end as stuck/timeout")
@@ -1442,48 +1399,172 @@ def run_reproducer_job(cfg: JobConfig) -> JobResult:
         if live_monitor is not None:
             live_monitor.set_phase("driving", note="auto engaged")
 
-        legs = route_goals if (cfg.multi_goal and len(route_goals) > 1) else [None]
-        drive_deadline = time.time() + run_timeout
-        status = "done"
-        error = None
+        # What the recording did at each place, so a stall can be judged against the
+        # wait that actually belongs there rather than one number for the whole run.
+        from dp_multi_eval.dwell_profile import load_dwell_profile, stall_budget_sec
+
+        dwell_profile = load_dwell_profile(bag_path, stop_speed_mps=cfg.stall_speed_mps)
+        if dwell_profile is None:
+            print("[warn] no dwell profile from the source bag; stalls fall back to "
+                  "stuck_abort_sec everywhere")
+        reference_track = None
+        if float(cfg.resync_lag_sec) > 0.0:
+            reference_track = _reference_track(bag_path)
+            if reference_track is None:
+                print("[warn] no reference ego track from the source bag; re-sync is off")
+            else:
+                print(
+                    f"[info] re-sync on: the ego is set back onto the recording once it is "
+                    f"{cfg.resync_lag_sec:.0f}s behind it ({len(reference_track[0])} track samples)"
+                )
+
+        legs = route_goals if (multi_goal_active and len(route_goals) > 1) else [None]
+        bus_stops_xy: list[tuple[float, float]] = []
+        try:
+            from dp_multi_eval.multi_goal import _load_map_stop_points, resolve_stop_points_csv
+
+            bus_stops_xy = [
+                (float(st.x), float(st.y))
+                for st in _load_map_stop_points(
+                    resolve_stop_points_csv(cfg.map_path, cfg.stop_points_csv)
+                )
+            ]
+        except Exception as exc:  # noqa: BLE001
+            print(f"[warn] stop points unavailable ({exc}); intermediate legs stay drive-through")
         leg_cap = max(
             5.0,
             float(cfg.multi_goal_leg_timeout_sec or cfg.route_timeout_sec or 300.0),
         )
+        # The whole drive shared one budget while every leg was promised leg_cap, so a
+        # multi-leg run could not honour its own configuration: with two legs and both
+        # values at 300 s, leg 1 consumed the budget and leg 2 started with 5 s left and
+        # timed out on arrival. Give the drive at least what the legs are promised.
+        if len(legs) > 1:
+            needed = leg_cap * len(legs)
+            if needed > run_timeout:
+                print(
+                    f"[info] multi_goal: raising the drive budget {run_timeout:.0f}s → "
+                    f"{needed:.0f}s ({len(legs)} legs × {leg_cap:.0f}s per leg)"
+                )
+                run_timeout = needed
+        drive_deadline = time.time() + run_timeout
+        status = "done"
+        error = None
         stuck_kw = dict(
             stuck_blinker_nudge=bool(cfg.stuck_blinker_nudge),
             stuck_blinker_speed_mps=float(cfg.stuck_blinker_speed_mps),
+            stall_speed_mps=float(cfg.stall_speed_mps),
             stuck_blinker_trigger_sec=float(cfg.stuck_blinker_trigger_sec),
             stuck_blinker_hold_sec=float(cfg.stuck_blinker_hold_sec),
             stuck_blinker_cooldown_sec=float(cfg.stuck_blinker_cooldown_sec),
+            stack_hold_detect_sec=float(cfg.stack_hold_detect_sec),
+            resync_lag_sec=float(cfg.resync_lag_sec) if reference_track is not None else 0.0,
+            reference_track=reference_track,
+            counters=interventions,
         )
-        reposition_enabled = float(cfg.stuck_reposition_forward_m) > 0.0
         reposition_trigger = max(
             5.0,
             float(cfg.stuck_reposition_trigger_sec or 30.0),
         )
-        reposition_max = max(0, int(cfg.stuck_reposition_max_count or 0))
+        # stuck_reposition_max_count: 0 = never reposition, N>0 = at most N shifts,
+        # negative = unlimited. This used to read 0 as "unlimited", the opposite of
+        # what the name says, so a hopeless scenario teleported until the route
+        # timeout expired instead of being abandoned.
+        reposition_max = int(cfg.stuck_reposition_max_count)
+        reposition_unlimited = reposition_max < 0
+        reposition_enabled = float(cfg.stuck_reposition_forward_m) > 0.0 and (
+            reposition_unlimited or reposition_max > 0
+        )
 
         def wait_with_stuck_recovery(
             wait_sec: float,
             current_goal: tuple[float, float, float] | None,
+            require_stop_at_goal: bool = True,
+            arrival_tolerance_m: float | None = None,
         ) -> tuple[str, str]:
             """Wait for ARRIVED; if stopped too long, shift ego forward and retry.
 
             Used for red-light / lead-vehicle stalls: every
             ``stuck_reposition_trigger_sec`` of near-zero speed, move ego
             ``stuck_reposition_forward_m`` and continue the same leg.
+
+            ``stuck_abort_sec`` is enforced here, as a budget accumulated across
+            repositions. Each call to ``wait_for_route_arrived`` builds a fresh
+            waiter whose stall timer starts at zero, so a per-call abort can never
+            be reached once repositioning restarts the wait — the job would run to
+            the full route timeout instead of giving up.
             """
             deadline = time.time() + wait_sec
+            # Time provably lost to the departure hold is credited back to the
+            # leg, up to a cap. The hold is measured and attributed on its own
+            # (stack_intervention, green_latched_sec); charging it against the
+            # route clock as well ended a leg as "leg_wait_exhausted" with 81%
+            # of its trajectories stubbed — the timeout was measuring the latch,
+            # not the driving. The cap keeps a run that is nothing but holds
+            # from living forever.
+            hold_credit_left = 240.0
+            creep_marks: list[tuple[float, float, float]] = []
+            creep_extension_left = max(60.0, 0.5 * float(wait_sec))
             shifts = 0
+            stalled_sec = 0.0
+            # Red-phase backoff for the in-place nudge. A nudge whose speed is
+            # gone again within seconds was braked away on purpose — the model
+            # wants to stay stopped, likeliest at a red light — and repeating it
+            # every cycle burned the whole nudge budget inside one red phase.
+            # Each ineffective nudge doubles the pause before the next; the
+            # first effective one clears it.
+            nudge_backoff_sec = 0.0
+            last_nudge_t = 0.0
+            # Where the previous hold happened. Ego movement between holds means
+            # the escapes are working — the run reached 8.33 m/s between two of
+            # them and was still charged 6 s per hold until stuck_abort_sec
+            # filled at nudges=5. Progress resets the stall ledger; only holds
+            # at the same spot accumulate toward giving up.
+            hold_x = float("nan")
+            hold_y = float("nan")
+            holds_here = 0
+            yield_frozen_sec = 0.0
+            last_blocked_m: float | None = None
+            global_abort = max(0.0, float(cfg.stuck_abort_sec or 0.0))
             last_detail = "wait_not_started"
 
             while True:
                 remaining = deadline - time.time()
                 if remaining < 5.0:
+                    # A creeping final approach is still arriving. The waiter's
+                    # own extension never sees it — a stack_hold returns every
+                    # ~6 s, so the wait re-enters here where the clock actually
+                    # runs out. Same rule, same bound: within 60 m of the goal,
+                    # >2 m of motion across recent hold events earns 30 s more,
+                    # to at most +50% of the leg budget in total.
+                    goal_for_creep = current_goal if current_goal is not None else arrival_goal
+                    hx0 = float(interventions.get("stall_x", float("nan")))
+                    hy0 = float(interventions.get("stall_y", float("nan")))
+                    old_mark = next(
+                        (m for m in creep_marks if time.time() - m[0] >= 55.0),
+                        creep_marks[0] if creep_marks else None,
+                    )
+                    if (
+                        creep_extension_left > 0.0
+                        and goal_for_creep is not None
+                        and hx0 == hx0
+                        and old_mark is not None
+                        and math.hypot(hx0 - goal_for_creep[0], hy0 - goal_for_creep[1]) < 60.0
+                        and math.hypot(hx0 - old_mark[1], hy0 - old_mark[2]) > 2.0
+                    ):
+                        deadline += 30.0
+                        creep_extension_left -= 30.0
+                        print(
+                            f"[info] creeping toward the goal — extending leg "
+                            f"wait by 30s ({creep_extension_left:.0f}s left)"
+                        )
+                        continue
+                    lx = float(interventions.get("stall_x", float("nan")))
+                    ly = float(interventions.get("stall_y", float("nan")))
                     return "timeout", (
                         f"{last_detail}; leg_wait_exhausted "
                         f"forward_shifts={shifts}"
+                        + (f" ego=({lx:.1f},{ly:.1f})" if lx == lx else "")
                     )
 
                 abort_after = (
@@ -1491,11 +1572,22 @@ def run_reproducer_job(cfg: JobConfig) -> JobResult:
                     if reposition_enabled
                     else float(cfg.stuck_abort_sec)
                 )
+                # current_goal is None on single-goal runs, which used to disable the
+                # near-goal arrival check entirely: the run then depended solely on
+                # /api/routing/state reaching ARRIVED. A planner that stops a few
+                # metres short — likeliest when the goal sits mid-road rather than at
+                # a stop line — was recorded as a timeout despite having arrived.
+                # arrival_goal is read-only here; re-routing still keys off current_goal.
                 wait_status, wait_detail = wait_for_route_arrived(
                     env,
                     remaining,
-                    goal_xy_yaw=current_goal,
-                    near_goal_arrival_m=float(cfg.multi_goal_arrival_tolerance_m),
+                    goal_xy_yaw=current_goal if current_goal is not None else arrival_goal,
+                    near_goal_arrival_m=float(
+                        arrival_tolerance_m
+                        if arrival_tolerance_m is not None
+                        else cfg.multi_goal_arrival_tolerance_m
+                    ),
+                    require_stop_at_goal=require_stop_at_goal,
                     stuck_abort_sec=abort_after,
                     **stuck_kw,
                 )
@@ -1506,9 +1598,303 @@ def run_reproducer_job(cfg: JobConfig) -> JobResult:
                             f"{wait_detail}; forward_shifts={shifts}"
                         )
                     return wait_status, wait_detail
-                if wait_status != "stuck" or not reposition_enabled:
+                # "stale" means the simulator stopped publishing: repositioning a
+                # vehicle nothing is simulating cannot help, so end the leg here.
+                # Handled regardless of the forward-shift setting: this branch
+                # is the patient one (dwell budgets, yield freeze, in-place
+                # nudge) and must not vanish with the teleport.
+                if wait_status == "resync":
+                    # The ego fell behind the recording. Set it back onto the
+                    # recorded track (resync.py) and keep the leg; the event is
+                    # the measurement. Harness time spent here is credited back
+                    # to the leg.
+                    done = int(interventions.get("resyncs", 0))
+                    if done >= RESYNC_MAX:
+                        return "stuck", f"{wait_detail}; resync_budget={RESYNC_MAX}"
+                    print(f"[warn] {wait_detail} — re-sync #{done + 1}")
+                    t_sync = time.time()
+                    ok_sync, sync_detail, event = resync_ego(env)
+                    deadline += time.time() - t_sync
+                    if not ok_sync:
+                        return "stuck", f"{wait_detail}; {sync_detail}"
+                    interventions["resyncs"] = done + 1
+                    lag_m = re.search(r"ego ([\d.]+)s behind", wait_detail)
+                    event.update(
+                        {
+                            "n": done + 1,
+                            "t_wall": round(t_sync, 3),
+                            "lag_sec": float(lag_m.group(1)) if lag_m else None,
+                            "leg": current_goal,
+                        }
+                    )
+                    resync_events.append(event)
+                    (cfg.output_dir / "resyncs.json").write_text(
+                        json.dumps(resync_events, indent=1) + "\n", encoding="utf-8"
+                    )
+                    print(f"[info] {sync_detail}")
+                    last_detail = f"{wait_detail}; {sync_detail}"
+                    continue
+                if wait_status == "stack_hold":
+                    # The fixer's hold, caught by its live signature instead of
+                    # ridden out by the stall timer. Escape in place: motion
+                    # releases the hold, a 5 m teleport lands at rest and re-arms
+                    # it — measured as four consecutive ~40 s bites through one
+                    # segment. The ego has not moved, so the route it is on is
+                    # still the route: no re-route, just motion and re-engage.
+                    hx = float(interventions.get("stall_x", float("nan")))
+                    hy = float(interventions.get("stall_y", float("nan")))
+                    if hx == hx:
+                        now_m = time.time()
+                        creep_marks.append((now_m, hx, hy))
+                        creep_marks[:] = [m for m in creep_marks if now_m - m[0] <= 65.0]
+                    moved = (
+                        math.hypot(hx - hold_x, hy - hold_y)
+                        if hold_x == hold_x and hx == hx
+                        else float("inf")
+                    )
+                    blocked_m = _parse_ahead_blocked(wait_detail)
+                    # Following a queue is progress, not a stall. The ego died
+                    # 30 s into a queue whose lead car had covered 49 m in the
+                    # previous minute: each creep was 1-2 m, under the 5 m reset,
+                    # and the dwell radius missed the recording's wait 20 m up
+                    # the same queue. A blocked hold resets on queue-sized creep,
+                    # or whenever the car ahead has visibly pulled away.
+                    # 2 m unblocked: v4 departs bus stops by creeping (measured
+                    # 9 m over 174 s before pulling away); a 5 m bar let the
+                    # ledger fill mid-creep and killed departures in progress.
+                    # A dead stop still moves 0 m and still dies on budget.
+                    reset_at = 1.5 if blocked_m is not None else 2.0
+                    pulled_away = (
+                        blocked_m is not None
+                        and last_blocked_m is not None
+                        and blocked_m > last_blocked_m + 1.0
+                    )
+                    if moved > reset_at or pulled_away:
+                        stalled_sec = 0.0
+                        holds_here = 0
+                        nudge_backoff_sec = 0.0
+                        yield_frozen_sec = 0.0
+                        # The anchor moves only on reset: measuring hold-to-hold
+                        # displacement made a 0.05 m/s creep invisible (0.4 m
+                        # between events, 3+ m over the ledger's life) and a
+                        # departure in progress was still budget-killed 30 m
+                        # from its goal. Cumulative-from-anchor sees it.
+                        hold_x, hold_y = hx, hy
+                    if hold_x != hold_x:
+                        hold_x, hold_y = hx, hy
+                    last_blocked_m = blocked_m
+                    if (
+                        "front_traffic" in wait_detail
+                        and blocked_m is None
+                        and yield_frozen_sec < 90.0
+                    ):
+                        # Moving traffic crosses the ego's front: the hold is
+                        # yielding, and yielding spends no hold budget. The
+                        # 2026-04-28 junction died 30 s into a wait for cross
+                        # traffic the recording never faced (it hit the gap).
+                        # The freeze is bounded: governed NPCs run their paths
+                        # once (monotonic shield clocks), and the leg deadline
+                        # still rules over everything.
+                        credit = min(hold_credit_left, float(cfg.stack_hold_detect_sec))
+                        if credit > 0.0:
+                            deadline += credit
+                            hold_credit_left -= credit
+                        yield_frozen_sec += float(cfg.stack_hold_detect_sec)
+                        print(
+                            f"[info] yielding to moving traffic in view — "
+                            f"hold budget frozen ({yield_frozen_sec:.0f}s/90s)"
+                        )
+                        last_nudge_t = time.time()
+                        continue
+                    holds_here += 1
+                    stalled_sec += float(cfg.stack_hold_detect_sec)
+                    credit = min(hold_credit_left, float(cfg.stack_hold_detect_sec) + 10.0)
+                    if credit > 0.0:
+                        deadline += credit
+                        hold_credit_left -= credit
+                    # A place the recording waited earns the wait, in this branch
+                    # too. The regular stall path already budgets from the dwell
+                    # profile; this one compared against the raw 30 s abort and
+                    # gave up 33 s into a queue the recording itself sat in for
+                    # 56 s — with the car ahead about to move.
+                    hold_budget = global_abort
+                    if hx == hx:
+                        # A queue is one wait spread over its own length: the
+                        # recording's 56 s dwell sat 19 m up the road from where
+                        # this ego joined the same queue, and the default 6 m
+                        # radius missed it — the ledger filled while the replayed
+                        # queue phase, which lasts as long as the recorded one,
+                        # was still standing. Search at queue scale.
+                        here_budget, recorded_dwell = stall_budget_sec(
+                            dwell_profile, hx, hy, floor_sec=global_abort,
+                            radius_m=25.0,
+                        )
+                        if recorded_dwell == recorded_dwell and here_budget > hold_budget:
+                            if holds_here == 1:
+                                print(
+                                    f"[info] the recording waited "
+                                    f"{recorded_dwell:.0f}s here; allowing "
+                                    f"{here_budget:.0f}s of hold before giving up"
+                                )
+                            hold_budget = here_budget
+                    max_holds = max(8, int(hold_budget / max(1.0, float(cfg.stack_hold_detect_sec))) + 2)
+                    if (hold_budget > 0.0 and stalled_sec >= hold_budget) or holds_here > max_holds:
+                        return "stuck", (
+                            f"{wait_detail}; stack_hold_budget "
+                            f"held_here={stalled_sec:.0f}s/{hold_budget:.0f}s "
+                            f"nudges_here={holds_here} "
+                            f"total_nudges={int(interventions.get('stack_holds', 0))}"
+                            + (f" ego=({hx:.1f},{hy:.1f})" if hx == hx else "")
+                        )
+                    if "ahead_blocked" in wait_detail:
+                        # Something stands on the ego's nose. Speed cannot escape
+                        # this hold — it can only manufacture a contact, and did:
+                        # a nudged ego kissed the bumper of a car stopped 2 m
+                        # ahead, scored ego_caused. Wait like a red light instead.
+                        nudge_backoff_sec = min(24.0, max(6.0, nudge_backoff_sec * 2.0))
+                        print(
+                            f"[info] hold with an object ahead — no nudge; "
+                            f"waiting (next check >={nudge_backoff_sec:.0f}s)"
+                        )
+                        last_nudge_t = time.time()
+                        continue
+                    goal_for_nudge = (
+                        current_goal if current_goal is not None else arrival_goal
+                    )
+                    if (
+                        goal_for_nudge is not None
+                        and hx == hx
+                        and math.hypot(hx - goal_for_nudge[0], hy - goal_for_nudge[1]) < 40.0
+                    ):
+                        # An ego slowing inside the arrival zone is arriving,
+                        # not stuck. Nudging it produced the mid-road lurch
+                        # visible on 2026-04-28's video: the model plans its
+                        # goal stop, the harness injects speed, the model
+                        # brakes it away — repeat. Wait; the arrival check and
+                        # the near-goal completion own this zone.
+                        nudge_backoff_sec = min(24.0, max(6.0, nudge_backoff_sec * 2.0))
+                        print(
+                            f"[info] hold inside the arrival zone — no nudge; "
+                            f"waiting (next check >={nudge_backoff_sec:.0f}s)"
+                        )
+                        last_nudge_t = time.time()
+                        continue
+                    since_last = time.time() - last_nudge_t
+                    if since_last < nudge_backoff_sec:
+                        # Still inside the pause an ineffective nudge earned.
+                        # The wait loop keeps watching; a red light needs time,
+                        # not another shove.
+                        continue
+                    print(f"[warn] {wait_detail} — in-place nudge")
+                    last_nudge_t = time.time()
+                    recovered, recovery_detail = reposition_stuck_ego(
+                        cfg, env, distance_m=0.0
+                    )
+                    if not recovered:
+                        return "stuck", f"{wait_detail}; {recovery_detail}"
+                    reached = re.search(r"ego now (\d+(?:\.\d+)?)", recovery_detail)
+                    if reached is not None and float(reached.group(1)) < 0.3:
+                        nudge_backoff_sec = min(
+                            24.0, max(6.0, nudge_backoff_sec * 2.0)
+                        )
+                        print(
+                            f"[info] nudge was braked away immediately — the "
+                            f"model is holding this stop; next nudge in "
+                            f">={nudge_backoff_sec:.0f}s"
+                        )
+                    else:
+                        nudge_backoff_sec = 0.0
+                    engaged, engage_detail = engage_autonomous(
+                        env, timeout_sec=cfg.auto_engage_timeout_sec
+                    )
+                    if not engaged:
+                        return "stuck", (
+                            f"{wait_detail}; {recovery_detail}; "
+                            f"reengage_failed: {engage_detail}"
+                        )
+                    continue
+                if wait_status != "stuck":
                     return wait_status, wait_detail
-                if reposition_max and shifts >= reposition_max:
+                # Patient budgeting below runs whether or not the forward
+                # shift is enabled: disabling the 5 m teleport used to also
+                # disable the dwell-aware budget, and a 40 s model hesitation
+                # was then killed by the raw 30 s abort ("stuck_abort v=0.00
+                # for 30s"). Only the shift ACTION is gated on forward_m.
+
+                # A "stuck" return means the ego held near-zero speed for at least
+                # abort_after seconds.
+                stall_x = float(interventions.get("stall_x", float("nan")))
+                stall_y = float(interventions.get("stall_y", float("nan")))
+                # The ledger is per PLACE, exactly like the stack_hold branch:
+                # without the reset, 30 s at a 129 s-budget junction plus 30 s
+                # somewhere new read as cumulative=60 against the new place's
+                # 30 s floor, and a run that had driven on was killed for a
+                # wait it had already survived.
+                moved_stall = (
+                    math.hypot(stall_x - hold_x, stall_y - hold_y)
+                    if hold_x == hold_x and stall_x == stall_x
+                    else float("inf")
+                )
+                if moved_stall > 2.0:
+                    stalled_sec = 0.0
+                    hold_x, hold_y = stall_x, stall_y
+                stalled_sec += abort_after
+                # Judge the stall where it happened. A place the recording waited at
+                # earns that wait back, with margin; a place it rolled through earns
+                # only the floor. One number for the whole route is wrong at both ends.
+                # The budget bounds time spent stalled; repositioning is the recovery
+                # we are allowed to attempt inside it. A budget shorter than one
+                # reposition cycle abandons the leg before the recovery can run at
+                # all — measured as "cumulative=30s>=30s forward_shifts=0", giving up
+                # without once trying the thing that exists to break a stall. So the
+                # floor never drops below a cycle plus the trigger that starts it.
+                # Cover every reposition the configuration permits, not just one.
+                # The floor was twice the trigger, which buys a single attempt, while
+                # stuck_reposition_max_count allowed three — so a leg was abandoned
+                # with shifts still on the table ("cumulative=60s>=60s
+                # forward_shifts=1"). Promising N recoveries and budgeting for one is
+                # the same mistake in a smaller size.
+                allowed_shifts = (
+                    reposition_max if not reposition_unlimited else 3
+                )
+                recovery_floor = (
+                    reposition_trigger * (max(1, allowed_shifts) + 1)
+                    if reposition_enabled
+                    else global_abort
+                )
+                floor_here = max(global_abort, recovery_floor)
+                here_budget, recorded_dwell = (
+                    stall_budget_sec(
+                        dwell_profile, stall_x, stall_y, floor_sec=floor_here,
+                        # Queue scale, same as the stack_hold branch: the
+                        # default 6 m missed a 48 s recorded dwell sitting a
+                        # dozen metres up the same approach and applied the
+                        # bare 30 s floor to a wait the recording itself made.
+                        radius_m=25.0,
+                    )
+                    if stall_x == stall_x
+                    else (floor_here, float("nan"))
+                )
+                if recorded_dwell == recorded_dwell and here_budget > global_abort:
+                    print(
+                        f"[info] the recording waited {recorded_dwell:.0f}s here; "
+                        f"allowing {here_budget:.0f}s before giving up"
+                    )
+                if here_budget > 0.0 and stalled_sec >= here_budget:
+                    global_abort = here_budget
+                    return "stuck", (
+                        f"{wait_detail}; stuck_abort "
+                        f"cumulative={stalled_sec:.0f}s>={global_abort:.0f}s "
+                        f"forward_shifts={shifts}"
+                    )
+
+                if not reposition_enabled:
+                    # No teleports: keep waiting inside the budget. The model's
+                    # hesitation is the measurement; the budget above is the
+                    # only honest way out of it.
+                    continue
+
+                if not reposition_unlimited and shifts >= reposition_max:
                     return (
                         "stuck",
                         f"{wait_detail}; reposition_max={reposition_max}",
@@ -1523,9 +1909,41 @@ def run_reproducer_job(cfg: JobConfig) -> JobResult:
                 recovered, recovery_detail = reposition_stuck_ego(cfg, env)
                 if not recovered:
                     return "stuck", f"{wait_detail}; {recovery_detail}"
+                interventions["forward_shifts"] += 1
+                interventions["reposition_total_m"] += float(
+                    cfg.stuck_reposition_forward_m
+                )
 
                 if current_goal is not None:
-                    route_ok, route_detail = advance_route(cfg, env, current_goal)
+                    route_ok, route_detail = advance_route(
+                        cfg, env, current_goal,
+                        allow_goal_substitution=(
+                            bool(route_goals) and current_goal == route_goals[-1]
+                        ),
+                    )
+                    interventions["route_resets"] += 1
+                    # The re-route is a fresh set_route and can be relocated just like
+                    # the original — and this is the path a stuck leg actually takes.
+                    # Keep watching the pose Autoware was given, or the ego drives to
+                    # the accepted goal while arrival is measured somewhere else.
+                    reroute_goal = _parse_effective_goal(route_detail)
+                    if route_ok and reroute_goal is not None:
+                        moved_reroute = math.hypot(
+                            reroute_goal[0] - current_goal[0],
+                            reroute_goal[1] - current_goal[1],
+                        )
+                        if moved_reroute > 0.5:
+                            print(
+                                f"[info] Re-route relocated the goal {moved_reroute:.1f} m "
+                                "— tracking arrival against the accepted pose"
+                            )
+                        # legs *is* route_goals for multi-goal runs, so updating the
+                        # slot keeps the outer leg loop in step with the re-route.
+                        for _i, _g in enumerate(route_goals):
+                            if _g == current_goal:
+                                route_goals[_i] = reroute_goal
+                                break
+                        current_goal = reroute_goal
                     if not route_ok:
                         return "stuck", (
                             f"{wait_detail}; {recovery_detail}; "
@@ -1546,29 +1964,147 @@ def run_reproducer_job(cfg: JobConfig) -> JobResult:
                     f"forward_shifts={shifts}"
                 )
 
+        if cfg.window_eval:
+            # Leg windows (window_eval.py): the recording is the timeline, one
+            # leg at a time; the stall / nudge / re-sync loop below does not run.
+            from dp_multi_eval.bag_reader import load_reference_ego
+
+            reference_ego = load_reference_ego(bag_path)
+            leg_goals = (
+                list(route_goals)
+                if (multi_goal_active and len(route_goals) > 1)
+                else ([arrival_goal] if arrival_goal is not None else [])
+            )
+            cuts = find_cuts(reference_ego, leg_goals) if leg_cuts_on(cfg) else None
+            windows = plan_legs(
+                reference_ego, leg_goals,
+                cut_final=bool(cut_final_leg or cut_end_drive_through),
+                cut_end_goal=cut_end_goal,
+                cuts=cuts,
+            )
+            n_parents = len({w.parent for w in windows})
+            print(
+                f"[info] leg-window evaluation: {len(windows)} window(s) over {n_parents} leg(s)"
+                + (f", {len(windows) - n_parents} planned cut(s) of {len(cuts)} recorded stand(s)" if cuts is not None else ", planned cuts off")
+            )
+
+            def _on_leg(idx: int, total: int) -> None:
+                if live_monitor is not None:
+                    live_monitor.set_leg(idx, total)
+                    live_monitor.set_phase("driving", note="final" if idx == total else f"leg {idx}/{total}")
+
+            status, error = run_legs(
+                cfg, env, legs=windows, reference=reference_ego,
+                track=reference_track if reference_track is not None else _reference_track(bag_path),
+                interventions=interventions, output_dir=cfg.output_dir,
+                on_leg=_on_leg,
+            )
+            legs = []
         for leg_idx, _leg in enumerate(legs):
             if live_monitor is not None:
                 live_monitor.set_leg(leg_idx + 1, len(legs))
-                live_monitor.set_phase("driving", note=f"leg {leg_idx + 1}/{len(legs)}")
+                live_monitor.set_phase("driving", note="final" if leg_idx + 1 == len(legs) else f"leg {leg_idx + 1}/{len(legs)}")
             remaining = max(5.0, drive_deadline - time.time())
             is_intermediate = (
-                cfg.multi_goal and len(legs) > 1 and leg_idx < len(legs) - 1
+                multi_goal_active and len(legs) > 1 and leg_idx < len(legs) - 1
             )
             # Intermediate multi-goal legs must not burn the full bag_duration budget.
             wait_timeout = min(remaining, leg_cap) if is_intermediate else remaining
-            if cfg.multi_goal and len(legs) > 1:
+            if multi_goal_active and len(legs) > 1:
                 print(
                     f"[info] Driving leg {leg_idx + 1}/{len(legs)} "
                     f"(leg_wait={wait_timeout:.0f}s, overall remaining={remaining:.0f}s)..."
                 )
             if cfg.end_condition == "route_arrived" or is_intermediate:
-                end_status, detail = wait_with_stuck_recovery(wait_timeout, _leg)
+                # A SUBSTITUTED final goal is a place the recorded bus drove
+                # past, not a stop it made: demanding a full stop there hands
+                # the model a route-end context the vehicle never saw, and v4
+                # answers it with a two-minute oscillating crawl (verified
+                # with byte-identical lights/objects — the crawl is the
+                # model's route-end behaviour). Arrival at such a goal is
+                # drive-through: reaching it counts, stopping is not required.
+                # The FINAL goal of a bag replay marks where the recording
+                # ends; the terminal parking micro-approach after that point
+                # measures nothing (verified on 2026-04-28: the model pulses
+                # its own diff_plan stop wall on its nose for ~70 s over the
+                # last 15-40 m, then parks 1 m from the recorded spot). The
+                # run ends when the ego reaches the goal area; the pulsing
+                # stays visible in stuck_rate/reference_speed as a report.
+                # Drive-through only for a goal that was actually SUBSTITUTED
+                # (relocated >10 m to a routable spot the recording drove
+                # past). The 70 s pulse-crawl that motivated the cutoff was the
+                # reproducer streaming cross-traffic in front of the mistimed
+                # ego; the progress clock removed it, so the real goal is now a
+                # clean approach and the ego must drive all the way to it. With
+                # the cutoff always on, the run ended 12-15 m short of the real
+                # bag goal while the ego was still moving at 2.4 m/s — it looked
+                # like it stopped near the goal, but the run had just cut off.
+                substituted_final = (
+                    not is_intermediate
+                    and bool(getattr(cfg, "final_drive_through_arrival", True))
+                    and float(goal_substituted_m or 0.0) > 10.0
+                )
+                if substituted_final:
+                    print(
+                        "[info] substituted final goal — drive-through arrival "
+                        "(reaching the goal area ends the run; no stop required)"
+                    )
+                # A cut recording: the route continues to the next stop, the
+                # ego passes the cut pose at road speed, and the run ends
+                # there. A tight radius is enough — it is not slowing down.
+                cut_final = not is_intermediate and cut_end_drive_through
+                if cut_final:
+                    print(
+                        "[info] cut-while-moving recording — the run ends when the "
+                        "ego passes the cut pose (6 m, no stop required)"
+                    )
+                bus_stop_leg = is_intermediate and leg_is_bus_stop(_leg, bus_stops_xy)
+                if bus_stop_leg:
+                    print(
+                        f"[info] leg {leg_idx + 1}/{len(legs)} is a map bus stop — "
+                        "the ego must stop there (no drive-through)"
+                    )
+                end_status, detail = wait_with_stuck_recovery(
+                    wait_timeout, _leg,
+                    require_stop_at_goal=(
+                        (not is_intermediate and not substituted_final and not cut_final)
+                        or bus_stop_leg
+                    ),
+                    # Wide enough to register while the ego still moves at its
+                    # route-end deceleration, before the pulse-glide begins.
+                    arrival_tolerance_m=(
+                        20.0 if substituted_final else (6.0 if cut_final else None)
+                    ),
+                )
                 if end_status != "done":
                     if (
                         cfg.end_condition == "bag_duration"
                         and time.time() >= drive_deadline
                     ):
                         print(f"[info] bag_duration complete ({detail})")
+                        status = "done"
+                        error = None
+                        break
+                    # A run that expires on the LAST leg within 60 m of its
+                    # goal has driven the route; the last metres were a crawl
+                    # (measured: 0.06 m/s for six minutes toward a
+                    # substituted mid-road goal). That is model behaviour to
+                    # measure, not a tool DNF: complete the run and let
+                    # goal_stop_precision and reference_speed judge it.
+                    is_last = leg_idx == len(legs) - 1
+                    gp = _parse_ego_from_detail(detail)
+                    near_goal = (
+                        is_last
+                        and gp is not None
+                        and arrival_goal is not None
+                        and math.hypot(gp[0] - arrival_goal[0], gp[1] - arrival_goal[1]) < 60.0
+                    )
+                    if near_goal:
+                        print(
+                            f"[warn] time expired {math.hypot(gp[0] - arrival_goal[0], gp[1] - arrival_goal[1]):.0f} m "
+                            f"from the final goal — completing the run; the goal "
+                            f"metrics will judge the shortfall ({detail})"
+                        )
                         status = "done"
                         error = None
                         break
@@ -1604,8 +2140,54 @@ def run_reproducer_job(cfg: JobConfig) -> JobResult:
 
             # More legs? Clear + set next goal, then re-engage.
             if leg_idx + 1 < len(legs) and legs[leg_idx + 1] is not None:
-                next_goal = route_goals[leg_idx + 1]
-                adv_ok, adv_msg = advance_route(cfg, env, next_goal)
+                # Unroutable intermediates merge forward here too; legs and
+                # route_goals are the same list, so popping keeps them aligned
+                # and enumerate resumes on the merged-forward goal.
+                adv_ok, adv_msg = False, "no_legs_left"
+                while leg_idx + 1 < len(route_goals):
+                    next_goal = route_goals[leg_idx + 1]
+                    final_leg = leg_idx + 1 == len(route_goals) - 1
+                    routing_goal = next_goal
+                    cut_leg_now = False
+                    if final_leg and cut_final_leg and cut_end_goal is not None:
+                        # The recording was cut while moving: route on to the
+                        # bus's next stop so the model keeps the road context,
+                        # and end the run when the ego passes the cut pose.
+                        routing_goal = cut_end_goal
+                        cut_leg_now = True
+                        print(
+                            f"[info] final leg: recording cut while moving — routing to "
+                            f"({routing_goal[0]:.1f}, {routing_goal[1]:.1f}), arrival "
+                            "drive-through at the cut pose"
+                        )
+                    adv_ok, adv_msg = advance_route(
+                        cfg, env, routing_goal,
+                        allow_goal_substitution=final_leg,
+                    )
+                    if adv_ok or final_leg:
+                        break
+                    print(
+                        f"[warn] Leg goal ({next_goal[0]:.1f}, {next_goal[1]:.1f}) "
+                        f"is not routable from here — merging it into the next leg"
+                    )
+                    route_goals.pop(leg_idx + 1)
+                # Same substitution applies here, and the same mismatch follows if
+                # the harness keeps watching the pose it asked for.
+                adv_effective = _parse_effective_goal(adv_msg)
+                if adv_ok and cut_leg_now:
+                    cut_end_drive_through = True
+                    cut_end_pose = next_goal
+                    adv_effective = None  # arrival stays at the cut pose
+                if adv_ok and adv_effective is not None:
+                    adv_moved = math.hypot(
+                        adv_effective[0] - next_goal[0], adv_effective[1] - next_goal[1]
+                    )
+                    if adv_moved > 0.5:
+                        print(
+                            f"[info] Leg {leg_idx + 2} goal was relocated "
+                            f"{adv_moved:.1f} m by route setup — tracking the accepted pose"
+                        )
+                    route_goals[leg_idx + 1] = adv_effective
                 if not adv_ok:
                     error = f"leg_{leg_idx + 2}_advance:{adv_msg}"
                     status = "failed"
@@ -1629,10 +2211,20 @@ def run_reproducer_job(cfg: JobConfig) -> JobResult:
     finally:
         if live_monitor is not None:
             live_monitor.stop(final_note=status if status else "stopped")
+        close_routing(env)
         # Shutdown order: record → reproducer → psim
+        stragglers = []
         for proc in reversed(procs):
-            stop_process_group(proc, grace_sec=10.0)
+            if not stop_process_group(proc, grace_sec=PSIM_STOP_GRACE_SEC):
+                stragglers.append(proc.pid)
             close_log_handle(proc)
+        if stragglers:
+            print(f"[warn] process group(s) {stragglers} outlived their stop request")
+        # Sweep anything the launch spawned outside those groups. Until every
+        # planner/container process is gone the driver keeps their GPU memory, and
+        # the next job's TensorRT engine fails with "Cuda Runtime (out of memory)".
+        if not cleanup_evaluation_processes(domain_id=cfg.domain_id):
+            print("[warn] leftover evaluation processes remain after this job")
 
     end_iso = utc_now_iso()
     bag_path_out = None
@@ -1651,9 +2243,26 @@ def run_reproducer_job(cfg: JobConfig) -> JobResult:
             "bag_path": str(bag_path),
             "output_bag": bag_path_out,
             "duration_sec": time.time() - t0,
+            "interventions": interventions,
+            # stall_x / stall_y are a position, not a count (see run_orchestrator).
+            "clean_run": not any(
+                float(v) > 0 for k, v in interventions.items() if not str(k).startswith("stall_")
+            ),
+            "legs_skipped": legs_skipped,
+            "goal_substituted_m": (
+                None if goal_substituted_m != goal_substituted_m else round(goal_substituted_m, 3)
+            ),
         },
     )
-    return JobResult(status, start_iso, end_iso, error, bag_path_out, time.time() - t0)
+    return JobResult(
+        status,
+        start_iso,
+        end_iso,
+        error,
+        bag_path_out,
+        time.time() - t0,
+        interventions=interventions,
+    )
 
 
 
@@ -1721,21 +2330,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Hard cap on perception load wait (seconds).",
     )
     p.add_argument(
-        "--reproducer_search_radius_m",
-        type=float,
-        default=0.0,
-        help=(
-            "perception_reproducer -r (meters). 0 = always nearest bag pose "
-            "(recommended when ego path may diverge; avoids empty objects)."
-        ),
-    )
-    p.add_argument(
-        "--reproducer_cool_down_sec",
-        type=float,
-        default=80.0,
-        help="perception_reproducer -c (only used when search_radius > 0).",
-    )
-    p.add_argument(
         "--multi_goal",
         action="store_true",
         help="Replay multiple goals from one bag (bus-stop legs).",
@@ -1759,6 +2353,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Stop points file under map_path (or absolute path).",
     )
     p.add_argument("--stuck_abort_sec", type=float, default=90.0)
+    p.add_argument("--resync_lag_sec", type=float, default=0.0)
+    p.add_argument("--window_eval", action="store_true", help="Leg-window evaluation (window_eval.py)")
     p.add_argument("--stuck_reposition_trigger_sec", type=float, default=30.0)
     p.add_argument("--stuck_reposition_forward_m", type=float, default=5.0)
     p.add_argument("--stuck_reposition_max_count", type=int, default=0)
@@ -1804,8 +2400,6 @@ def config_from_args(args: argparse.Namespace) -> JobConfig:
         bag_load_base_sec=float(args.bag_load_base_sec),
         bag_load_duration_factor=float(args.bag_load_duration_factor),
         bag_load_timeout_cap_sec=float(args.bag_load_timeout_cap_sec),
-        reproducer_search_radius_m=args.reproducer_search_radius_m,
-        reproducer_cool_down_sec=float(args.reproducer_cool_down_sec),
         multi_goal=bool(args.multi_goal),
         multi_goal_source=str(args.multi_goal_source),
         multi_goal_stop_speed_mps=float(args.multi_goal_stop_speed_mps),
@@ -1817,6 +2411,8 @@ def config_from_args(args: argparse.Namespace) -> JobConfig:
         or None,
         stop_points_csv=str(args.stop_points_csv),
         stuck_abort_sec=float(args.stuck_abort_sec),
+        resync_lag_sec=float(args.resync_lag_sec),
+        window_eval=bool(args.window_eval),
         stuck_reposition_trigger_sec=float(args.stuck_reposition_trigger_sec),
         stuck_reposition_forward_m=float(args.stuck_reposition_forward_m),
         stuck_reposition_max_count=int(args.stuck_reposition_max_count),

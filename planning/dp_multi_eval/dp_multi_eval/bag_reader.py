@@ -1,3 +1,17 @@
+# Copyright 2026 TIER IV, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Shared rosbag2 reading for metrics and offline rendering."""
 
 from __future__ import annotations
@@ -113,6 +127,113 @@ def planning_factor_source_name(topic: str) -> str:
     return topic.rstrip("/").split("/")[-1]
 
 
+def rebuild_bag_metadata(bag_dir: Path) -> bool:
+    """Recreate a missing metadata.yaml from the .db3 files themselves.
+
+    rosbag2 writes metadata.yaml only when the recorder shuts down cleanly, so a
+    recorder that was killed leaves gigabytes of perfectly good messages that the
+    reader refuses to open at all ("No storage could be initialized from the
+    inputs"). Everything the reader needs is already in the database: the topics
+    table carries names, types, serialization format and QoS, and the messages
+    table carries the timestamps and counts. Losing a whole run because one small
+    text file is absent is not an acceptable failure mode for a harness whose only
+    product is recordings.
+    """
+    import sqlite3
+
+    import yaml
+
+    db_files = sorted(bag_dir.glob("*.db3"))
+    if not db_files:
+        return False
+
+    topics: dict[str, dict[str, Any]] = {}
+    files: list[dict[str, Any]] = []
+    total = 0
+    t_min: int | None = None
+    t_max = 0
+    for db in db_files:
+        try:
+            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        except sqlite3.Error:
+            continue
+        try:
+            rows = con.execute(
+                "SELECT id,name,type,serialization_format,offered_qos_profiles FROM topics"
+            ).fetchall()
+        except sqlite3.Error:
+            # Older/newer schemas may lack the QoS column.
+            try:
+                rows = [
+                    (*r, "")
+                    for r in con.execute(
+                        "SELECT id,name,type,serialization_format FROM topics"
+                    ).fetchall()
+                ]
+            except sqlite3.Error:
+                con.close()
+                continue
+        for tid, name, ttype, fmt, qos in rows:
+            count, lo, hi = con.execute(
+                "SELECT COUNT(*),MIN(timestamp),MAX(timestamp) FROM messages WHERE topic_id=?",
+                (tid,),
+            ).fetchone()
+            count = int(count or 0)
+            entry = topics.setdefault(
+                name,
+                {
+                    "topic_metadata": {
+                        "name": name,
+                        "type": ttype,
+                        "serialization_format": fmt or "cdr",
+                        "offered_qos_profiles": qos or "",
+                    },
+                    "message_count": 0,
+                },
+            )
+            entry["message_count"] += count
+            total += count
+            if lo is not None:
+                t_min = lo if t_min is None else min(t_min, lo)
+                t_max = max(t_max, hi or 0)
+        f_count, f_lo, f_hi = con.execute(
+            "SELECT COUNT(*),MIN(timestamp),MAX(timestamp) FROM messages"
+        ).fetchone()
+        files.append(
+            {
+                "path": db.name,
+                "starting_time": {"nanoseconds_since_epoch": int(f_lo or 0)},
+                "duration": {"nanoseconds": int((f_hi or 0) - (f_lo or 0))},
+                "message_count": int(f_count or 0),
+            }
+        )
+        con.close()
+
+    if not topics:
+        return False
+
+    t_min = t_min or 0
+    payload = {
+        "rosbag2_bagfile_information": {
+            "version": 5,
+            "storage_identifier": "sqlite3",
+            "relative_file_paths": [f.name for f in db_files],
+            "duration": {"nanoseconds": max(0, t_max - t_min)},
+            "starting_time": {"nanoseconds_since_epoch": t_min},
+            "message_count": total,
+            "topics_with_message_count": list(topics.values()),
+            "compression_format": "",
+            "compression_mode": "",
+            # rosbag2 rejects the file outright without this block.
+            "files": files,
+        }
+    }
+    (bag_dir / "metadata.yaml").write_text(
+        yaml.safe_dump(payload, default_flow_style=False), encoding="utf-8"
+    )
+    return True
+
+
 def open_bag_reader(bag_path: Path):
     from rosbag2_py import ConverterOptions, SequentialReader, StorageOptions
 
@@ -123,6 +244,9 @@ def open_bag_reader(bag_path: Path):
 
     storage_id = "sqlite3"
     meta = Path(uri) / "metadata.yaml"
+    if not meta.is_file() and rebuild_bag_metadata(Path(uri)):
+        print(f"[warn] {uri}: metadata.yaml was missing (recorder did not exit "
+              "cleanly) — rebuilt it from the .db3 files")
     if meta.is_file():
         try:
             import yaml
@@ -145,8 +269,16 @@ def _type_map(reader) -> dict[str, str]:
     return {t.name: t.type for t in reader.get_all_topics_and_types()}
 
 
-def iter_topic_messages(bag_path: Path, topics: list[str]) -> Iterator[tuple[str, float, Any]]:
-    """Yield (topic, stamp_sec, deserialized_msg) for selected topics."""
+def iter_topic_messages(
+    bag_path: Path, topics: list[str], sample_dt: dict[str, float] | None = None
+) -> Iterator[tuple[str, float, Any]]:
+    """Yield (topic, stamp_sec, deserialized_msg) for selected topics.
+
+    ``sample_dt`` thins a topic to one message per interval using the storage
+    timestamp, so skipped messages are never deserialized. Deserializing was
+    the whole cost of a load: 48k messages, 50 s of 54 s on 2026-04-28's
+    output bag, most of them trajectories and objects the caller then dropped.
+    """
     from rosbag2_py import StorageFilter
 
     reader = open_bag_reader(bag_path)
@@ -155,9 +287,16 @@ def iter_topic_messages(bag_path: Path, topics: list[str]) -> Iterator[tuple[str
     if not wanted:
         return
     reader.set_filter(StorageFilter(topics=wanted))
+    interval_ns = {t: int(dt * 1e9) for t, dt in (sample_dt or {}).items() if dt}
+    next_ns: dict[str, int] = {}
 
     while reader.has_next():
         topic, data, _t = reader.read_next()
+        step = interval_ns.get(topic)
+        if step:
+            if _t < next_ns.get(topic, 0):
+                continue
+            next_ns[topic] = _t + step
         msg_type = get_message(type_map[topic])
         msg = deserialize_message(data, msg_type)
         stamp = _message_stamp_sec(msg, fallback_ns=_t)
@@ -189,7 +328,12 @@ def load_bag_series(
 ) -> BagSeries:
     series = BagSeries()
     factor_topics = list(planning_factor_topics or [])
-    topics = [ego_topic, objects_topic, velocity_topic]
+    # Objects may sit under the throttled name (current) or the raw one (older bags).
+    objects_names = [t for t in (objects_topic, "/dp_multi_eval/tracking/objects_throttled",
+                                 "/perception/object_recognition/tracking/objects") if t]
+    seen: set[str] = set()
+    objects_names = [t for t in objects_names if not (t in seen or seen.add(t))]
+    topics = [ego_topic, *objects_names, velocity_topic]
     if trajectory_topic:
         topics.append(trajectory_topic)
     topics.extend(factor_topics)
@@ -213,7 +357,16 @@ def load_bag_series(
     next_traj_msg_t = -float("inf")
     next_factor_msg_t: dict[str, float] = {t: -float("inf") for t in factor_topics}
 
-    for topic, stamp, msg in iter_topic_messages(bag_path, topics):
+    sample_dt: dict[str, float] = {}
+    for name in objects_names:
+        if object_sample_dt:
+            sample_dt[name] = float(object_sample_dt)
+    if trajectory_topic and trajectory_sample_dt:
+        sample_dt[trajectory_topic] = float(trajectory_sample_dt)
+    for name in factor_topics:
+        if factor_sample_dt:
+            sample_dt[name] = float(factor_sample_dt)
+    for topic, stamp, msg in iter_topic_messages(bag_path, topics, sample_dt):
         if topic == ego_topic:
             pose = msg.pose.pose
             twist = msg.twist.twist.linear
@@ -238,7 +391,7 @@ def load_bag_series(
             if long_v is None:
                 continue
             series.velocity_mps.append((stamp, abs(float(long_v))))
-        elif topic == objects_topic:
+        elif topic in objects_names:
             if object_sample_dt and stamp + 1e-9 < next_object_msg_t:
                 continue
             if object_sample_dt:
@@ -341,3 +494,39 @@ def downsample_ego(ego: list[EgoSample], dt: float) -> list[EgoSample]:
     if out and out[-1] is not ego[-1]:
         out.append(ego[-1])
     return out
+
+
+REFERENCE_EGO_VERSION = "v1"
+
+
+def load_reference_ego(
+    bag_path: Path,
+    *,
+    ego_topic: str = "/localization/kinematic_state",
+    velocity_topic: str = "/vehicle/status/velocity_status",
+) -> list[EgoSample]:
+    """The recording's ego track, read once per bag and cached.
+
+    Metrics and the video each read it, and the recordings are 37-79 GB: the
+    two reads were 90 s each of a 6.8 min post-processing step (2026-04-28).
+    The track is a pure function of the recording, so it lives in the same
+    cache as the route goals.
+    """
+    from dp_multi_eval.bag_cache import cached_json
+
+    bag_path = Path(bag_path).expanduser().resolve()
+
+    def compute() -> list[list[float]]:
+        series = load_bag_series(
+            bag_path,
+            ego_topic=ego_topic,
+            objects_topic=None,
+            velocity_topic=velocity_topic,
+            trajectory_topic=None,
+            turn_indicators_status_topic=None,
+            turn_indicators_cmd_topic=None,
+        )
+        return [[e.stamp_sec, e.x, e.y, e.z, e.yaw_rad, e.vx, e.vy, e.speed_mps] for e in series.ego]
+
+    rows = cached_json(bag_path, "reference_ego", f"{REFERENCE_EGO_VERSION}|{ego_topic}|{velocity_topic}", compute)
+    return [EgoSample(*row) for row in rows]

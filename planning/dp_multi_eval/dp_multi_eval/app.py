@@ -1,12 +1,30 @@
+# Copyright 2026 TIER IV, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Phase 7 — Streamlit GUI for non-engineers."""
 
 from __future__ import annotations
 
+import functools
+import html
 import json
 import os
 import subprocess
 import sys
+import threading
 import time
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +36,11 @@ from dp_multi_eval.build_dashboard import (
     render_stop_scatter_section,
 )
 from dp_multi_eval.live_monitor import live_drive_map_html
+from dp_multi_eval.model_config import (
+    discover_model_configs,
+    planning_setting_for,
+    unique_models,
+)
 from dp_multi_eval.path_picker import pick_folder
 from dp_multi_eval.process_utils import cleanup_evaluation_processes, stop_pid_group
 from dp_multi_eval.scenario_sim import (
@@ -38,6 +61,129 @@ except ImportError as exc:  # pragma: no cover
 DEFAULT_CONFIG = Path.home() / "dp_multi_eval_pipeline.yaml"
 STATE_FILE_NAME = ".gui_run_state.json"
 SESSION_KEYS = ("models_dir", "rosbag_dir", "scenario_dir", "results_root")
+
+
+class ResultsHandler(SimpleHTTPRequestHandler):
+    """Static files plus single byte ranges: the preview mp4s keep their index
+    (moov) at the end, and a player jumps there before it starts."""
+
+    _range_left: int | None = None
+
+    def log_message(self, *args: Any) -> None:  # the dashboard polls every 2 s
+        pass
+
+    def end_headers(self) -> None:
+        self.send_header("Accept-Ranges", "bytes")
+        super().end_headers()
+
+    def send_head(self):  # noqa: ANN201 - same contract as the base class
+        rng = self.headers.get("Range", "")
+        path = self.translate_path(self.path)
+        if not rng.startswith("bytes=") or not os.path.isfile(path):
+            return super().send_head()
+        size = os.path.getsize(path)
+        first, _, last = rng[len("bytes="):].split(",")[0].strip().partition("-")
+        try:
+            if first:
+                start, end = int(first), int(last) if last else size - 1
+            else:  # "-N": the last N bytes
+                start, end = max(0, size - int(last)), size - 1
+        except ValueError:
+            return super().send_head()
+        end = min(end, size - 1)
+        if start > end:
+            self.send_response(416)
+            self.send_header("Content-Range", f"bytes */{size}")
+            self.end_headers()
+            return None
+        f = open(path, "rb")  # noqa: SIM115 - closed by the base class after copyfile
+        f.seek(start)
+        self.send_response(206)
+        self.send_header("Content-Type", self.guess_type(path))
+        self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.send_header("Content-Length", str(end - start + 1))
+        self.end_headers()
+        self._range_left = end - start + 1
+        return f
+
+    def copyfile(self, source, outputfile) -> None:  # noqa: ANN001
+        left, self._range_left = self._range_left, None
+        if left is None:
+            return super().copyfile(source, outputfile)
+        while left > 0:
+            chunk = source.read(min(1 << 16, left))
+            if not chunk:
+                break
+            outputfile.write(chunk)
+            left -= len(chunk)
+        return None
+
+
+@st.cache_resource
+def results_http_port(root: str) -> int:
+    """Serve the results folder on 127.0.0.1 for the embedded dashboard.
+
+    st.iframe(Path) inlines the HTML, so its relative URLs (preview videos, the
+    live json it polls) resolve against the Streamlit server and 404. Loaded from
+    this server instead, the page works as under `python3 -m http.server`.
+    """
+    handler = functools.partial(ResultsHandler, directory=root)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return int(server.server_address[1])
+
+
+def dashboard_frame_html(url: str) -> str:
+    """The served dashboard in a frame as tall as its content.
+
+    A cross-origin URL in st.iframe stays at a fixed height and scrolls on its
+    own. The dashboard reports its height (dp-dashboard:height); this wrapper,
+    an HTML string that st.iframe(height="content") measures, grows the inner
+    frame to match, so the GUI page scrolls as one.
+    """
+    src = html.escape(url, quote=True)
+    return f"""<style>html,body{{margin:0}}
+#dash{{display:block;width:100%;height:900px;border:0}}</style>
+<iframe id="dash" src="{src}" allow="fullscreen; autoplay; clipboard-write" allowfullscreen></iframe>
+<script>
+var dash = document.getElementById("dash");
+addEventListener("message", function (e) {{
+  var d = e.data;
+  if (e.source !== dash.contentWindow || !d || d.type !== "dp-dashboard:height") return;
+  if (typeof d.height === "number" && isFinite(d.height) && d.height > 0)
+    dash.style.height = Math.ceil(d.height) + "px";
+}});
+</script>"""
+
+
+# Live Progress job table: phases last minutes, so a few seconds is fresh enough.
+PROGRESS_REFRESH_SEC = 5.0
+# Results: metrics land once per finished job; the dashboard polls its own live json.
+RESULTS_REFRESH_SEC = 10.0
+
+
+def _mtime(p: Path) -> float | None:
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return None
+
+
+def latest_manifest(results_root: Path) -> Path | None:
+    """The most recently written run manifest under ``results_root``.
+
+    A run folder moved away (to ``_archive``) between the glob and the stat is
+    skipped: the fragments call this every few seconds.
+    """
+    stamped = [(m, p) for p in results_root.glob("*/manifest.json") if (m := _mtime(p)) is not None]
+    return max(stamped)[1] if stamped else None
+
+
+def results_signature(manifest_path: Path, jobs: list[dict[str, Any]]) -> tuple:
+    """Changes when the run's manifest or any job's metrics change."""
+    return (str(manifest_path), _mtime(manifest_path)) + tuple(
+        _mtime(Path(j.get("output_dir", "")) / "metrics.json") for j in jobs
+    )
 
 
 def _render_live_drive_map(run_dir: Path) -> None:
@@ -161,36 +307,6 @@ def load_yaml(path: Path) -> dict[str, Any]:
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
 
-def discover_model_configs(models_dir: Path) -> list[tuple[str, Path]]:
-    if not models_dir.is_dir():
-        return []
-    found: list[tuple[str, Path]] = []
-    for path in sorted(models_dir.rglob("*.param.yaml")):
-        name = path.stem.replace(".param", "")
-        found.append((name, path))
-    for path in sorted(models_dir.rglob("diffusion_planner.param.yaml")):
-        name = path.parent.name
-        found.append((name, path))
-    for child in sorted(models_dir.iterdir()):
-        if not child.is_dir():
-            continue
-        if (child / "diffusion_planner.onnx").is_file() and (child / "args.json").is_file():
-            found.append((child.name, child))
-        ml_onnx = child / "ml_planner.onnx"
-        if ml_onnx.is_file():
-            found.append((child.name, ml_onnx))
-    # unique by path
-    seen: set[Path] = set()
-    out: list[tuple[str, Path]] = []
-    for name, path in found:
-        path = path.resolve()
-        if path in seen:
-            continue
-        seen.add(path)
-        out.append((name, path))
-    return out
-
-
 def discover_bag_dirs(rosbag_dir: Path) -> list[Path]:
     if not rosbag_dir.is_dir():
         return []
@@ -212,9 +328,29 @@ def discover_bag_dirs(rosbag_dir: Path) -> list[Path]:
 
 
 def pid_alive(pid: int | None) -> bool:
+    """A finished run is not alive. The GUI starts run_all and never waits for
+    it, so a run that has ended stays a zombie child with a /proc entry, and
+    the next Start was refused as "already in progress" (2026-10-28)."""
     if not pid or pid <= 0:
         return False
-    return Path(f"/proc/{pid}").exists()
+    try:
+        os.waitpid(pid, os.WNOHANG)   # reap it if it is our finished child
+    except (ChildProcessError, OSError):
+        pass
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except (OSError, IndexError):
+        return False
+    return state != "Z"
+
+
+def _is_run_all(pid: int) -> bool:
+    """The pid is still the run the GUI started, not a later process that was
+    handed the same number."""
+    try:
+        return b"dp_multi_eval.run_all" in Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return False
 
 
 def load_gui_run_state(state_path: Path) -> dict[str, Any] | None:
@@ -231,7 +367,7 @@ def gui_run_is_active(state_path: Path) -> tuple[bool, dict[str, Any] | None]:
     state = load_gui_run_state(state_path)
     if not state:
         return False, None
-    if pid_alive(int(state.get("pid") or 0)):
+    if pid_alive(int(state.get("pid") or 0)) and _is_run_all(int(state.get("pid") or 0)):
         return True, state
     return False, state
 
@@ -364,7 +500,7 @@ def main() -> None:
         "Models folder",
         "models_dir",
         picker_title="Select models folder",
-        help_text="Folder with ONNX model dirs or diffusion_planner.param.yaml files.",
+        help_text="Searched at any depth: diffusion planner dirs, ml_planner.onnx files, planner *.param.yaml.",
     )
     results_root = folder_input(
         "Results folder",
@@ -413,26 +549,40 @@ def main() -> None:
             rosbag_dir = Path(st.session_state.get("rosbag_dir") or "")
 
         st.subheader("Choose models")
-        model_opts = discover_model_configs(models_dir)
+        # The config's `models:` (what a CLI run uses) first, then the folder.
+        configured = [
+            (str(m.get("name") or Path(m["model_config"]).name), Path(m["model_config"]))
+            for m in base.get("models") or []
+            if m.get("model_config") and Path(m["model_config"]).expanduser().exists()
+        ]
+        model_opts = unique_models(configured + discover_model_configs(models_dir))
+        # An ml_planner.onnx often sits in the diffusion planner's folder: same
+        # name, and the two would share job ids and result folders.
+        names = [n for n, _ in model_opts]
+        model_opts = [
+            (
+                f"{n}__ml_planner"
+                if names.count(n) > 1 and planning_setting_for(p) == "ml_planner"
+                else n,
+                p,
+            )
+            for n, p in model_opts
+        ]
         if not model_opts:
             st.warning(
-                "No models found. Pick a folder containing ONNX model directories "
-                "(diffusion_planner.onnx + args.json, or a single ml_planner.onnx) "
-                "or *.param.yaml files."
+                "No models found. Pick a folder containing diffusion planner model "
+                "directories (diffusion_planner.onnx + args.json), ml_planner.onnx files "
+                "or planner *.param.yaml files."
             )
         selected_models = []
         for name, path in model_opts:
-            if st.checkbox(name, value=False, key=f"m_{path}"):
-                selected_models.append({"name": name, "model_config": str(path)})
-        selection_key = tuple(sorted(m["model_config"] for m in selected_models))
-        if selection_key != st.session_state.get("_model_selection_for_planning_setting"):
-            st.session_state["_model_selection_for_planning_setting"] = selection_key
-            settings = {
-                "ml_planner" if Path(m["model_config"]).name == "ml_planner.onnx" else "diffusion_planner"
-                for m in selected_models
-            }
-            if len(settings) == 1:
-                st.session_state["planning_setting"] = next(iter(settings))
+            ml = planning_setting_for(path) == "ml_planner"
+            label = f"{name}  ·  {'ML planner' if ml else 'diffusion planner'}"
+            if st.checkbox(label, value=False, key=f"m_{path}"):
+                entry = {"name": name, "model_config": str(path)}
+                if ml:
+                    entry["planning_setting"] = "ml_planner"
+                selected_models.append(entry)
 
         selected_bags: list[Path] = []
         selected_scenarios: list[Path] = []
@@ -514,24 +664,11 @@ def main() -> None:
                 value=str(base.get("vehicle_id", "6_lv828l")),
                 help="Matches manual launch: autoware.vehicle_id:=6_lv828l",
             )
-            if "planning_setting" not in st.session_state:
-                st.session_state["planning_setting"] = str(
-                    base.get("planning_setting", "diffusion_planner")
-                )
             planning_setting = st.text_input(
                 "planning_setting",
-                key="planning_setting",
-                help="Taken from the selected model. Launch uses this displayed value.",
+                value=str(base.get("planning_setting", "diffusion_planner")),
+                help="autoware.planning_setting:=… (use diffusion_planner)",
             )
-            selected_settings = {
-                "ml_planner" if Path(m["model_config"]).name == "ml_planner.onnx" else "diffusion_planner"
-                for m in selected_models
-            }
-            if len(selected_settings) > 1:
-                st.warning(
-                    "Selected models use different planning settings. "
-                    "Every job uses the planning_setting shown above."
-                )
         with col_a3:
             map_path = st.text_input(
                 "map_path",
@@ -562,14 +699,15 @@ def main() -> None:
         if mode == "reproducer":
             st.subheader("Multi-goal bags")
             st.caption(
-                "For long bags with bus-stop → arrive → next goal. "
-                "With stop_points: starts from the stop nearest bag ego, then follows your order. "
-                "Single-goal bags are unchanged when this is off."
+                "On (same as `multi_goal: auto` in the yaml): legs come from the recording — "
+                "its route goals and the bus stops it dwelled at — and each leg is judged on "
+                "its own; a bag with one goal runs as a single leg. Off: the whole bag is one "
+                "leg ending at the recording's last pose, and bus stops are not legs."
             )
             multi_goal = st.checkbox(
                 "Enable multi-goal replay",
                 value=multi_goal,
-                help="Extract multiple destinations and re-set route after each ARRIVED.",
+                help="Leave on to match CLI runs. Off changes how multi-stop bags are judged.",
             )
             if multi_goal:
                 src_opts = ["stop_points", "auto", "goal_topic", "stop_segments"]
@@ -582,8 +720,9 @@ def main() -> None:
                         src_opts,
                         index=src_opts.index(multi_goal_source),
                         help=(
-                            "stop_points = choose ordered stops from map stop_points.csv. "
-                            "auto = published goals if present, else stop segments."
+                            "auto = the recorded route, else the goal topic, else dwells; "
+                            "map bus stops the recording dwelled at are added as legs. "
+                            "stop_points = your own ordered stops from the map's stop_points.csv."
                         ),
                     )
                 if multi_goal_source == "stop_points":
@@ -613,28 +752,6 @@ def main() -> None:
                         st.session_state[order_key] = [
                             n for n in multi_goal_stop_order if n in available_stops
                         ] or list(multi_goal_stop_order)
-
-                    if st.button("Use Hiratsuka default loop order"):
-                        default_order = [
-                            "平塚駅南口",
-                            "商工会議所前（往路）",
-                            "教会前（往路）",
-                            "松風公園入口",
-                            "花水小学校前",
-                            "すみれ平",
-                            "松風町",
-                            "八間通り入口",
-                            "袖ヶ浜",
-                            "湘南海岸公園前",
-                            "なぎさプロムナード",
-                            "教会前（復路）",
-                            "商工会議所前（復路）",
-                            "平塚駅南口",
-                        ]
-                        st.session_state[order_key] = [
-                            n for n in default_order if n in available_stops
-                        ]
-                        st.rerun()
 
                     add_col, btn_col = st.columns([3, 1])
                     with add_col:
@@ -860,7 +977,6 @@ def main() -> None:
                 cfg_base["show_planning_factors"] = bool(show_planning_factors)
                 cfg_base["video_fps"] = float(video_fps)
                 cfg_base["render_video"] = True
-                import shutil
 
                 if (
                     mode == "reproducer"
@@ -870,40 +986,22 @@ def main() -> None:
                 ):
                     st.error("Select at least one stop in Goal order (stop_points.csv).")
                 else:
+                    # The selection travels as bag_whitelist / scenario_whitelist;
+                    # no staging folder of symlinks (exFAT disks refuse them).
                     if mode == "reproducer":
-                        run_input_root = results_root / run_name / "_selected_bags"
-                        if run_input_root.exists():
-                            shutil.rmtree(run_input_root)
-                        run_input_root.mkdir(parents=True)
-                        for bag in selected_bags:
-                            link = run_input_root / bag.name
-                            if not link.exists():
-                                link.symlink_to(bag, target_is_directory=bag.is_dir())
                         cfg_path = write_run_config(
                             cfg_base,
                             run_name=run_name,
                             models=selected_models,
-                            rosbag_dir=run_input_root,
+                            rosbag_dir=rosbag_dir,
                             selected_bags=selected_bags,
                         )
                     else:
-                        run_input_root = results_root / run_name / "_selected_scenarios"
-                        if run_input_root.exists():
-                            shutil.rmtree(run_input_root)
-                        run_input_root.mkdir(parents=True)
-                        for scn in selected_scenarios:
-                            # Preserve relative key via flat unique names
-                            link = run_input_root / scn.name
-                            n = 1
-                            while link.exists():
-                                link = run_input_root / f"{scn.stem}_{n}{scn.suffix}"
-                                n += 1
-                            link.symlink_to(scn)
                         cfg_path = write_run_config(
                             cfg_base,
                             run_name=run_name,
                             models=selected_models,
-                            scenario_dir=run_input_root,
+                            scenario_dir=scenario_dir,
                             selected_scenarios=selected_scenarios,
                         )
                     log_path = results_root / run_name / "run_all.log"
@@ -923,6 +1021,15 @@ def main() -> None:
                         stderr=subprocess.STDOUT,
                         start_new_session=True,
                     )
+
+                    def _reap(p=proc, f=log_f) -> None:
+                        # Wait for the run here, so a finished run_all does
+                        # not linger as a zombie the next Start mistakes for
+                        # a run in progress.
+                        p.wait()
+                        f.close()
+
+                    threading.Thread(target=_reap, daemon=True).start()
                     state_path.parent.mkdir(parents=True, exist_ok=True)
                     state_path.write_text(
                         json.dumps(
@@ -944,292 +1051,310 @@ def main() -> None:
     with tab_progress:
         st.subheader("Progress")
         render_stop_run_controls(results_root / STATE_FILE_NAME, key_prefix="progress")
-        # Find latest manifest under results_root
-        manifests = sorted(results_root.glob("*/manifest.json"), key=lambda p: p.stat().st_mtime)
-        if not manifests:
+        if latest_manifest(results_root) is None:
             st.info("No evaluation runs yet. Start one from Setup & Run.")
         else:
-            manifest_path = manifests[-1]
-            st.write(f"Tracking: `{manifest_path}`")
-            try:
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                st.warning("Manifest is being written…")
-                manifest = {"jobs": []}
-            jobs = manifest.get("jobs", [])
-            n = len(jobs) or 1
-            n_done = sum(1 for j in jobs if j.get("status") == "done")
-            n_fail = sum(1 for j in jobs if j.get("status") == "failed")
-            n_run = sum(1 for j in jobs if j.get("status") == "running")
-            st.progress(n_done / n, text=f"Scenarios completed: {n_done}/{len(jobs)}")
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Completed", n_done)
-            c2.metric("Running", n_run)
-            c3.metric("Failed", n_fail)
+            @st.fragment(run_every=PROGRESS_REFRESH_SEC)
+            def _progress_fragment() -> None:
+                # Re-reads the latest manifest each time: a run started meanwhile shows up.
+                manifest_path = latest_manifest(results_root)
+                if manifest_path is None:
+                    return
+                st.write(f"Tracking: `{manifest_path}`")
+                try:
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    st.warning("Manifest is being written…")
+                    manifest = {"jobs": []}
+                jobs = manifest.get("jobs", [])
+                n = len(jobs) or 1
+                n_done = sum(1 for j in jobs if j.get("status") == "done")
+                n_fail = sum(1 for j in jobs if j.get("status") == "failed")
+                n_run = sum(1 for j in jobs if j.get("status") == "running")
+                st.progress(n_done / n, text=f"Scenarios completed: {n_done}/{len(jobs)}")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Completed", n_done)
+                c2.metric("Running", n_run)
+                c3.metric("Failed", n_fail)
 
-            # Per-model bars
-            models = sorted({j["model_name"] for j in jobs})
-            for model in models:
-                mj = [j for j in jobs if j["model_name"] == model]
-                md = sum(1 for j in mj if j["status"] == "done")
-                st.write(model)
-                st.progress((md / len(mj)) if mj else 0.0, text=f"{md}/{len(mj)}")
+                # Per-model bars
+                models = sorted({j["model_name"] for j in jobs})
+                for model in models:
+                    mj = [j for j in jobs if j["model_name"] == model]
+                    md = sum(1 for j in mj if j["status"] == "done")
+                    st.write(model)
+                    st.progress((md / len(mj)) if mj else 0.0, text=f"{md}/{len(mj)}")
 
-            failed = [j for j in jobs if j.get("status") == "failed"]
-            if failed:
-                st.markdown("#### Failed scenarios")
-                st.dataframe(
-                    [
-                        {
-                            "scenario": j["bag_key"],
-                            "model": j["model_name"],
-                            "error": (j.get("error") or "")[:200],
-                        }
-                        for j in failed
-                    ],
-                    width="stretch",
-                )
-            running_jobs = [j for j in jobs if j.get("status") == "running"]
-            if running_jobs:
-                st.markdown("#### Currently running")
-                rows = []
-                for j in running_jobs:
-                    phase = ""
-                    total_elapsed = ""
-                    phase_elapsed = ""
-                    domain = j.get("domain_id")
-                    js_path = Path(j["output_dir"]) / "job_status.json"
-                    if js_path.is_file():
-                        try:
-                            js = json.loads(js_path.read_text(encoding="utf-8"))
-                            phase = str(js.get("phase") or "")
-                            domain = js.get("domain_id", domain)
-                            from datetime import datetime, timezone
-
-                            now = datetime.now(timezone.utc)
-                            start = js.get("start_time")
-                            if start:
-                                t0 = datetime.fromisoformat(str(start))
-                                total_elapsed = (
-                                    f"{(now - t0.astimezone(timezone.utc)).total_seconds():.0f}s"
-                                )
-                            phase_start = js.get("phase_start_time")
-                            if phase_start:
-                                t1 = datetime.fromisoformat(str(phase_start))
-                                phase_elapsed = (
-                                    f"{(now - t1.astimezone(timezone.utc)).total_seconds():.0f}s"
-                                )
-                        except (json.JSONDecodeError, ValueError):
-                            pass
-                    rows.append(
-                        {
-                            "scenario": j["bag_key"],
-                            "model": j["model_name"],
-                            "phase": phase,
-                            "total_elapsed": total_elapsed,
-                            "phase_elapsed": phase_elapsed,
-                            "domain": domain,
-                        }
+                failed = [j for j in jobs if j.get("status") == "failed"]
+                if failed:
+                    st.markdown("#### Failed scenarios")
+                    st.dataframe(
+                        [
+                            {
+                                "scenario": j["bag_key"],
+                                "model": j["model_name"],
+                                "error": (j.get("error") or "")[:200],
+                            }
+                            for j in failed
+                        ],
+                        width="stretch",
                     )
-                st.dataframe(rows, width="stretch")
+                running_jobs = [j for j in jobs if j.get("status") == "running"]
+                if running_jobs:
+                    st.markdown("#### Currently running")
+                    rows = []
+                    for j in running_jobs:
+                        phase = ""
+                        total_elapsed = ""
+                        phase_elapsed = ""
+                        domain = j.get("domain_id")
+                        js_path = Path(j["output_dir"]) / "job_status.json"
+                        if js_path.is_file():
+                            try:
+                                js = json.loads(js_path.read_text(encoding="utf-8"))
+                                phase = str(js.get("phase") or "")
+                                domain = js.get("domain_id", domain)
+                                from datetime import datetime, timezone
 
-            refresh_col, hint_col = st.columns([1, 4])
-            with refresh_col:
-                if st.button("Refresh now", key="progress_refresh_now"):
-                    st.rerun()
-            with hint_col:
-                st.caption(
-                    "Refreshes job table / phase. Live map below auto-updates every 2s."
-                )
+                                now = datetime.now(timezone.utc)
+                                start = js.get("start_time")
+                                if start:
+                                    t0 = datetime.fromisoformat(str(start))
+                                    total_elapsed = (
+                                        f"{(now - t0.astimezone(timezone.utc)).total_seconds():.0f}s"
+                                    )
+                                phase_start = js.get("phase_start_time")
+                                if phase_start:
+                                    t1 = datetime.fromisoformat(str(phase_start))
+                                    phase_elapsed = (
+                                        f"{(now - t1.astimezone(timezone.utc)).total_seconds():.0f}s"
+                                    )
+                            except (json.JSONDecodeError, ValueError):
+                                pass
+                        rows.append(
+                            {
+                                "scenario": j["bag_key"],
+                                "model": j["model_name"],
+                                "phase": phase,
+                                "total_elapsed": total_elapsed,
+                                "phase_elapsed": phase_elapsed,
+                                "domain": domain,
+                            }
+                        )
+                    st.dataframe(rows, width="stretch")
+
+
+            _progress_fragment()
+            st.caption(
+                f"Progress updates every {PROGRESS_REFRESH_SEC:.0f} s; the live map below every 2 s."
+            )
 
             @st.fragment(run_every=2.0)
             def _live_drive_fragment() -> None:
-                _render_live_drive_map(manifest_path.parent)
+                latest = latest_manifest(results_root)
+                if latest is not None:
+                    _render_live_drive_map(latest.parent)
 
             _live_drive_fragment()
 
     with tab_results:
         st.subheader("Results")
         render_stop_run_controls(results_root / STATE_FILE_NAME, key_prefix="results")
-        manifests = sorted(results_root.glob("*/manifest.json"), key=lambda p: p.stat().st_mtime)
-        if not manifests:
+        if latest_manifest(results_root) is None:
             st.info("No results yet — start an evaluation from the Setup tab.")
         else:
-            manifest_path = manifests[-1]
-            run_dir = manifest_path.parent
-            st.caption(f"Latest run: `{run_dir}`")
             @st.fragment(run_every=2.0)
             def _results_live_drive() -> None:
-                _render_live_drive_map(run_dir)
+                latest = latest_manifest(results_root)
+                if latest is not None:
+                    st.caption(f"Latest run: `{latest.parent}`")
+                    _render_live_drive_map(latest.parent)
 
             _results_live_drive()
-            try:
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                st.error(f"Could not read {manifest_path}")
-                manifest = None
 
-            if manifest:
-                jobs = manifest.get("jobs", [])
-                stop_points = collect_stop_scatter_points(jobs)
-
-                # KPI strip from completed metrics
-                n_done = sum(1 for j in jobs if j.get("status") == "done")
-                n_pass = 0
-                goal_ok = 0
-                for job in jobs:
-                    mp = Path(job.get("output_dir", "")) / "metrics.json"
-                    if not mp.is_file():
-                        continue
-                    try:
-                        m = json.loads(mp.read_text(encoding="utf-8"))
-                    except (OSError, json.JSONDecodeError):
-                        continue
-                    if m.get("pass"):
-                        n_pass += 1
-                    g = m.get("goal_stop_precision") or {}
-                    if g.get("status") == "ok":
-                        goal_ok += 1
-
-                k1, k2, k3, k4 = st.columns(4)
-                k1.metric("Jobs done", f"{n_done}/{len(jobs)}")
-                k2.metric("Pass", f"{n_pass}/{max(n_done, 1)}")
-                k3.metric("Stops on map", f"{len(stop_points)}")
-                k4.metric("Goal reached", f"{goal_ok}/{max(n_done, 1)}")
-
-                lat_tol, lon_tol = 2.0, 2.0
-                precision_rows: list[dict[str, Any]] = []
-                for job in jobs:
-                    mp = Path(job.get("output_dir", "")) / "metrics.json"
-                    if not mp.is_file():
-                        continue
-                    try:
-                        metrics = json.loads(mp.read_text(encoding="utf-8"))
-                    except (OSError, json.JSONDecodeError):
-                        continue
-                    thr = metrics.get("thresholds") or {}
-                    if isinstance(thr.get("goal_lateral_tolerance_m"), (int, float)):
-                        lat_tol = float(thr["goal_lateral_tolerance_m"])
-                    if isinstance(thr.get("goal_longitudinal_tolerance_m"), (int, float)):
-                        lon_tol = float(thr["goal_longitudinal_tolerance_m"])
-                    goal = metrics.get("goal_stop_precision", {}) or {}
-                    bag = str(job.get("bag_key") or "")
-                    precision_rows.append(
-                        {
-                            "id": bag,
-                            "scenario": bag,
-                            "model": job.get("model_name") or "",
-                            "pass": bool(metrics.get("pass")),
-                            "goal_status": goal.get("status"),
-                            "pos_m": goal.get("position_error_m"),
-                            "lat_m": goal.get("lateral_m"),
-                            "lon_m": goal.get("longitudinal_m"),
-                            "abs_lat_m": goal.get("abs_lateral_m"),
-                            "abs_lon_m": goal.get("abs_longitudinal_m"),
-                            "heading_deg": goal.get("heading_error_deg"),
-                            "samples": goal.get("sample_count"),
-                            "flagged": goal.get("flagged"),
-                        }
-                    )
-
-                # Build compact HTML table for the unified panel
-                def _cell(v: Any, nd: int = 2) -> str:
-                    if isinstance(v, (int, float)) and v == v:  # not NaN
-                        return f"{float(v):.{nd}f}"
-                    return "—"
-
-                table_rows = []
-                for r in precision_rows:
-                    cls = "pass" if r["pass"] else "fail"
-                    label = "PASS" if r["pass"] else "FAIL"
-                    table_rows.append(
-                        "<tr>"
-                        f"<td><b>{r['id']}</b></td>"
-                        f"<td>{r['scenario']}</td>"
-                        f"<td>{r['model']}</td>"
-                        f"<td class='{cls}'>{label}</td>"
-                        f"<td>{r['goal_status']}</td>"
-                        f"<td>{_cell(r['pos_m'])}</td>"
-                        f"<td>{_cell(r['lat_m'])}</td>"
-                        f"<td>{_cell(r['lon_m'])}</td>"
-                        f"<td>{_cell(r['heading_deg'])}</td>"
-                        "</tr>"
-                    )
-                precision_table = (
-                    "<table class='summary'>"
-                    "<tr><th>ID</th><th>Scenario</th><th>Model</th><th>Result</th>"
-                    "<th>Status</th><th>pos</th><th>lat</th><th>lon</th><th>yaw</th></tr>"
-                    + "".join(table_rows)
-                    + "</table>"
-                )
-                scatter = render_stop_scatter_section(
-                    stop_points,
-                    lat_tol_m=lat_tol,
-                    lon_tol_m=lon_tol,
-                    precision_table_html=precision_table if precision_rows else "",
-                )
-
-                _SCATTER_CSS = """
-<style>
-body{margin:0;background:#0b0f14;color:#e7ecf1;font-family:system-ui,sans-serif}
-.goal-stop-panel{background:#141c26;border:1px solid #2a3440;border-radius:10px;padding:14px 16px}
-.goal-stop-panel>h2{margin:0 0 6px;font-size:1.15rem}
-.scatter-card{background:#1a2330;border:1px solid #2a3440;border-radius:8px;padding:12px;margin:8px 0}
-.scatter-row{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start}
-.hint{color:#9eb4c8;font-size:12px}
-.precision-table-wrap{margin-top:12px}
-.precision-table-wrap h3{margin:8px 0 4px;font-size:14px}
-table.summary{border-collapse:collapse;font-size:12px;color:#e7ecf1;width:100%}
-table.summary th,table.summary td{border:1px solid #2a3440;padding:4px 8px;text-align:left}
-td.pass{color:#7dffa6}td.fail{color:#ffb4b4}
-.swatch{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}
-.swatch.pt-pass{background:#3dffa6}.swatch.pt-fail{background:#ff6b6b}
-.swatch.avg{background:#ffd866}.avg-row td{color:#ffd866}
-svg.stop-scatter .plot-bg{fill:#0f1419}
-svg.stop-scatter .grid{stroke:#243040}
-svg.stop-scatter .axis{stroke:#6a7f96;stroke-width:1.5}
-svg.stop-scatter .tol-box{fill:rgba(125,170,255,.08);stroke:#7daaff;stroke-dasharray:6 4}
-svg.stop-scatter .goal-arrow{fill:#c8d6e8;stroke:#7daaff;stroke-width:1.2}
-svg.stop-scatter .goal-label,.pt-id,.avg-label{fill:#e7ecf1;font-size:12px;font-weight:700}
-svg.stop-scatter .pt-pass{fill:#3dffa6;stroke:#0f1419}
-svg.stop-scatter .pt-fail{fill:#ff6b6b;stroke:#0f1419}
-svg.stop-scatter .avg-ring{fill:none;stroke:#ffd866;stroke-width:2.5}
-svg.stop-scatter .avg-arrow{fill:#ffd866;stroke:#0f1419}
-svg.stop-scatter .triad-x{stroke:#ff6b6b;fill:#ff6b6b;stroke-width:2.5}
-svg.stop-scatter .triad-y{stroke:#3dffa6;fill:#3dffa6;stroke-width:2.5}
-svg.stop-scatter .triad-origin{fill:#e7ecf1}
-svg.stop-scatter .triad-label{fill:#c9d4e0;font-size:11px}
-svg.stop-scatter .tick{fill:#6a7f96;font-size:10px}
-svg.stop-scatter .axis-title,svg.stop-scatter .axis-title-y{fill:#9eb4c8;font-size:11px;text-anchor:middle}
-</style>
-"""
-                panel_height = 720 if stop_points else 220
-                if precision_rows:
-                    panel_height = min(1100, panel_height + 40 + 28 * len(precision_rows))
-                st.components.v1.html(_SCATTER_CSS + scatter, height=panel_height, scrolling=True)
-
-                if precision_rows:
-                    with st.expander("Stop precision table (sortable)", expanded=False):
-                        st.dataframe(precision_rows, use_container_width=True, hide_index=True)
-
-                dash = run_dir / "dashboard.html"
-                # Keep HTML dashboard in sync for the expander / external browser
+            @st.fragment(run_every=RESULTS_REFRESH_SEC)
+            def _results_fragment() -> None:
+                # Re-reads the latest run each time: a run started or finished meanwhile shows up.
+                manifest_path = latest_manifest(results_root)
+                if manifest_path is None:
+                    return
+                run_dir = manifest_path.parent
                 try:
-                    build_dashboard(manifest, dash)
-                except OSError:
-                    pass
-                with st.expander("Full HTML dashboard (PASS/FAIL matrix, rates, videos)", expanded=False):
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    # Usually mid-write by the orchestrator; the next refresh reads it.
+                    st.info("Manifest is being written…")
+                    manifest = None
+
+                if manifest:
+                    jobs = manifest.get("jobs", [])
+                    stop_points = collect_stop_scatter_points(jobs)
+
+                    # KPI strip from completed metrics
+                    n_done = sum(1 for j in jobs if j.get("status") == "done")
+                    # Each job's metrics read once per refresh (KPIs and the table).
+                    job_metrics: list[tuple[dict[str, Any], dict[str, Any]]] = []
+                    for job in jobs:
+                        mp = Path(job.get("output_dir", "")) / "metrics.json"
+                        if not mp.is_file():
+                            continue
+                        try:
+                            job_metrics.append((job, json.loads(mp.read_text(encoding="utf-8"))))
+                        except (OSError, json.JSONDecodeError):
+                            continue
+                    n_pass = 0
+                    goal_ok = 0
+                    for _job, m in job_metrics:
+                        if m.get("pass"):
+                            n_pass += 1
+                        g = m.get("goal_stop_precision") or {}
+                        if g.get("status") == "ok":
+                            goal_ok += 1
+
+                    k1, k2, k3, k4 = st.columns(4)
+                    k1.metric("Jobs done", f"{n_done}/{len(jobs)}")
+                    k2.metric("Pass", f"{n_pass}/{max(n_done, 1)}")
+                    k3.metric("Stops on map", f"{len(stop_points)}")
+                    k4.metric("Goal reached", f"{goal_ok}/{max(n_done, 1)}")
+
+                    lat_tol, lon_tol = 2.0, 2.0
+                    precision_rows: list[dict[str, Any]] = []
+                    for job, metrics in job_metrics:
+                        thr = metrics.get("thresholds") or {}
+                        if isinstance(thr.get("goal_lateral_tolerance_m"), (int, float)):
+                            lat_tol = float(thr["goal_lateral_tolerance_m"])
+                        if isinstance(thr.get("goal_longitudinal_tolerance_m"), (int, float)):
+                            lon_tol = float(thr["goal_longitudinal_tolerance_m"])
+                        goal = metrics.get("goal_stop_precision", {}) or {}
+                        bag = str(job.get("bag_key") or "")
+                        precision_rows.append(
+                            {
+                                "id": bag,
+                                "scenario": bag,
+                                "model": job.get("model_name") or "",
+                                "pass": bool(metrics.get("pass")),
+                                "goal_status": goal.get("status"),
+                                "pos_m": goal.get("position_error_m"),
+                                "lat_m": goal.get("lateral_m"),
+                                "lon_m": goal.get("longitudinal_m"),
+                                "abs_lat_m": goal.get("abs_lateral_m"),
+                                "abs_lon_m": goal.get("abs_longitudinal_m"),
+                                "heading_deg": goal.get("heading_error_deg"),
+                                "samples": goal.get("sample_count"),
+                                "flagged": goal.get("flagged"),
+                            }
+                        )
+
+                    # Build compact HTML table for the unified panel
+                    def _cell(v: Any, nd: int = 2) -> str:
+                        if isinstance(v, (int, float)) and v == v:  # not NaN
+                            return f"{float(v):.{nd}f}"
+                        return "—"
+
+                    table_rows = []
+                    for r in precision_rows:
+                        cls = "pass" if r["pass"] else "fail"
+                        label = "PASS" if r["pass"] else "FAIL"
+                        table_rows.append(
+                            "<tr>"
+                            f"<td><b>{r['id']}</b></td>"
+                            f"<td>{r['scenario']}</td>"
+                            f"<td>{r['model']}</td>"
+                            f"<td class='{cls}'>{label}</td>"
+                            f"<td>{r['goal_status']}</td>"
+                            f"<td>{_cell(r['pos_m'])}</td>"
+                            f"<td>{_cell(r['lat_m'])}</td>"
+                            f"<td>{_cell(r['lon_m'])}</td>"
+                            f"<td>{_cell(r['heading_deg'])}</td>"
+                            "</tr>"
+                        )
+                    precision_table = (
+                        "<table class='summary'>"
+                        "<tr><th>ID</th><th>Scenario</th><th>Model</th><th>Result</th>"
+                        "<th>Status</th><th>pos</th><th>lat</th><th>lon</th><th>yaw</th></tr>"
+                        + "".join(table_rows)
+                        + "</table>"
+                    )
+                    scatter = render_stop_scatter_section(
+                        stop_points,
+                        lat_tol_m=lat_tol,
+                        lon_tol_m=lon_tol,
+                        precision_table_html=precision_table if precision_rows else "",
+                    )
+
+                    _SCATTER_CSS = """
+    <style>
+    body{margin:0;background:#0b0f14;color:#e7ecf1;font-family:system-ui,sans-serif}
+    .goal-stop-panel{background:#141c26;border:1px solid #2a3440;border-radius:10px;padding:14px 16px}
+    .goal-stop-panel>h2{margin:0 0 6px;font-size:1.15rem}
+    .scatter-card{background:#1a2330;border:1px solid #2a3440;border-radius:8px;padding:12px;margin:8px 0}
+    .scatter-row{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start}
+    .hint{color:#9eb4c8;font-size:12px}
+    .precision-table-wrap{margin-top:12px}
+    .precision-table-wrap h3{margin:8px 0 4px;font-size:14px}
+    table.summary{border-collapse:collapse;font-size:12px;color:#e7ecf1;width:100%}
+    table.summary th,table.summary td{border:1px solid #2a3440;padding:4px 8px;text-align:left}
+    td.pass{color:#7dffa6}td.fail{color:#ffb4b4}
+    .swatch{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}
+    .swatch.pt-pass{background:#3dffa6}.swatch.pt-fail{background:#ff6b6b}
+    .swatch.avg{background:#ffd866}.avg-row td{color:#ffd866}
+    svg.stop-scatter .plot-bg{fill:#0f1419}
+    svg.stop-scatter .grid{stroke:#243040}
+    svg.stop-scatter .axis{stroke:#6a7f96;stroke-width:1.5}
+    svg.stop-scatter .tol-box{fill:rgba(125,170,255,.08);stroke:#7daaff;stroke-dasharray:6 4}
+    svg.stop-scatter .goal-arrow{fill:#c8d6e8;stroke:#7daaff;stroke-width:1.2}
+    svg.stop-scatter .goal-label,.pt-id,.avg-label{fill:#e7ecf1;font-size:12px;font-weight:700}
+    svg.stop-scatter .pt-pass{fill:#3dffa6;stroke:#0f1419}
+    svg.stop-scatter .pt-fail{fill:#ff6b6b;stroke:#0f1419}
+    svg.stop-scatter .avg-ring{fill:none;stroke:#ffd866;stroke-width:2.5}
+    svg.stop-scatter .avg-arrow{fill:#ffd866;stroke:#0f1419}
+    svg.stop-scatter .triad-x{stroke:#ff6b6b;fill:#ff6b6b;stroke-width:2.5}
+    svg.stop-scatter .triad-y{stroke:#3dffa6;fill:#3dffa6;stroke-width:2.5}
+    svg.stop-scatter .triad-origin{fill:#e7ecf1}
+    svg.stop-scatter .triad-label{fill:#c9d4e0;font-size:11px}
+    svg.stop-scatter .tick{fill:#6a7f96;font-size:10px}
+    svg.stop-scatter .axis-title,svg.stop-scatter .axis-title-y{fill:#9eb4c8;font-size:11px;text-anchor:middle}
+    </style>
+    """
+                    panel_height = 720 if stop_points else 220
+                    if precision_rows:
+                        panel_height = min(1100, panel_height + 40 + 28 * len(precision_rows))
+                    st.components.v1.html(_SCATTER_CSS + scatter, height=panel_height, scrolling=True)
+
+                    if precision_rows:
+                        with st.expander("Stop precision table (sortable)", expanded=False):
+                            st.dataframe(precision_rows, use_container_width=True, hide_index=True)
+
+                    dash = run_dir / "dashboard.html"
+                    # Keep the HTML dashboard in sync, rebuilt only when the run's
+                    # results changed: the fragment reruns every few seconds.
+                    sig = results_signature(manifest_path, jobs)
+                    if st.session_state.get("_dashboard_sig") != sig or not dash.is_file():
+                        try:
+                            build_dashboard(manifest, dash)
+                            st.session_state["_dashboard_sig"] = sig
+                        except OSError:
+                            pass
+                    st.markdown("#### Dashboard (PASS/FAIL matrix, rates, videos)")
                     if dash.is_file():
+                        port = results_http_port(str(results_root.resolve()))
+                        rel = dash.resolve().relative_to(results_root.resolve()).as_posix()
+                        # The page follows the GUI's theme, not the OS one.
+                        theme = getattr(st.context.theme, "type", None)
+                        url = f"http://127.0.0.1:{port}/{rel}?host=streamlit"
+                        if theme in ("light", "dark"):
+                            url += f"&theme={theme}"
                         st.caption(
                             "Same run as above — scenario × model matrix and live progress. "
-                            f"File: `{dash}`"
+                            f"File: `{dash}` · [open in a new tab]({url}) "
+                            "(served from this machine; the browser must run here too)"
                         )
-                        st.iframe(dash, height=900)
+                        st.iframe(dashboard_frame_html(url), height="content")
                     else:
                         st.info("dashboard.html not found for this run.")
 
-                if st.button("Refresh results", key="results_refresh"):
-                    st.rerun()
+            _results_fragment()
+            st.caption(f"Results update every {RESULTS_REFRESH_SEC:.0f} s; the live map every 2 s.")
 
 
 

@@ -22,6 +22,7 @@ import argparse
 import math
 import os
 import subprocess
+from typing import Any
 import sys
 import threading
 import time
@@ -41,6 +42,7 @@ from autoware_adapi_v1_msgs.srv import SetRoutePoints
 from geometry_msgs.msg import Pose
 from geometry_msgs.msg import PoseWithCovariance
 from geometry_msgs.msg import PoseWithCovarianceStamped
+from geometry_msgs.msg import TwistStamped
 from nav_msgs.msg import Odometry
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
@@ -99,6 +101,35 @@ def _yaw_from_quaternion(orientation) -> float:
     siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
     cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
     return math.atan2(siny_cosp, cosy_cosp)
+
+
+# Goal pull-back distances tried when the mission planner rejects a goal.
+#
+# Start small and grow geometrically. These rejections are usually marginal, not
+# gross: measured at 八間通り入口 the ERGA bus overhung the lane by 7 cm² at its
+# front-left corner, and 0.15 m of pull-back cleared it. The goal was already within
+# 0.03 m of the lane centerline, so it was not a centring error — the lane is simply
+# barely wider than the 2.90 m body there. Opening with metres would move the goal
+# ~13x further than needed and quietly change where the run is scored.
+#
+# Longitudinal rather than lateral on purpose: 0.02 m sideways also clears it, but
+# which side to move depends on which corner clips, and shifting a bus goal off the
+# kerb changes what the stop means. Stopping 0.25 m short of it does not.
+DEFAULT_GOAL_BACKOFF_STEPS_M = [0.25, 0.5, 1.0, 2.0, 4.0]
+
+# How far a map stop point may sit from the bag's own start/goal and still be
+# substituted for it when routing fails. Negative = no limit (the default).
+#
+# Substituting a distant stop is a legitimate recovery — the ego is put at a place it
+# can actually route from and the drive continues — provided the run is then scored
+# against that goal rather than the bag's. setup_route_for_bag reports the accepted
+# goal back as effective_goal_xy so the caller can do exactly that. Set a positive
+# limit only when the scenario must stay within a radius of the recorded one.
+DEFAULT_STOP_FALLBACK_MAX_DIST_M = -1.0
+# Wall-clock cap on one whole route-setting call, recovery ladder included. 0 or
+# negative disables it. timeout_sec only bounds a single attempt; without a cap on
+# the product, one unroutable goal burned 581 s inside a single advance_route.
+DEFAULT_ROUTE_TOTAL_TIMEOUT_SEC = 180.0
 
 
 def offset_pose_longitudinal(pose: Pose, offset_m: float) -> Pose:
@@ -455,9 +486,35 @@ def format_service_diagnosis() -> str:
     return "\n".join(lines)
 
 
+def _fresh_context() -> Any:
+    """A private ROS context for one call.
+
+    rclpy's default context cannot be initialized twice, and it is shut down by the
+    signal handler rclpy installs — so a single Ctrl+C leaves every later call in
+    this process failing with "Context.init() must only be called once", which says
+    nothing about what actually happened. Observed on a job whose teardown ran after
+    an interrupt: the leg it was routing reported a route-setup exception rather than
+    the cancellation it was in the middle of.
+
+    Owning the context also keeps these calls independent of whatever else in the
+    process is using ROS.
+    """
+    context = rclpy.Context()
+    rclpy.init(context=context)
+    return context
+
+
+def _close_context(context: Any) -> None:
+    try:
+        if context is not None and context.ok():
+            rclpy.shutdown(context=context)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class RouteSetupNode(Node):
-    def __init__(self) -> None:
-        super().__init__("diffusion_planner_batch_eval_route_setup")
+    def __init__(self, context: Any = None) -> None:
+        super().__init__("diffusion_planner_batch_eval_route_setup", context=context)
         durable_qos = QoSProfile(
             depth=1,
             reliability=QoSReliabilityPolicy.RELIABLE,
@@ -474,6 +531,23 @@ class RouteSetupNode(Node):
         self.operation_mode: int | None = None
         self.autoware_control_enabled = False
         self.autonomous_mode_available = False
+        # Distances to pull the goal back along its own heading when the mission
+        # planner rejects it. See _set_route_with_retry.
+        self.goal_backoff_steps_m: list[float] = []
+        self._in_goal_backoff = False
+        self.stop_fallback_max_dist_m: float = DEFAULT_STOP_FALLBACK_MAX_DIST_M
+        # The goal the mission planner actually accepted. It is not always the goal
+        # taken from the bag: snapping, the stop fallback and the backoff each move
+        # it. Whatever scores the run has to be measured against this pose, not the
+        # one that was merely requested.
+        self.effective_goal_pose: Pose | None = None
+        # Wall-clock deadline for one whole route-setting operation. timeout_sec
+        # bounds a single attempt, and the recovery ladder multiplies it: attempts x
+        # backends x backoff steps x stop fallbacks. Measured on a leg whose goal was
+        # unroutable, that came to 581 s of retrying inside one advance_route call —
+        # ten minutes of an evaluation run spent re-asking a question already
+        # answered. The deadline bounds the product, not a factor of it.
+        self._route_deadline: float | None = None
 
         self.create_subscription(
             AdapiRouteState, ADAPI_ROUTE_STATE, self._on_adapi_route_state, durable_qos
@@ -496,6 +570,12 @@ class RouteSetupNode(Node):
 
         self.initial_pose_pub = self.create_publisher(
             PoseWithCovarianceStamped, "/initialpose3d", 1
+        )
+        # simple_planning_simulator's own input, unremapped, so it keeps the
+        # node's namespace. Used to give a stalled ego its motion back — see
+        # nudge_ego_speed().
+        self.initial_twist_pub = self.create_publisher(
+            TwistStamped, "/simulation/input/initialtwist", 1
         )
 
         self.adapi_clear_route_client = self.create_client(
@@ -556,7 +636,7 @@ class RouteSetupNode(Node):
         """Mission planner routes from /localization/kinematic_state, not /initialpose."""
         deadline = time.time() + timeout_sec
         last_log = 0.0
-        while time.time() < deadline and rclpy.ok():
+        while time.time() < deadline and self.context.ok():
             self._spin_until(time.time() + 0.5)
             if self.ego_pose is None:
                 continue
@@ -593,11 +673,11 @@ class RouteSetupNode(Node):
         self.autonomous_mode_available = msg.is_autonomous_mode_available
 
     def _spin_until(self, deadline: float) -> None:
-        while time.time() < deadline and rclpy.ok():
+        while time.time() < deadline and self.context.ok():
             if self._executor_spinning:
                 time.sleep(0.1)
             else:
-                rclpy.spin_once(self, timeout_sec=0.1)
+                self._spin_executor_for_self().spin_once(timeout_sec=0.1)
 
     def _wait_future(self, future, timeout_sec: float) -> bool:
         """Wait for a service future without fighting the background executor."""
@@ -609,11 +689,11 @@ class RouteSetupNode(Node):
             time.sleep(0.15)
 
         try:
-            while not future.done() and time.time() < deadline and rclpy.ok():
+            while not future.done() and time.time() < deadline and self.context.ok():
                 if self._executor is not None:
                     self._executor.spin_once(timeout_sec=0.1)
                 else:
-                    rclpy.spin_once(self, timeout_sec=0.1)
+                    self._spin_executor_for_self().spin_once(timeout_sec=0.1)
         finally:
             if paused_executor:
                 self._executor_pause.clear()
@@ -659,7 +739,7 @@ class RouteSetupNode(Node):
             self._spin_until(time.time() + 2.0)
 
         last_log = 0.0
-        while time.time() < deadline and rclpy.ok():
+        while time.time() < deadline and self.context.ok():
             self._spin_until(time.time() + 0.5)
             stopped = self.speed_mps <= stop_speed_mps
             not_auto = self.operation_mode != OperationModeState.AUTONOMOUS
@@ -687,7 +767,7 @@ class RouteSetupNode(Node):
     def _wait_rclpy_client(self, client, label: str, timeout_sec: float = 90.0) -> bool:
         deadline = time.time() + timeout_sec
         last_log = 0.0
-        while time.time() < deadline and rclpy.ok():
+        while time.time() < deadline and self.context.ok():
             if self._rclpy_client_ready(client):
                 return True
             if client.wait_for_service(timeout_sec=2.0):
@@ -795,7 +875,7 @@ class RouteSetupNode(Node):
         last_log = 0.0
         cli_adapi_streak = 0
         cli_mission_streak = 0
-        while time.time() < deadline and rclpy.ok():
+        while time.time() < deadline and self.context.ok():
             adapi_ready = (
                 self.adapi_clear_route_client.wait_for_service(timeout_sec=5.0)
                 and self.adapi_set_route_client.wait_for_service(timeout_sec=5.0)
@@ -905,7 +985,7 @@ class RouteSetupNode(Node):
         """Brief rclpy discovery attempt; proceed on CLI visibility when discovery lags."""
         deadline = time.time() + timeout_sec
         cli_visible = service_name in set(list_ros_services())
-        while time.time() < deadline and rclpy.ok():
+        while time.time() < deadline and self.context.ok():
             if client.wait_for_service(timeout_sec=1.0):
                 return True
             if service_name in set(list_ros_services()):
@@ -936,7 +1016,7 @@ class RouteSetupNode(Node):
         self, predicate, timeout_sec: float, poll_label: str
     ) -> bool:
         deadline = time.time() + timeout_sec
-        while time.time() < deadline and rclpy.ok():
+        while time.time() < deadline and self.context.ok():
             self._spin_until(time.time() + 0.5)
             if predicate():
                 return True
@@ -986,20 +1066,61 @@ class RouteSetupNode(Node):
 
         return False, "localization_initialize_service_unavailable"
 
+    def nudge_ego_speed(self, speed_mps: float) -> tuple[bool, str]:
+        """Give a stalled ego its speed back, in place.
+
+        Repositioning could not break a stall that StopPointFixer was holding,
+        and the reason is structural: the plugin only acts on a *stopped* ego, so
+        an ego moved 5 m and left at rest satisfies its trigger again the instant
+        it lands. Motion is the only thing it stands down for, and the simulator
+        takes one directly.
+
+        on_initialtwist re-applies the simulator's stored initial pose, so the
+        pose must be re-published first or the ego snaps back to wherever it was
+        last initialized. Callers reach this through _initialize_localization,
+        which has just done exactly that.
+        """
+        if self.ego_pose is None:
+            return False, "nudge_failed: no ego pose"
+        msg = TwistStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = "base_link"
+        msg.twist.linear.x = float(speed_mps)
+        self.initial_twist_pub.publish(msg)
+        self._spin_until(time.time() + 0.5)
+        reached = self.speed_mps if self.speed_mps is not None else float("nan")
+        return True, f"nudged_to_{float(speed_mps):.1f}mps (ego now {reached:.2f} m/s)"
+
     def _initialize_localization(self, pose: Pose, timeout_sec: float) -> tuple[bool, str]:
         deadline = time.time() + timeout_sec
         initial_pose_msg = self._make_initial_pose_msg(pose)
 
+        # Keep asking the service. It is what actually initializes the simulator:
+        # when the call lands, simple_planning_simulator starts publishing
+        # kinematic_state; when it does not, publishing /initialpose3d alone leaves
+        # the simulator sitting in "waiting initialization..." until the budget runs
+        # out. Observed under two concurrent workers, where the service was simply
+        # not up yet at the instant of the single attempt this used to make.
         called, init_message = self._call_localization_initialize(initial_pose_msg)
         if called:
             self.get_logger().info(f"Localization initialized via {init_message}")
         else:
             self.get_logger().warn(
-                f"{init_message}; publishing /initialpose3d only"
+                f"{init_message}; will keep retrying while publishing /initialpose3d"
             )
 
         last_log = 0.0
-        while time.time() < deadline and rclpy.ok():
+        last_service_try = time.time()
+        while time.time() < deadline and self.context.ok():
+            if not called and time.time() - last_service_try >= 5.0:
+                last_service_try = time.time()
+                called, init_message = self._call_localization_initialize(
+                    initial_pose_msg
+                )
+                if called:
+                    self.get_logger().info(
+                        f"Localization initialized via {init_message} (on retry)"
+                    )
             self.initial_pose_pub.publish(initial_pose_msg)
             self._spin_until(time.time() + 0.5)
             if self.ego_pose is not None:
@@ -1123,6 +1244,39 @@ class RouteSetupNode(Node):
             return True, f"route_set_via_{via}{waypoint_note} (verified_by_state_cli)"
         return False, f"route_set_timeout ({self._route_state_summary()})"
 
+    def _spin_executor_for_self(self) -> Any:
+        """An executor on this node's own context.
+
+        rclpy.spin_once(node) reaches for the *global* executor, which is built on
+        the default context — with an owned context it raises before a single
+        message is spun, and the caller sees "AttributeError: __enter__" instead of
+        whatever it was waiting for.
+        """
+        existing = getattr(self, "_owned_executor", None)
+        if existing is None:
+            from rclpy.executors import SingleThreadedExecutor
+
+            existing = SingleThreadedExecutor(context=self.context)
+            existing.add_node(self)
+            self._owned_executor = existing
+        return existing
+
+    def _route_budget_left(self) -> float:
+        """Seconds left for this route-setting operation (inf when unbounded)."""
+        if self._route_deadline is None:
+            return float("inf")
+        return self._route_deadline - time.time()
+
+    def _route_budget_spent(self, what: str) -> bool:
+        left = self._route_budget_left()
+        if left > 0.0:
+            return False
+        self.get_logger().warn(
+            f"Route budget exhausted; giving up before {what}. Raise "
+            "route_total_timeout_sec if this goal genuinely needs longer."
+        )
+        return True
+
     def _set_route_with_retry(
         self,
         initial_pose: Pose,
@@ -1139,8 +1293,14 @@ class RouteSetupNode(Node):
                 "mission planner may reject the route."
             )
 
+        # Only genuinely transient failures belong here. "The planned route is empty"
+        # is the mission planner's verdict on this exact goal — it will say the same
+        # thing every time, so re-sending the identical request three times just
+        # burns 30 s. It used to be the only recovery available; now the backoff
+        # ladder and the stop/start fallbacks retry with a *different* goal, and each
+        # of them multiplies by this inner loop. One rejected leg was costing about
+        # ten minutes: 3 attempts x 2 backends x 5 backoff steps x 2 fallback paths.
         retriable_errors = (
-            "planned route is empty",
             "set_route_no_response",
             "set_route_service_unavailable",
             "route_set_timeout",
@@ -1148,6 +1308,8 @@ class RouteSetupNode(Node):
         )
         last_error = "set_route_unknown"
         for attempt in range(3):
+            if self._route_budget_spent(f"set_route attempt {attempt + 1}/3"):
+                return False, f"route_budget_exhausted: {last_error}"
             if attempt > 0:
                 self.get_logger().info(f"Retrying set_route (attempt {attempt + 1}/3)...")
                 self._clear_route_if_needed(timeout_sec)
@@ -1156,6 +1318,7 @@ class RouteSetupNode(Node):
 
             ok, message = self._set_route(goal_pose, timeout_sec, waypoints=waypoints)
             if ok:
+                self.effective_goal_pose = goal_pose
                 return True, f"{pose_message}; {message}"
             last_error = message
             if not any(err in message for err in retriable_errors):
@@ -1182,6 +1345,44 @@ class RouteSetupNode(Node):
             if ok:
                 return True, message
             last_error = message
+
+        # Last resort: pull the goal back along its own heading and try again.
+        #
+        # A goal sampled at a bus stop is where the vehicle actually parked, but the
+        # mission planner also requires the *whole ego footprint* to sit inside the
+        # lane polygon (is_goal_valid -> "Goal's footprint exceeds lane!"). A long
+        # vehicle in a tight stop lanelet can miss that by centimetres and the route
+        # comes back empty, with the same message a genuinely unroutable goal gives.
+        # Retrying the identical goal cannot fix it; a short pull-back along the lane
+        # usually can, and costs nothing when the goal was fine for other reasons.
+        if self.goal_backoff_steps_m and not self._in_goal_backoff:
+            self._in_goal_backoff = True
+            try:
+                for back in self.goal_backoff_steps_m:
+                    step = abs(float(back))
+                    if step <= 0.0:
+                        continue
+                    if self._route_budget_spent(f"goal backoff {step:.2f}m"):
+                        break
+                    shifted = offset_pose_longitudinal(goal_pose, -step)
+                    self.get_logger().warn(
+                        f"Route rejected ({last_error}); retrying with goal pulled "
+                        f"back {step:g} m along the lane"
+                    )
+                    self._clear_route_if_needed(timeout_sec)
+                    time.sleep(1.0)
+                    ok, message = self._set_route_with_retry(
+                        initial_pose,
+                        shifted,
+                        timeout_sec,
+                        waypoints=waypoints,
+                        allow_backend_switch=allow_backend_switch,
+                    )
+                    if ok:
+                        return True, f"{message}; goal_backoff={step:g}m"
+                    last_error = message
+            finally:
+                self._in_goal_backoff = False
 
         pose_hint = (
             f" start={self._format_pose_xy(initial_pose)}"
@@ -1228,6 +1429,22 @@ class RouteSetupNode(Node):
                 else "goal_from_bag; "
             )
             return True, f"{goal_note}{message}"
+
+        if (
+            stop_point_goal_fallback
+            and stops
+            and goal_stop is not None
+            and not goal_snapped
+            and goal_dist >= stop_point_goal_min_dist_m
+            and self.stop_fallback_max_dist_m >= 0.0
+            and goal_dist > self.stop_fallback_max_dist_m
+        ):
+            return False, (
+                f"goal_from_bag; {message}; stop_fallback_skipped: nearest stop "
+                f"'{goal_stop.name}' is {goal_dist:.1f}m from the bag goal "
+                f"(limit {self.stop_fallback_max_dist_m:.1f}m) — routing to it would "
+                f"evaluate a different scenario"
+            )
 
         if (
             stop_point_goal_fallback
@@ -1503,6 +1720,14 @@ class RouteSetupNode(Node):
                 f"{route_failure_message}; "
                 f"start_stop_skipped: bag_start_already_at_{start_stop.name}({start_dist:.1f}m)"
             )
+        if self.stop_fallback_max_dist_m >= 0.0 and start_dist > self.stop_fallback_max_dist_m:
+            # Re-spawning the ego at a distant stop does not recover the bag's
+            # scenario, it replaces it.
+            return False, (
+                f"{route_failure_message}; start_stop_skipped: nearest stop "
+                f"'{start_stop.name}' is {start_dist:.1f}m from the bag start "
+                f"(limit {self.stop_fallback_max_dist_m:.1f}m)"
+            )
 
         _, goal_stop, _, goal_snapped = resolve_routing_goal(
             bag_goal_pose, stops, stop_point_snap_goal_m
@@ -1517,6 +1742,21 @@ class RouteSetupNode(Node):
             f"Bag start route failed; re-localizing at map stop '{start_stop.name}' "
             f"({start_dist:.1f}m from bag start)"
         )
+
+        # The budget exists to stop the same failing request being retried
+        # forever; the start fallback is a different strategy, and it kept
+        # arriving with the budget already burned by those retries — observed as
+        # "start_fallback_route_failed: route_budget_exhausted: set_route_unknown"
+        # on a start the fallback had rescued in an earlier run. Grant it one
+        # full attempt: extend the deadline once, to at most 90 s from here.
+        if self._route_deadline is not None:
+            reserve = time.time() + 90.0
+            if self._route_deadline < reserve:
+                self.get_logger().info(
+                    "Start fallback granted a 90s reserve beyond the exhausted "
+                    "route budget (one-time)"
+                )
+                self._route_deadline = reserve
 
         clear_ok, clear_message = self._clear_route_if_needed(timeout_sec)
         if not clear_ok:
@@ -1571,6 +1811,19 @@ class RouteSetupNode(Node):
         deadline = time.time() + timeout_sec
         self._spin_until(time.time() + 1.0)
 
+        # None is "not heard yet", not "not set": the route-state topics are
+        # latched, but a fresh context under load can take several seconds to
+        # receive them, and one second of spinning concluded
+        # "route_not_set_before_engage (adapi=None, mission=None)" while the
+        # drive loop was simultaneously printing state=SET for the same route.
+        # Wait for an actual state before concluding anything from it.
+        while (
+            self.adapi_route_state is None
+            and self.mission_route_state is None
+            and time.time() < deadline
+        ):
+            self._spin_until(time.time() + 0.5)
+
         if not self._route_is_verified():
             return False, (
                 f"route_not_set_before_engage ({self._route_state_summary()})"
@@ -1581,7 +1834,7 @@ class RouteSetupNode(Node):
 
         last_failure = "autonomous_mode_not_available_yet"
         last_log = 0.0
-        while time.time() < deadline and rclpy.ok():
+        while time.time() < deadline and self.context.ok():
             self._spin_until(time.time() + 0.5)
 
             if self.operation_mode == OperationModeState.AUTONOMOUS:
@@ -1665,15 +1918,21 @@ class RouteSetupNode(Node):
         start_pose_stop_fallback: bool = False,
         start_pose_stop_min_dist_m: float = 1.0,
         goal_pose: Pose | None = None,
+        goal_backoff_steps_m: list[float] | None = None,
+        stop_fallback_max_dist_m: float = DEFAULT_STOP_FALLBACK_MAX_DIST_M,
     ) -> tuple[bool, str]:
         route_order = route_stop_order or DEFAULT_HIRATSUKA_ROUTE_ORDER
+        self.stop_fallback_max_dist_m = float(stop_fallback_max_dist_m)
+        self.goal_backoff_steps_m = list(
+            DEFAULT_GOAL_BACKOFF_STEPS_M if goal_backoff_steps_m is None else goal_backoff_steps_m
+        )
 
-        executor = MultiThreadedExecutor(num_threads=4)
+        executor = MultiThreadedExecutor(num_threads=4, context=self.context)
         executor.add_node(self)
         stop_spin = threading.Event()
 
         def _spin_executor() -> None:
-            while not stop_spin.is_set() and rclpy.ok():
+            while not stop_spin.is_set() and self.context.ok():
                 if self._executor_pause.is_set():
                     time.sleep(0.05)
                     continue
@@ -1855,55 +2114,50 @@ class RouteSetupNode(Node):
 
 def verify_route_is_set(timeout_sec: float = 10.0) -> tuple[bool, str]:
     """Wait until AD API or mission planner reports route SET."""
-    if not rclpy.ok():
-        rclpy.init()
-
-    node = RouteSetupNode()
+    context = _fresh_context()
+    node = RouteSetupNode(context=context)
     try:
         deadline = time.time() + timeout_sec
-        while time.time() < deadline and rclpy.ok():
+        while time.time() < deadline and context.ok():
             node._spin_until(time.time() + 0.5)
             if node._route_is_verified():
                 return True, f"route_verified ({node._route_state_summary()})"
         return False, f"route_not_set ({node._route_state_summary()})"
     finally:
         node.destroy_node()
+        _close_context(context)
 
 
 def disengage_for_next_bag(timeout_sec: float = 25.0) -> tuple[bool, str]:
     """Disengage Auto and wait for stop so the next bag can clear/set route."""
-    if not rclpy.ok():
-        rclpy.init()
-
-    node = RouteSetupNode()
+    context = _fresh_context()
+    node = RouteSetupNode(context=context)
     try:
         return node._disengage_and_wait_stopped(timeout_sec)
     finally:
         node.destroy_node()
+        _close_context(context)
 
 
 def engage_autonomous_mode(timeout_sec: float = 60.0) -> tuple[bool, str]:
     """Call AD API to switch to Auto. Retry until timeout (modules often need perception first)."""
-    if not rclpy.ok():
-        rclpy.init()
-
-    node = RouteSetupNode()
+    context = _fresh_context()
+    node = RouteSetupNode(context=context)
     try:
         return node._engage_autonomous(timeout_sec)
     finally:
         node.destroy_node()
+        _close_context(context)
 
 
 def wait_for_autonomous_mode(timeout_sec: float = 60.0) -> tuple[bool, str]:
     """Wait until /api/operation_mode/state reports AUTONOMOUS (e.g. manual RViz engage)."""
-    if not rclpy.ok():
-        rclpy.init()
-
-    node = RouteSetupNode()
+    context = _fresh_context()
+    node = RouteSetupNode(context=context)
     try:
         deadline = time.time() + timeout_sec
         last_log = 0.0
-        while time.time() < deadline and rclpy.ok():
+        while time.time() < deadline and context.ok():
             node._spin_until(time.time() + 0.5)
             if node.operation_mode == OperationModeState.AUTONOMOUS:
                 return True, "autonomous_engaged"
@@ -1917,6 +2171,7 @@ def wait_for_autonomous_mode(timeout_sec: float = 60.0) -> tuple[bool, str]:
         return False, "wait_autonomous_timeout"
     finally:
         node.destroy_node()
+        _close_context(context)
 
 
 def setup_route_for_bag(
@@ -1937,13 +2192,19 @@ def setup_route_for_bag(
     start_pose_stop_fallback: bool = False,
     start_pose_stop_min_dist_m: float = 1.0,
     goal_pose: Pose | None = None,
+    goal_backoff_steps_m: list[float] | None = None,
+    stop_fallback_max_dist_m: float = DEFAULT_STOP_FALLBACK_MAX_DIST_M,
+    route_total_timeout_sec: float = DEFAULT_ROUTE_TOTAL_TIMEOUT_SEC,
 ) -> tuple[bool, str]:
-    if not rclpy.ok():
-        rclpy.init()
-
-    node = RouteSetupNode()
+    context = _fresh_context()
+    node = RouteSetupNode(context=context)
+    node._route_deadline = (
+        time.time() + float(route_total_timeout_sec)
+        if float(route_total_timeout_sec) > 0.0
+        else None
+    )
     try:
-        return node.setup_for_bag(
+        ok, message = node.setup_for_bag(
             bag_path,
             timeout_sec=timeout_sec,
             min_move_m=min_move_m,
@@ -1960,28 +2221,49 @@ def setup_route_for_bag(
             route_stop_order=route_stop_order,
             start_pose_stop_fallback=start_pose_stop_fallback,
             start_pose_stop_min_dist_m=start_pose_stop_min_dist_m,
+            goal_backoff_steps_m=goal_backoff_steps_m,
+            stop_fallback_max_dist_m=stop_fallback_max_dist_m,
             goal_pose=goal_pose,
         )
+        # Report the goal the planner accepted, in coordinates. Snapping, the stop
+        # fallback and the backoff all move the goal, and whatever scores the run has
+        # to be measured against where the ego was actually sent — not where it was
+        # first asked to go.
+        if ok and node.effective_goal_pose is not None:
+            g = node.effective_goal_pose
+            message = (
+                f"effective_goal_xy={g.position.x:.4f},{g.position.y:.4f},"
+                f"{_yaw_from_quaternion(g.orientation):.6f}; {message}"
+            )
+        return ok, message
     finally:
         node.destroy_node()
+        _close_context(context)
 
 
 def shift_ego_longitudinal(
     offset_m: float,
     *,
     timeout_sec: float = 30.0,
+    nudge_speed_mps: float = 0.0,
 ) -> tuple[bool, str]:
-    """Reinitialize planning-simulator ego along its current heading."""
-    if not rclpy.ok():
-        rclpy.init()
+    """Reinitialize planning-simulator ego along its current heading.
 
-    node = RouteSetupNode()
-    executor = MultiThreadedExecutor()
+    ``nudge_speed_mps`` leaves the ego moving instead of at rest. Moving it
+    without it was not enough to break a StopPointFixer stall: that plugin only
+    replaces a plan when the ego is stopped, so an ego set down at rest re-armed
+    the trigger on the very next cycle and the shift bought nothing. A speed
+    above its 0.25 m/s threshold makes it stand down, the model's real plan
+    reaches the controller, and the vehicle drives itself out.
+    """
+    context = _fresh_context()
+    node = RouteSetupNode(context=context)
+    executor = MultiThreadedExecutor(context=context)
     executor.add_node(node)
     stop_spin = threading.Event()
 
     def _spin_executor() -> None:
-        while not stop_spin.is_set() and rclpy.ok():
+        while not stop_spin.is_set() and context.ok():
             if node._executor_pause.is_set():
                 time.sleep(0.05)
                 continue
@@ -1994,7 +2276,7 @@ def shift_ego_longitudinal(
 
     try:
         pose_deadline = time.time() + min(timeout_sec, 10.0)
-        while node.ego_pose is None and time.time() < pose_deadline and rclpy.ok():
+        while node.ego_pose is None and time.time() < pose_deadline and context.ok():
             time.sleep(0.1)
         if node.ego_pose is None:
             return False, "stuck_reposition_failed: no ego pose"
@@ -2010,6 +2292,11 @@ def shift_ego_longitudinal(
         ok, message = node._initialize_localization(shifted, timeout_sec)
         if not ok:
             return False, f"stuck_reposition_failed: {message}"
+        if nudge_speed_mps > 0.0:
+            nudged, nudge_message = node.nudge_ego_speed(nudge_speed_mps)
+            message = f"{message}; {nudge_message}"
+            if not nudged:
+                node.get_logger().warn(f"speed nudge did not take: {nudge_message}")
         return True, f"stuck_repositioned_{float(offset_m):.1f}m: {message}"
     finally:
         node._executor_spinning = False
@@ -2018,6 +2305,7 @@ def shift_ego_longitudinal(
         spin_thread.join(timeout=2.0)
         executor.remove_node(node)
         node.destroy_node()
+        _close_context(context)
 
 
 def advance_route_to_goal(
@@ -2032,18 +2320,28 @@ def advance_route_to_goal(
     stop_point_goal_min_dist_m: float = 0.5,
     stop_point_waypoint_fallback: bool = True,
     route_stop_order: list[str] | None = None,
+    goal_backoff_steps_m: list[float] | None = None,
+    stop_fallback_max_dist_m: float = DEFAULT_STOP_FALLBACK_MAX_DIST_M,
+    route_total_timeout_sec: float = DEFAULT_ROUTE_TOTAL_TIMEOUT_SEC,
 ) -> tuple[bool, str]:
     """Clear current route (after ARRIVED) and set a new goal without re-localizing."""
-    if not rclpy.ok():
-        rclpy.init()
-
-    node = RouteSetupNode()
-    executor = MultiThreadedExecutor()
+    context = _fresh_context()
+    node = RouteSetupNode(context=context)
+    node._route_deadline = (
+        time.time() + float(route_total_timeout_sec)
+        if float(route_total_timeout_sec) > 0.0
+        else None
+    )
+    node.stop_fallback_max_dist_m = float(stop_fallback_max_dist_m)
+    node.goal_backoff_steps_m = list(
+        DEFAULT_GOAL_BACKOFF_STEPS_M if goal_backoff_steps_m is None else goal_backoff_steps_m
+    )
+    executor = MultiThreadedExecutor(context=context)
     executor.add_node(node)
     stop_spin = threading.Event()
 
     def _spin_executor() -> None:
-        while not stop_spin.is_set() and rclpy.ok():
+        while not stop_spin.is_set() and context.ok():
             if node._executor_pause.is_set():
                 time.sleep(0.05)
                 continue
@@ -2085,7 +2383,19 @@ def advance_route_to_goal(
         )
         if not ok:
             return False, f"advance_set_failed: {route_message}"
-        return True, f"advance_ok: {route_message}"
+        message = f"advance_ok: {route_message}"
+        # Same contract as setup_route_for_bag: report the pose the planner actually
+        # accepted, in coordinates. Advancing snaps to map stops and applies the same
+        # backoff, so without this the caller keeps watching the goal it asked for
+        # while the ego drives to the one that was accepted, and the leg is recorded
+        # as never arrived after driving correctly.
+        if node.effective_goal_pose is not None:
+            g = node.effective_goal_pose
+            message = (
+                f"effective_goal_xy={g.position.x:.4f},{g.position.y:.4f},"
+                f"{_yaw_from_quaternion(g.orientation):.6f}; {message}"
+            )
+        return True, message
     finally:
         node._executor_spinning = False
         node._executor = None
@@ -2093,6 +2403,17 @@ def advance_route_to_goal(
         spin_thread.join(timeout=2.0)
         executor.remove_node(node)
         node.destroy_node()
+        _close_context(context)
+
+
+def _parse_backoff_steps(raw: str | None) -> list[float] | None:
+    """None = package default; empty string = disabled; else comma-separated metres."""
+    if raw is None:
+        return None
+    raw = raw.strip()
+    if not raw:
+        return []
+    return [float(v) for v in raw.split(",") if v.strip()]
 
 
 def main() -> None:
@@ -2142,6 +2463,20 @@ def main() -> None:
         help="If routing fails, re-localize at nearest map stop to bag start and retry",
     )
     parser.add_argument(
+        "--stop-fallback-max-dist-m",
+        type=float,
+        default=DEFAULT_STOP_FALLBACK_MAX_DIST_M,
+        help="How far a map stop may be from the bag start/goal and still replace it "
+             "on routing failure (default: %(default)s = no limit; 0 disables it)",
+    )
+    parser.add_argument(
+        "--goal-backoff-steps",
+        default=None,
+        help="Comma-separated metres to pull the goal back on rejection "
+             "(default: %s; empty string disables)"
+             % ",".join(f"{v:g}" for v in DEFAULT_GOAL_BACKOFF_STEPS_M),
+    )
+    parser.add_argument(
         "--stop-points-csv",
         default="stop_points.csv",
         help="Stop points filename inside map_path (default: stop_points.csv)",
@@ -2161,6 +2496,8 @@ def main() -> None:
         backend_preference=args.backend,
         auto_engage=not args.no_auto_engage,
         start_pose_offset_m=args.start_offset_m,
+        goal_backoff_steps_m=_parse_backoff_steps(args.goal_backoff_steps),
+        stop_fallback_max_dist_m=args.stop_fallback_max_dist_m,
         map_path=args.map_path,
         stop_point_goal_fallback=args.stop_point_fallback,
         stop_points_csv=args.stop_points_csv,
